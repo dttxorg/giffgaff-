@@ -133,14 +133,18 @@ async def delete_customer(customer_id: int):
 
 async def update_customer_moemail(customer_id: int, moemail_id: str,
                                     moemail_address: str, share_link: str,
-                                    is_moemail_auto: bool):
+                                    is_moemail_auto: bool,
+                                    email_provider_id: Optional[int] = None,
+                                    email_provider_domain: Optional[str] = None):
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute(
             """UPDATE customers SET
-               email = ?, moemail_id = ?, moemail_address = ?, share_link = ?, is_moemail_auto = ?
+               email = ?, moemail_id = ?, moemail_address = ?, share_link = ?, is_moemail_auto = ?,
+               email_provider_id = ?, email_account_id = ?, email_provider_domain = ?
                WHERE id = ?""",
             (moemail_address, moemail_id, moemail_address, share_link,
-             1 if is_moemail_auto else 0, customer_id),
+             1 if is_moemail_auto else 0, email_provider_id, moemail_id,
+             email_provider_domain, customer_id),
         )
         await db.commit()
 

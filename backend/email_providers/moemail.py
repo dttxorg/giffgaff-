@@ -121,12 +121,13 @@ class MoEmailProvider(EmailProvider):
         return msgs
 
     def get_email_messages(self, provider_account_id: str) -> dict:
-        """Alias returning raw MoEmail payload format for backward compat
-        with main.py endpoints that consume MoEmail-shaped JSON."""
-        return {"messages": [
-            {"id": m.id, "subject": m.subject, "receivedAt": m.received_at}
-            for m in self.fetch_latest_messages(provider_account_id)
-        ]}
+        """Return the provider's raw summary payload without fetching every body.
+
+        Full bodies are loaded later through ``get_message``. Keeping the list
+        operation summary-only matters for large permanent inboxes.
+        """
+        payload = self._client.get_email_messages(provider_account_id)
+        return payload if isinstance(payload, dict) else {"messages": []}
 
     def get_message(self, provider_account_id: str, message_id: str) -> dict:
         """Return the inner message body, unwrapping beilunyang/moemail's

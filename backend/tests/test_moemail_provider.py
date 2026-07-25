@@ -75,6 +75,23 @@ def test_fetch_latest_messages_filters_by_after_id(mocked_provider):
     assert msgs[0].id == "3"
 
 
+def test_get_email_messages_keeps_large_inbox_summary_only(mocked_provider):
+    p, client = mocked_provider
+    payload = {
+        "messages": [
+            {"id": str(index), "subject": f"Message {index}"}
+            for index in range(200)
+        ]
+    }
+    client.get_email_messages.return_value = payload
+
+    result = p.get_email_messages("account-1")
+
+    assert result == payload
+    client.get_email_messages.assert_called_once_with("account-1")
+    client.get_message.assert_not_called()
+
+
 def test_extract_verification_code():
     p = MoEmailProvider(url="https://x", api_key="k")
     msg = InboxMessage(id="1", subject="x", text="Your code is 123456", received_at="t")

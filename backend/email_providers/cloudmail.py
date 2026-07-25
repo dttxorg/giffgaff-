@@ -149,6 +149,7 @@ class CloudMailProvider(EmailProvider):
                     "id": int(m.id) if m.id.isdigit() else m.id,
                     "subject": m.subject,
                     "receivedAt": m.received_at,
+                    "text": m.text,
                 }
                 for m in messages
             ]

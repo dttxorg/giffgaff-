@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import date
 from typing import Any, Literal, Optional
 
@@ -54,6 +54,8 @@ class CustomerOut(BaseModel):
     activation_date: date
     moemail_id: Optional[str]
     moemail_address: Optional[str]
+    email_provider_id: Optional[int] = None
+    email_account_id: Optional[str] = None
     share_link: Optional[str]
     is_moemail_auto: bool
     sim_code_id: Optional[int] = None
@@ -88,6 +90,8 @@ class CustomerDetail(BaseModel):
     created_at: str
     moemail_id: Optional[str]
     moemail_address: Optional[str]
+    email_provider_id: Optional[int] = None
+    email_account_id: Optional[str] = None
     share_link: Optional[str]
     is_moemail_auto: bool
     sim_code_id: Optional[int] = None
@@ -180,6 +184,28 @@ class PaymentInfoEmailOut(BaseModel):
     latest_changed_subject: Optional[str] = None
     latest_changed_received_at: Optional[str] = None
     detail: str = ""
+
+
+class InboxMessageSummaryOut(BaseModel):
+    id: str
+    subject: str = ""
+    from_address: str = ""
+    received_at: str = ""
+
+
+class InboxMessageListOut(BaseModel):
+    email: str = ""
+    count: int = 0
+    messages: list[InboxMessageSummaryOut] = Field(default_factory=list)
+
+
+class InboxMessageDetailOut(BaseModel):
+    id: str
+    subject: str = ""
+    from_address: str = ""
+    to_address: str = ""
+    received_at: str = ""
+    body: str = ""
 
 
 class DomainInfo(BaseModel):

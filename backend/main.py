@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, HTMLResponse
@@ -26,6 +26,7 @@ from models import (
     SystemSettings, AuthLoginRequest, MoEmailCreateRequest,
     SimCodeImport, SimCodeUpdate, SimCodeOut, ActivationStatusUpdate,
     VerificationCodeOut, PaymentInfoEmailOut,
+    InboxMessageSummaryOut, InboxMessageListOut, InboxMessageDetailOut,
     DomainInfo, LabelConfig, EsimCodeUpdate,
     EmailProviderCreate, EmailProviderOut, EmailProviderUpdate,
     ResetCustomerRequest, EmailProviderDomainPick,
@@ -410,6 +411,29 @@ def _message_detail_payload(payload) -> dict:
     return payload
 
 
+def _message_address(message: dict, *keys: str) -> str:
+    for key in keys:
+        value = message.get(key)
+        if isinstance(value, dict):
+            nested = _first_text(value, "address", "email", "value", "name")
+            if nested:
+                return nested
+        elif isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, dict):
+                    part = _first_text(item, "address", "email", "value", "name")
+                else:
+                    part = str(item or "")
+                if part:
+                    parts.append(part)
+            if parts:
+                return ", ".join(parts)
+        elif value is not None:
+            return str(value)
+    return ""
+
+
 def _plain_text_from_html(value: str) -> str:
     text = html.unescape(value or "")
     text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
@@ -417,6 +441,35 @@ def _plain_text_from_html(value: str) -> str:
     text = re.sub(r"(?s)</p\s*>", "\n", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
     return re.sub(r"[ \t]+", " ", text)
+
+
+def _message_body_text(message: dict) -> str:
+    plain = _first_text(
+        message,
+        "text",
+        "content",
+        "body",
+        "plainText",
+        "plain_text",
+        "textContent",
+        "text_content",
+    ).strip()
+    if plain:
+        return plain
+    html_body = _first_text(
+        message,
+        "html",
+        "htmlContent",
+        "html_content",
+        "htmlBody",
+        "html_body",
+    )
+    if not html_body:
+        return ""
+    rendered = _plain_text_from_html(html_body)
+    rendered = re.sub(r"\n[ \t]+", "\n", rendered)
+    rendered = re.sub(r"\n{3,}", "\n\n", rendered)
+    return rendered.strip()
 
 
 def _extract_verification_code(message: dict) -> Optional[str]:
@@ -853,6 +906,8 @@ async def list_customers(search: str = ""):
         activation_date=r["activation_date"],
         moemail_id=r.get("moemail_id"),
         moemail_address=r.get("moemail_address"),
+        email_provider_id=r.get("email_provider_id"),
+        email_account_id=r.get("email_account_id"),
         share_link=_normalize_share_link(r.get("share_link")),
         is_moemail_auto=bool(r.get("is_moemail_auto")),
         sim_code_id=r.get("sim_code_id"),
@@ -893,6 +948,8 @@ async def get_customer_detail(customer_id: int):
         created_at=c["created_at"],
         moemail_id=c.get("moemail_id"),
         moemail_address=c.get("moemail_address"),
+        email_provider_id=c.get("email_provider_id"),
+        email_account_id=c.get("email_account_id"),
         share_link=_normalize_share_link(c.get("share_link")),
         is_moemail_auto=bool(c.get("is_moemail_auto")),
         sim_code_id=c.get("sim_code_id"),
@@ -1204,6 +1261,8 @@ async def create_customer_moemail(customer_id: int, data: MoEmailCreateRequest):
             email_bundle["email"],
             email_bundle.get("share_link", ""),
             True,
+            email_provider_id=email_bundle.get("email_provider_id"),
+            email_provider_domain=email_bundle.get("email_provider_domain"),
         )
         return {
             "ok": True,
@@ -1274,6 +1333,100 @@ async def _resolve_inbox_provider(customer_row: dict) -> tuple[str, "MoEmailClie
     if not legacy_id:
         raise HTTPException(status_code=400, detail="该客户没有 MoEmail 邮箱")
     return str(legacy_id), MoEmailClient(moemail_url, moemail_key)
+
+
+@app.get(
+    "/api/customers/{customer_id}/inbox",
+    response_model=InboxMessageListOut,
+)
+async def get_customer_inbox(customer_id: int, response: Response):
+    """Return every message summary currently exposed by the assigned provider.
+
+    This endpoint intentionally loads summaries only. The body is fetched on
+    demand by ``/inbox-message`` so a large mailbox does not trigger one origin
+    request per message.
+    """
+    c = await get_customer(customer_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="客户不存在")
+    response.headers["Cache-Control"] = "no-store"
+    account_id, client = await _resolve_inbox_provider(c)
+    email_address = c.get("moemail_address") or c.get("email") or ""
+    try:
+        mailbox = client.get_email_messages(account_id)
+        messages = _message_list(mailbox)
+        messages.sort(key=_message_received_at, reverse=True)
+        summaries = [
+            InboxMessageSummaryOut(
+                id=_message_id(message),
+                subject=_first_text(message, "subject") or "（无主题）",
+                from_address=_message_address(
+                    message, "fromAddress", "from_address", "from", "sender"
+                ),
+                received_at=_message_received_at(message),
+            )
+            for message in messages
+            if _message_id(message)
+        ]
+        return InboxMessageListOut(
+            email=email_address,
+            count=len(summaries),
+            messages=summaries,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"读取邮箱列表失败：{exc}") from exc
+
+
+@app.get(
+    "/api/customers/{customer_id}/inbox-message",
+    response_model=InboxMessageDetailOut,
+)
+async def get_customer_inbox_message(
+    customer_id: int,
+    response: Response,
+    message_id: str = Query(min_length=1, max_length=512),
+):
+    """Fetch one full message body directly from the assigned provider."""
+    c = await get_customer(customer_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="客户不存在")
+    response.headers["Cache-Control"] = "no-store"
+    account_id, client = await _resolve_inbox_provider(c)
+    try:
+        mailbox = client.get_email_messages(account_id)
+        summaries = _message_list(mailbox)
+        summary = next(
+            (item for item in summaries if _message_id(item) == message_id),
+            {},
+        )
+        detail = {}
+        if not _message_body_text(summary):
+            detail = _message_detail_payload(client.get_message(account_id, message_id))
+        message = {**summary, **detail}
+        if not message or (not summary and not detail):
+            raise HTTPException(status_code=404, detail="邮件不存在或已失效")
+        return InboxMessageDetailOut(
+            id=_message_id(message) or message_id,
+            subject=_first_text(message, "subject") or "（无主题）",
+            from_address=_message_address(
+                message, "fromAddress", "from_address", "from", "sender"
+            ),
+            to_address=_message_address(
+                message, "toAddress", "to_address", "to", "recipient", "recipients"
+            ),
+            received_at=_message_received_at(message),
+            body=_message_body_text(message),
+        )
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="邮件不存在或已失效") from exc
+        raise HTTPException(status_code=502, detail=f"读取邮件正文失败：{exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"读取邮件正文失败：{exc}") from exc
 
 
 @app.get("/api/customers/{customer_id}/verification-code", response_model=VerificationCodeOut)
