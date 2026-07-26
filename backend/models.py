@@ -190,6 +190,7 @@ class InboxMessageSummaryOut(BaseModel):
     id: str
     subject: str = ""
     from_address: str = ""
+    sent_at: str = ""
     received_at: str = ""
 
 
@@ -204,8 +205,10 @@ class InboxMessageDetailOut(BaseModel):
     subject: str = ""
     from_address: str = ""
     to_address: str = ""
+    sent_at: str = ""
     received_at: str = ""
     body: str = ""
+    html_body: str = ""
 
 
 class DomainInfo(BaseModel):

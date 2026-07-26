@@ -67,6 +67,7 @@ def test_inbox_list_returns_every_summary_without_loading_bodies(inbox_client):
                 "id": "newer",
                 "subject": "Newest message",
                 "fromAddress": "new@example.com",
+                "sentAt": "2026-07-25T08:59:00Z",
                 "receivedAt": "2026-07-25T09:00:00Z",
             },
         ]
@@ -86,6 +87,7 @@ def test_inbox_list_returns_every_summary_without_loading_bodies(inbox_client):
     assert data["count"] == 2
     assert [item["id"] for item in data["messages"]] == ["newer", "older"]
     assert data["messages"][0]["from_address"] == "new@example.com"
+    assert data["messages"][0]["sent_at"] == "2026-07-25T08:59:00Z"
     assert data["messages"][1]["from_address"] == "old@example.com"
     provider.get_email_messages.assert_called_once_with("account-1")
     provider.get_message.assert_not_called()
@@ -108,6 +110,7 @@ def test_inbox_message_returns_full_plain_body_with_html_fallback(inbox_client):
         "message": {
             "id": "message-1",
             "to": [{"email": "reader@example.com"}],
+            "headers": {"Date": "2026-07-25T10:29:00Z"},
             "html": "<p>Hello <strong>Reader</strong></p><p>Second line</p>",
         }
     }
@@ -129,9 +132,12 @@ def test_inbox_message_returns_full_plain_body_with_html_fallback(inbox_client):
     assert data["subject"] == "Account notice"
     assert data["from_address"] == "service@example.com"
     assert data["to_address"] == "reader@example.com"
+    assert data["sent_at"] == "2026-07-25T10:29:00Z"
+    assert data["received_at"] == "2026-07-25T10:30:00Z"
     assert "Hello Reader" in data["body"]
     assert "Second line" in data["body"]
     assert "<strong>" not in data["body"]
+    assert "<strong>Reader</strong>" in data["html_body"]
     provider.get_message.assert_called_once_with("account-1", "message-1")
 
 
@@ -186,3 +192,72 @@ def test_replacing_customer_email_persists_provider_route(inbox_client):
         "new-account",
         "example.com",
     )
+
+
+def test_payment_query_persists_before_returning_success(inbox_client):
+    client, customer_id, db_path = inbox_client
+    provider = MagicMock()
+    provider.get_email_messages.return_value = {
+        "messages": [
+            {
+                "id": "payment-1",
+                "subject": "Your payment info has changed",
+            }
+        ]
+    }
+    provider.get_message.return_value = {
+        "message": {
+            "id": "payment-1",
+            "text": "Your payment info has changed",
+        }
+    }
+
+    with patch.object(
+        main,
+        "_resolve_inbox_provider",
+        new=AsyncMock(return_value=("account-1", provider)),
+    ):
+        response = client.get(f"/api/customers/{customer_id}/payment-info-emails")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["changed_found"] is True
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """SELECT payment_changed_at, payment_last_checked_at
+               FROM customers WHERE id = ?""",
+            (customer_id,),
+        ).fetchone()
+    assert row[0]
+    assert row[1]
+    assert row[0] == row[1]
+
+
+def test_payment_query_reports_database_write_failure(inbox_client):
+    client, customer_id, _ = inbox_client
+    provider = MagicMock()
+    provider.get_email_messages.return_value = {
+        "messages": [
+            {
+                "id": "payment-1",
+                "subject": "Your payment info has changed",
+                "receivedAt": "2026-07-25T12:00:00Z",
+            }
+        ]
+    }
+    provider.get_message.return_value = {
+        "message": {"text": "Your payment info has changed"}
+    }
+
+    with patch.object(
+        main,
+        "_resolve_inbox_provider",
+        new=AsyncMock(return_value=("account-1", provider)),
+    ), patch.object(
+        main,
+        "save_payment_check_result",
+        new=AsyncMock(side_effect=RuntimeError("database offline")),
+    ):
+        response = client.get(f"/api/customers/{customer_id}/payment-info-emails")
+
+    assert response.status_code == 502
+    assert "database offline" in response.json()["detail"]

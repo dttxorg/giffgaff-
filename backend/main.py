@@ -401,6 +401,39 @@ def _message_received_at(message: dict) -> str:
     return _first_text(message, "receivedAt", "received_at", "createdAt", "created_at", "date")
 
 
+def _message_header_value(message: dict, wanted: str) -> str:
+    headers = message.get("headers")
+    wanted_lower = wanted.lower()
+    if isinstance(headers, dict):
+        for key, value in headers.items():
+            if str(key).lower() != wanted_lower:
+                continue
+            if isinstance(value, list):
+                return ", ".join(str(item) for item in value if item is not None)
+            return str(value or "")
+    if isinstance(headers, list):
+        for item in headers:
+            if not isinstance(item, dict):
+                continue
+            name = _first_text(item, "name", "key").lower()
+            if name == wanted_lower:
+                return _first_text(item, "value", "text")
+    return ""
+
+
+def _message_sent_at(message: dict) -> str:
+    direct = _first_text(
+        message,
+        "sentAt",
+        "sent_at",
+        "sentDate",
+        "sent_date",
+        "dateSent",
+        "date_sent",
+    )
+    return direct or _message_header_value(message, "date") or _first_text(message, "date")
+
+
 def _message_detail_payload(payload) -> dict:
     if not isinstance(payload, dict):
         return {}
@@ -470,6 +503,17 @@ def _message_body_text(message: dict) -> str:
     rendered = re.sub(r"\n[ \t]+", "\n", rendered)
     rendered = re.sub(r"\n{3,}", "\n\n", rendered)
     return rendered.strip()
+
+
+def _message_html_body(message: dict) -> str:
+    return _first_text(
+        message,
+        "html",
+        "htmlContent",
+        "html_content",
+        "htmlBody",
+        "html_body",
+    )
 
 
 def _extract_verification_code(message: dict) -> Optional[str]:
@@ -1363,6 +1407,7 @@ async def get_customer_inbox(customer_id: int, response: Response):
                 from_address=_message_address(
                     message, "fromAddress", "from_address", "from", "sender"
                 ),
+                sent_at=_message_sent_at(message),
                 received_at=_message_received_at(message),
             )
             for message in messages
@@ -1416,8 +1461,10 @@ async def get_customer_inbox_message(
             to_address=_message_address(
                 message, "toAddress", "to_address", "to", "recipient", "recipients"
             ),
+            sent_at=_message_sent_at(message),
             received_at=_message_received_at(message),
             body=_message_body_text(message),
+            html_body=_message_html_body(message),
         )
     except HTTPException:
         raise
@@ -1539,18 +1586,27 @@ async def get_customer_payment_info_emails(customer_id: int, limit: int = 50):
         )
         if detail_miss_count:
             detail += f"；{detail_miss_count} 封邮件详情已不存在或接口未返回"
-        # 持久化结果：供首页列表展示（即使没找到邮件也记下「已查过」）
-        try:
-            now_iso = datetime.datetime.utcnow().isoformat() + "Z"
-            await save_payment_check_result(
-                customer_id,
-                changed_at=_message_received_at(latest_changed) or None,
-                updated_at=_message_received_at(latest_updated) or None,
-                checked_at=now_iso,
-            )
-        except Exception:
-            # 保存失败不影响查询结果返回
-            pass
+        # 持久化结果：只有数据库确认写入后才返回查询成功，避免详情显示
+        # “已解绑”而首页仍停留在旧状态。
+        now_iso = datetime.datetime.utcnow().isoformat() + "Z"
+        latest_changed_at = (
+            _message_received_at(latest_changed)
+            or _message_sent_at(latest_changed)
+            or (now_iso if changed_count else None)
+        )
+        latest_updated_at = (
+            _message_received_at(latest_updated)
+            or _message_sent_at(latest_updated)
+            or (now_iso if updated_count else None)
+        )
+        persisted = await save_payment_check_result(
+            customer_id,
+            changed_at=latest_changed_at,
+            updated_at=latest_updated_at,
+            checked_at=now_iso,
+        )
+        if not persisted:
+            raise RuntimeError("支付查询结果未写入客户记录")
         return PaymentInfoEmailOut(
             found=changed_count > 0,
             updated_found=updated_count > 0,
@@ -1561,10 +1617,10 @@ async def get_customer_payment_info_emails(customer_id: int, limit: int = 50):
             checked_count=checked_count,
             latest_updated_message_id=_message_id(latest_updated) or None,
             latest_updated_subject=_first_text(latest_updated, "subject") or None,
-            latest_updated_received_at=_message_received_at(latest_updated) or None,
+            latest_updated_received_at=latest_updated_at,
             latest_changed_message_id=_message_id(latest_changed) or None,
             latest_changed_subject=_first_text(latest_changed, "subject") or None,
-            latest_changed_received_at=_message_received_at(latest_changed) or None,
+            latest_changed_received_at=latest_changed_at,
             detail=detail,
         )
     except Exception as e:

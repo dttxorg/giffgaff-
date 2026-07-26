@@ -1553,6 +1553,8 @@
       min-width: 0;
       padding: 18px 20px;
       background: #fff;
+      display: flex;
+      flex-direction: column;
     }
     .inbox-viewer-head {
       padding-bottom: 12px;
@@ -1574,8 +1576,20 @@
     }
     .inbox-viewer-actions {
       display: flex;
-      justify-content: flex-end;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
       margin: 10px 0 0;
+    }
+    .inbox-body-modes { display: flex; gap: 6px; }
+    .inbox-body-modes button.active {
+      background: #5f4b8b;
+      border-color: #5f4b8b;
+      color: #fff;
+    }
+    .inbox-body-pane {
+      flex: 1;
+      min-height: 360px;
     }
     .inbox-body {
       min-height: 260px;
@@ -1588,6 +1602,17 @@
       overflow-wrap: anywhere;
       white-space: pre-wrap;
     }
+    .inbox-html-frame {
+      display: block;
+      width: 100%;
+      min-height: 430px;
+      margin-top: 14px;
+      border: 1px solid #ebe7ef;
+      border-radius: 6px;
+      background: #fff;
+    }
+    .inbox-html-frame[hidden],
+    .inbox-body-pane[hidden] { display: none; }
     .identity-disclosure {
       border: 1px solid #e4dfea;
       border-radius: 8px;
@@ -2151,10 +2176,17 @@
             <h4 id="d-inbox-message-subject">选择一封邮件查看正文</h4>
             <div class="inbox-viewer-meta" id="d-inbox-message-meta"></div>
             <div class="inbox-viewer-actions">
+              <div class="inbox-body-modes">
+                <button type="button" class="small ghost active" id="d-inbox-html-mode" onclick="setInboxBodyMode('html')" disabled>HTML 预览</button>
+                <button type="button" class="small ghost" id="d-inbox-text-mode" onclick="setInboxBodyMode('text')" disabled>文本正文</button>
+              </div>
               <button type="button" class="small ghost" id="d-inbox-copy" onclick="copyInboxBody()" disabled>复制正文</button>
             </div>
           </div>
-          <pre class="inbox-body" id="d-inbox-message-body">邮件正文会显示在这里。</pre>
+          <div class="inbox-body-pane" id="d-inbox-text-pane">
+            <pre class="inbox-body" id="d-inbox-message-body">邮件正文会显示在这里。</pre>
+          </div>
+          <iframe class="inbox-html-frame" id="d-inbox-html-frame" title="邮件 HTML 正文" sandbox hidden></iframe>
         </article>
       </div>
     </section>
@@ -2626,6 +2658,9 @@ let appStarted = false;
 let activeInboxMessages = [];
 let activeInboxMessageId = '';
 let inboxLoadedCustomerId = null;
+let activeInboxBody = '';
+let activeInboxHtml = '';
+let activeInboxBodyMode = 'text';
 
 function toast(msg, type='') {
   const t = $('toast');
@@ -2762,7 +2797,7 @@ async function logout() {
 
 async function loadCustomers() {
   const qs = currentSearch ? '?search=' + encodeURIComponent(currentSearch) : '';
-  const res = await fetch(API + '/customers' + qs);
+  const res = await fetch(API + '/customers' + qs, { cache: 'no-store' });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     toast(data.detail || '加载客户列表失败', 'error');
@@ -3316,7 +3351,7 @@ function isPaymentCheckEligible(c) {
 }
 
 async function getCustomer(id) {
-  const res = await fetch(API + '/customers/' + id);
+  const res = await fetch(API + '/customers/' + id, { cache: 'no-store' });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || '加载客户失败');
@@ -3774,6 +3809,9 @@ function resetInboxView(customer) {
   activeInboxMessages = [];
   activeInboxMessageId = '';
   inboxLoadedCustomerId = null;
+  activeInboxBody = '';
+  activeInboxHtml = '';
+  activeInboxBodyMode = 'text';
   const readable = hasReadableInbox(customer);
   $('d-inbox-address').textContent = customer?.moemail_address || customer?.email || '邮箱尚未配置';
   $('d-inbox-status').textContent = readable
@@ -3789,7 +3827,11 @@ function resetInboxView(customer) {
   $('d-inbox-message-subject').textContent = '选择一封邮件查看正文';
   $('d-inbox-message-meta').textContent = '';
   $('d-inbox-message-body').textContent = '邮件正文会显示在这里。';
+  $('d-inbox-html-frame').srcdoc = '';
+  $('d-inbox-html-mode').disabled = true;
+  $('d-inbox-text-mode').disabled = true;
   $('d-inbox-copy').disabled = true;
+  setInboxBodyMode('text');
 }
 
 function renderInboxList(messages) {
@@ -3820,8 +3862,9 @@ function renderInboxList(messages) {
     sender.textContent = message.from_address || '未知发件人';
     sender.title = sender.textContent;
     const received = document.createElement('span');
-    received.textContent = formatInboxDate(message.received_at);
-    received.title = message.received_at || '';
+    const displayTime = message.sent_at || message.received_at;
+    received.textContent = formatInboxDate(displayTime);
+    received.title = displayTime || '';
     meta.append(sender, received);
     button.append(subject, meta);
     list.appendChild(button);
@@ -3865,6 +3908,9 @@ async function loadInboxForActive(force=false) {
       $('d-inbox-message-subject').textContent = '邮箱里暂时没有邮件';
       $('d-inbox-message-meta').textContent = '';
       $('d-inbox-message-body').textContent = '';
+      $('d-inbox-html-frame').srcdoc = '';
+      $('d-inbox-html-mode').disabled = true;
+      $('d-inbox-text-mode').disabled = true;
       $('d-inbox-copy').disabled = true;
     }
   } catch (err) {
@@ -3895,6 +3941,9 @@ async function loadInboxMessage(messageId) {
   $('d-inbox-message-subject').textContent = '正在读取邮件正文...';
   $('d-inbox-message-meta').textContent = '';
   $('d-inbox-message-body').textContent = '请稍候';
+  $('d-inbox-html-frame').srcdoc = '';
+  $('d-inbox-html-mode').disabled = true;
+  $('d-inbox-text-mode').disabled = true;
   $('d-inbox-copy').disabled = true;
   try {
     const query = new URLSearchParams({ message_id: activeInboxMessageId });
@@ -3906,21 +3955,80 @@ async function loadInboxMessage(messageId) {
     const meta = [];
     if (data.from_address) meta.push(`发件人：${data.from_address}`);
     if (data.to_address) meta.push(`收件人：${data.to_address}`);
-    if (data.received_at) meta.push(`时间：${formatInboxDate(data.received_at)}`);
+    if (data.sent_at) meta.push(`发送时间：${formatInboxDate(data.sent_at)}`);
+    if (data.received_at && data.received_at !== data.sent_at) {
+      meta.push(`接收时间：${formatInboxDate(data.received_at)}`);
+    }
     $('d-inbox-message-meta').textContent = meta.join('\n');
-    $('d-inbox-message-body').textContent = data.body || '该邮件没有可显示的文本正文。';
-    $('d-inbox-copy').disabled = !data.body;
+    activeInboxBody = data.body || '';
+    activeInboxHtml = data.html_body || '';
+    $('d-inbox-message-body').textContent = activeInboxBody || '该邮件没有可显示的文本正文。';
+    $('d-inbox-text-mode').disabled = !activeInboxBody;
+    $('d-inbox-html-mode').disabled = !activeInboxHtml;
+    $('d-inbox-copy').disabled = !activeInboxBody;
+    if (activeInboxHtml) {
+      renderInboxHtml(activeInboxHtml);
+      setInboxBodyMode('html');
+    } else {
+      $('d-inbox-html-frame').srcdoc = '';
+      setInboxBodyMode('text');
+    }
   } catch (err) {
     if (!activeCustomer || activeCustomer.id !== customerId) return;
     $('d-inbox-message-subject').textContent = '邮件正文读取失败';
     $('d-inbox-message-meta').textContent = err.message;
     $('d-inbox-message-body').textContent = '';
+    $('d-inbox-html-frame').srcdoc = '';
+    activeInboxBody = '';
+    activeInboxHtml = '';
+    $('d-inbox-html-mode').disabled = true;
+    $('d-inbox-text-mode').disabled = true;
     toast(err.message, 'error');
   }
 }
 
+function sanitizeInboxHtml(rawHtml) {
+  const doc = new DOMParser().parseFromString(String(rawHtml || ''), 'text/html');
+  doc.querySelectorAll('script, iframe, object, embed, form, input, button, textarea, select, meta, base, link').forEach(node => node.remove());
+  doc.querySelectorAll('*').forEach(node => {
+    [...node.attributes].forEach(attr => {
+      const name = attr.name.toLowerCase();
+      const value = attr.value || '';
+      if (name.startsWith('on')) {
+        node.removeAttribute(attr.name);
+        return;
+      }
+      if (['href', 'src', 'srcset', 'action', 'formaction', 'poster', 'background'].includes(name)) {
+        if (!(name === 'src' && /^data:image\//i.test(value))) {
+          node.removeAttribute(attr.name);
+        }
+        return;
+      }
+      if (name === 'style' && /(url\s*\(|expression\s*\(|@import)/i.test(value)) {
+        node.removeAttribute(attr.name);
+      }
+    });
+  });
+  return doc.body.innerHTML;
+}
+
+function renderInboxHtml(rawHtml) {
+  const safeBody = sanitizeInboxHtml(rawHtml);
+  const csp = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'";
+  $('d-inbox-html-frame').srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html{color:#312a38;background:#fff;font:14px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif}body{margin:0;padding:18px;overflow-wrap:anywhere}img{max-width:100%;height:auto}table{max-width:100%;border-collapse:collapse}td,th{padding:4px 6px}pre{white-space:pre-wrap}a{color:#5f4b8b;text-decoration:underline}</style></head><body>${safeBody}</body></html>`;
+}
+
+function setInboxBodyMode(mode) {
+  const useHtml = mode === 'html' && !!activeInboxHtml;
+  activeInboxBodyMode = useHtml ? 'html' : 'text';
+  $('d-inbox-html-frame').hidden = !useHtml;
+  $('d-inbox-text-pane').hidden = useHtml;
+  $('d-inbox-html-mode').classList.toggle('active', useHtml);
+  $('d-inbox-text-mode').classList.toggle('active', !useHtml);
+}
+
 function copyInboxBody() {
-  const body = $('d-inbox-message-body').textContent || '';
+  const body = activeInboxBody || '';
   if (!body) return;
   copyText(body, '邮件正文已复制');
 }
@@ -3934,6 +4042,7 @@ async function openPaymentInfoForCustomer(id) {
 
 async function refreshPaymentInfoForActive() {
   if (!activeCustomer) return;
+  const customerId = activeCustomer.id;
   const button = $('d-payment-refresh');
   const value = $('d-payment-value');
   const meta = $('d-payment-meta');
@@ -3947,6 +4056,10 @@ async function refreshPaymentInfoForActive() {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || '查询失败');
     renderPaymentInfoResult(data);
+    await loadCustomers();
+    if (activeCustomer && activeCustomer.id === customerId) {
+      activeCustomer = await getCustomer(customerId);
+    }
     const msg = data.changed_count > 0
       ? `已找到 ${data.changed_count} 封解绑邮件`
       : (data.updated_count > 0 ? `信用卡已更新 ${data.updated_count} 次` : '未发现支付变更邮件');

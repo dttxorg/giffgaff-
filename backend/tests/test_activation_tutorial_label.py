@@ -369,10 +369,16 @@ def test_frontend_uses_customer_inbox_workspace_and_independent_print_flows():
     assert 'id="d-inbox-refresh"' in html
     assert 'id="d-inbox-list"' in html
     assert 'id="d-inbox-message-body"' in html
+    assert 'id="d-inbox-html-frame"' in html
+    assert "function sanitizeInboxHtml" in html
+    assert "function setInboxBodyMode" in html
     assert "function loadInboxForActive" in html
     assert "function loadInboxMessage" in html
     assert "/inbox-message?${query}" in html
     assert "不经过 Worker 公开页面" in html
+    payment_refresh = html[html.index("async function refreshPaymentInfoForActive"):html.index("async function refreshVerificationCodeForActive")]
+    assert "await loadCustomers();" in payment_refresh
+    assert "activeCustomer = await getCustomer(customerId);" in payment_refresh
     assert "const TEXT_SOURCES = ['固定文字', '手机号', '邮箱', '开通日期', '收货地址', '快递公司', '快递单号', 'SIM激活码', '激活状态', 'Giffgaff下载链接'];" in html
     assert "element.type === 'text' && element.source === '初始密码'" in html
     assert '<th>收货地址</th>' in html

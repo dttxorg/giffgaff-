@@ -16,6 +16,7 @@
 - Mobile customer card with wrapped shipping address: `/tmp/giffgaff-print-address/03-mobile-address.png`
 - Desktop full-inbox list and message reader: `/tmp/giffgaff-full-inbox/01-desktop.png`
 - Mobile full-inbox list and message reader: `/tmp/giffgaff-full-inbox/02-mobile.png`
+- Desktop HTML email reader with sent/received timestamps: `/tmp/giffgaff-inbox-html-sync/01-html-reader.png`
 - Full-view comparison: `/tmp/giffgaff-dense-ledger-final/desktop-list-comparison.png`
 - Focused table comparison: `/tmp/giffgaff-dense-ledger-final/desktop-table-comparison.png`
 - Desktop viewport and state: `1440 × 1024`, unfiltered default customer ledger.
@@ -51,6 +52,8 @@ No actionable P0, P1, or P2 issue remains.
 - Mobile detail opens full-screen, starts at scroll position 0, and exposes the labeled return action.
 - Existing independent 打印标签 and 打印快递单 actions remain in the detail header; their print panel is layered above the still-open customer detail.
 - The new 完整邮箱 section reads every available message summary on demand, opens the newest body automatically, switches bodies from the left-hand list, and exposes a copy-body action without using the public Worker page.
+- HTML email content renders in a sandboxed, CSP-restricted iframe in the dedicated right-hand reading column; the operator can switch back to extracted plain text, while sent and received timestamps remain visible above the body.
+- Payment-card query results are committed before the endpoint returns success, then the customer ledger and active detail record are reloaded so the 首页 badge changes immediately.
 - Customer pagination defaults to 20 rows: page 1 shows 1–20 of 28, page 2 shows the remaining 8, and changing the page size to 50 collapses the result to one page.
 - The detail first screen exposes registration email, SIM activation code and email verification code without changing sections. The obsolete initial-password control is removed because the registration email is now used as the password.
 - The random identity and UK address block opens only on demand and resets to its collapsed 44px state whenever detail opens.
@@ -97,6 +100,7 @@ No actionable P0, P1, or P2 issue remains.
 - [x] Registration email, SIM code and mailbox verification on the default detail screen.
 - [x] Print panels open above customer detail without forcing the detail to close.
 - [x] Direct full-inbox list and plain-text body reader for provider-backed customer email accounts.
+- [x] Sandboxed HTML preview, plain-text fallback, sent/received timestamps and immediate payment-status synchronization.
 - [x] Random identity and UK address collapsed by default.
 
 final result: passed
