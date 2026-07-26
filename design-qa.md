@@ -53,6 +53,7 @@ No actionable P0, P1, or P2 issue remains.
 - Existing independent 打印标签 and 打印快递单 actions remain in the detail header; their print panel is layered above the still-open customer detail.
 - The new 完整邮箱 section reads every available message summary on demand, opens the newest body automatically, switches bodies from the left-hand list, and exposes a copy-body action without using the public Worker page.
 - HTML email content renders in a sandboxed, CSP-restricted iframe in the dedicated right-hand reading column; the operator can switch back to extracted plain text, while sent and received timestamps remain visible above the body.
+- Numeric Unix timestamps from email providers are normalized server-side and displayed as both Asia/Shanghai and Europe/London local time in the reader.
 - Payment-card query results are committed before the endpoint returns success, then the customer ledger and active detail record are reloaded so the 首页 badge changes immediately.
 - Customer pagination defaults to 20 rows: page 1 shows 1–20 of 28, page 2 shows the remaining 8, and changing the page size to 50 collapses the result to one page.
 - The detail first screen exposes registration email, SIM activation code and email verification code without changing sections. The obsolete initial-password control is removed because the registration email is now used as the password.

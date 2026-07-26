@@ -372,6 +372,9 @@ def test_frontend_uses_customer_inbox_workspace_and_independent_print_flows():
     assert 'id="d-inbox-html-frame"' in html
     assert "function sanitizeInboxHtml" in html
     assert "function setInboxBodyMode" in html
+    assert "function formatInboxDualTime" in html
+    assert "'Asia/Shanghai'" in html
+    assert "'Europe/London'" in html
     assert "function loadInboxForActive" in html
     assert "function loadInboxMessage" in html
     assert "/inbox-message?${query}" in html

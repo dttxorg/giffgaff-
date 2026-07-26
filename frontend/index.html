@@ -3873,15 +3873,53 @@ function renderInboxList(messages) {
 
 function formatInboxDate(value) {
   if (!value) return '';
-  const date = new Date(value);
+  const raw = String(value).trim();
+  let normalized = raw;
+  if (/^-?\d+(?:\.\d+)?$/.test(raw)) {
+    const numeric = Number(raw);
+    const magnitude = Math.abs(numeric);
+    if (Number.isFinite(numeric)) {
+      normalized = magnitude >= 1e14
+        ? numeric / 1000
+        : (magnitude >= 1e11 ? numeric : numeric * 1000);
+    }
+  }
+  const date = new Date(normalized);
   if (Number.isNaN(date.getTime())) return value;
+  return formatInboxDateInZone(date, 'Asia/Shanghai');
+}
+
+function formatInboxDateInZone(value, timeZone) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || '');
   return date.toLocaleString('zh-CN', {
+    timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
   });
+}
+
+function formatInboxDualTime(value) {
+  if (!value) return '';
+  const raw = String(value).trim();
+  let normalized = raw;
+  if (/^-?\d+(?:\.\d+)?$/.test(raw)) {
+    const numeric = Number(raw);
+    const magnitude = Math.abs(numeric);
+    if (Number.isFinite(numeric)) {
+      normalized = magnitude >= 1e14
+        ? numeric / 1000
+        : (magnitude >= 1e11 ? numeric : numeric * 1000);
+    }
+  }
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return raw;
+  return `北京时间 ${formatInboxDateInZone(date, 'Asia/Shanghai')} ｜ 伦敦时间 ${formatInboxDateInZone(date, 'Europe/London')}`;
 }
 
 async function loadInboxForActive(force=false) {
@@ -3955,9 +3993,9 @@ async function loadInboxMessage(messageId) {
     const meta = [];
     if (data.from_address) meta.push(`发件人：${data.from_address}`);
     if (data.to_address) meta.push(`收件人：${data.to_address}`);
-    if (data.sent_at) meta.push(`发送时间：${formatInboxDate(data.sent_at)}`);
+    if (data.sent_at) meta.push(`发送时间：${formatInboxDualTime(data.sent_at)}`);
     if (data.received_at && data.received_at !== data.sent_at) {
-      meta.push(`接收时间：${formatInboxDate(data.received_at)}`);
+      meta.push(`接收时间：${formatInboxDualTime(data.received_at)}`);
     }
     $('d-inbox-message-meta').textContent = meta.join('\n');
     activeInboxBody = data.body || '';

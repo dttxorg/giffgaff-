@@ -397,8 +397,34 @@ def _message_id(message: dict) -> str:
     return _first_text(message, "id", "messageId", "message_id")
 
 
+def _normalize_message_timestamp(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+        try:
+            numeric = float(text)
+            magnitude = abs(numeric)
+            if magnitude >= 1e14:
+                seconds = numeric / 1_000_000
+            elif magnitude >= 1e11:
+                seconds = numeric / 1_000
+            else:
+                seconds = numeric
+            parsed = datetime.datetime.fromtimestamp(
+                seconds,
+                tz=datetime.timezone.utc,
+            )
+            return parsed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        except (OverflowError, OSError, ValueError):
+            return text
+    return text
+
+
 def _message_received_at(message: dict) -> str:
-    return _first_text(message, "receivedAt", "received_at", "createdAt", "created_at", "date")
+    return _normalize_message_timestamp(
+        _first_text(message, "receivedAt", "received_at", "createdAt", "created_at", "date")
+    )
 
 
 def _message_header_value(message: dict, wanted: str) -> str:
@@ -431,7 +457,9 @@ def _message_sent_at(message: dict) -> str:
         "dateSent",
         "date_sent",
     )
-    return direct or _message_header_value(message, "date") or _first_text(message, "date")
+    return _normalize_message_timestamp(
+        direct or _message_header_value(message, "date") or _first_text(message, "date")
+    )
 
 
 def _message_detail_payload(payload) -> dict:

@@ -67,7 +67,7 @@ def test_inbox_list_returns_every_summary_without_loading_bodies(inbox_client):
                 "id": "newer",
                 "subject": "Newest message",
                 "fromAddress": "new@example.com",
-                "sentAt": "2026-07-25T08:59:00Z",
+                "sentAt": 1784918151251,
                 "receivedAt": "2026-07-25T09:00:00Z",
             },
         ]
@@ -87,7 +87,7 @@ def test_inbox_list_returns_every_summary_without_loading_bodies(inbox_client):
     assert data["count"] == 2
     assert [item["id"] for item in data["messages"]] == ["newer", "older"]
     assert data["messages"][0]["from_address"] == "new@example.com"
-    assert data["messages"][0]["sent_at"] == "2026-07-25T08:59:00Z"
+    assert data["messages"][0]["sent_at"] == "2026-07-24T18:35:51.251Z"
     assert data["messages"][1]["from_address"] == "old@example.com"
     provider.get_email_messages.assert_called_once_with("account-1")
     provider.get_message.assert_not_called()
