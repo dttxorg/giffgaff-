@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, HTMLResponse
+import asyncio
+import contextlib
 import os
 import json
 import datetime
@@ -10,6 +12,7 @@ import httpx
 import hmac
 import hashlib
 import html
+import logging
 import re
 import secrets
 import string
@@ -79,6 +82,30 @@ ACTIVATION_STATUSES = {
 }
 SIM_CODE_STATUSES = {"未分配", "已分配", "激活中", "已使用", "失败", "作废"}
 DETACHABLE_ACTIVATION_STATUSES = {"未开始", "已分配激活码", "失败"}
+
+
+def _env_int(name: str, default: int, minimum: int) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default)) or default))
+    except (TypeError, ValueError):
+        logging.getLogger(__name__).warning(
+            "%s is not an integer; using %s",
+            name,
+            default,
+        )
+        return default
+
+
+CTEXCEL_AUTO_SYNC_INTERVAL_SECONDS = _env_int(
+    "CTEXCEL_AUTO_SYNC_INTERVAL_SECONDS", 60, 0
+)
+CTEXCEL_AUTO_SYNC_LOOKBACK_DAYS = _env_int(
+    "CTEXCEL_AUTO_SYNC_LOOKBACK_DAYS", 14, 1
+)
+CTEXCEL_AUTO_SYNC_BATCH_SIZE = _env_int(
+    "CTEXCEL_AUTO_SYNC_BATCH_SIZE", 6, 1
+)
+_CTEXCEL_AUTO_SYNC_TASK: Optional[asyncio.Task] = None
 DEFAULT_LABEL_TEMPLATES = [
     {
         "id": "basic-50x30",
@@ -654,6 +681,69 @@ def _merge_default_label_templates(templates: list[dict]) -> list[dict]:
     return merged
 
 
+async def _pending_ctexcel_auto_sync_customers() -> list[dict]:
+    """轮转读取最近创建且仍缺少订单核心资料的 CTExcel 邮箱。"""
+    retry_seconds = max(30, CTEXCEL_AUTO_SYNC_INTERVAL_SECONDS)
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await db.execute_fetchall(
+            """SELECT *
+               FROM customers
+               WHERE product_type = 'ctexcel'
+                 AND (phone_number IS NULL OR ctexcel_order_number IS NULL)
+                 AND (email_account_id IS NOT NULL OR moemail_id IS NOT NULL)
+                 AND datetime(created_at) >= datetime('now', ?)
+                 AND (
+                       ctexcel_last_checked_at IS NULL
+                       OR datetime(ctexcel_last_checked_at) <= datetime('now', ?)
+                     )
+               ORDER BY
+                 CASE WHEN ctexcel_last_checked_at IS NULL THEN 0 ELSE 1 END,
+                 ctexcel_last_checked_at ASC,
+                 id ASC
+               LIMIT ?""",
+            (
+                f"-{CTEXCEL_AUTO_SYNC_LOOKBACK_DAYS} days",
+                f"-{retry_seconds} seconds",
+                CTEXCEL_AUTO_SYNC_BATCH_SIZE,
+            ),
+        )
+        return [dict(row) for row in rows]
+
+
+async def _ctexcel_auto_sync_once() -> dict[str, int]:
+    rows = await _pending_ctexcel_auto_sync_customers()
+    result = {"checked": 0, "synced": 0, "failed": 0}
+    for customer in rows:
+        result["checked"] += 1
+        try:
+            synced = await _sync_ctexcel_order_info(customer, limit=50)
+            if synced.found:
+                result["synced"] += 1
+        except Exception as exc:
+            # 单个邮箱异常留到下一轮重试，不影响其他客户。
+            result["failed"] += 1
+            logging.getLogger(__name__).warning(
+                "CTExcel mailbox auto-sync failed for customer %s: %s",
+                customer.get("id"),
+                exc,
+            )
+    return result
+
+
+async def _ctexcel_auto_sync_loop() -> None:
+    while True:
+        await asyncio.sleep(max(1, CTEXCEL_AUTO_SYNC_INTERVAL_SECONDS))
+        try:
+            await _ctexcel_auto_sync_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "CTExcel mailbox auto-sync round failed"
+            )
+
+
 @app.middleware("http")
 async def require_app_password(request, call_next):
     path = request.url.path
@@ -704,8 +794,30 @@ async def require_app_password(request, call_next):
 
 @app.on_event("startup")
 async def startup():
+    global _CTEXCEL_AUTO_SYNC_TASK
     _validate_admin_entry_config()
     await init_db()
+    if (
+        CTEXCEL_AUTO_SYNC_INTERVAL_SECONDS > 0
+        and (
+            _CTEXCEL_AUTO_SYNC_TASK is None
+            or _CTEXCEL_AUTO_SYNC_TASK.done()
+        )
+    ):
+        _CTEXCEL_AUTO_SYNC_TASK = asyncio.create_task(
+            _ctexcel_auto_sync_loop(),
+            name="ctexcel-auto-email-sync",
+        )
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    global _CTEXCEL_AUTO_SYNC_TASK
+    if _CTEXCEL_AUTO_SYNC_TASK:
+        _CTEXCEL_AUTO_SYNC_TASK.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _CTEXCEL_AUTO_SYNC_TASK
+        _CTEXCEL_AUTO_SYNC_TASK = None
 
 
 # ── 访问口令 ──
@@ -1529,7 +1641,7 @@ async def get_customer_inbox(customer_id: int, response: Response):
     account_id, client = await _resolve_inbox_provider(c)
     email_address = c.get("moemail_address") or c.get("email") or ""
     try:
-        mailbox = client.get_email_messages(account_id)
+        mailbox = await asyncio.to_thread(client.get_email_messages, account_id)
         messages = _message_list(mailbox)
         messages.sort(key=_message_received_at, reverse=True)
         summaries = [
@@ -1669,21 +1781,16 @@ async def get_customer_verification_code(customer_id: int):
         raise HTTPException(status_code=502, detail=f"邮箱接码失败：{e}") from e
 
 
-@app.get(
-    "/api/customers/{customer_id}/ctexcel-order-info",
-    response_model=CTExcelOrderInfoOut,
-)
-async def get_customer_ctexcel_order_info(customer_id: int, limit: int = 50):
-    """扫描 CTExcel 订单邮件，并把手机号、订单号等资料同步到客户记录。"""
-    c = await get_customer(customer_id)
-    if not c:
-        raise HTTPException(status_code=404, detail="客户不存在")
-    if _normalize_product_type(c.get("product_type")) != "ctexcel":
-        raise HTTPException(status_code=400, detail="该客户不是 CTExcel 模式")
+async def _sync_ctexcel_order_info(
+    c: dict,
+    limit: int = 50,
+) -> CTExcelOrderInfoOut:
+    """读取一个 CTExcel 客户邮箱，并持久化订单号、号码和推荐资料。"""
+    customer_id = int(c["id"])
     account_id, client = await _resolve_inbox_provider(c)
     limit = min(max(1, limit), 100)
     try:
-        mailbox = client.get_email_messages(account_id)
+        mailbox = await asyncio.to_thread(client.get_email_messages, account_id)
         messages = _message_list(mailbox)
         messages.sort(key=_message_received_at, reverse=True)
         found: dict[str, Optional[str]] = {
@@ -1703,7 +1810,13 @@ async def get_customer_ctexcel_order_info(customer_id: int, limit: int = 50):
             summary_info = _extract_ctexcel_order_info(summary)
             if message_id and not (summary_info.get("phone_number") and summary_info.get("order_number")):
                 try:
-                    detail = _message_detail_payload(client.get_message(account_id, message_id))
+                    detail = _message_detail_payload(
+                        await asyncio.to_thread(
+                            client.get_message,
+                            account_id,
+                            message_id,
+                        )
+                    )
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code != 404:
                         raise
@@ -1775,6 +1888,20 @@ async def get_customer_ctexcel_order_info(customer_id: int, limit: int = 50):
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"CTExcel 订单邮件检查失败：{exc}") from exc
+
+
+@app.get(
+    "/api/customers/{customer_id}/ctexcel-order-info",
+    response_model=CTExcelOrderInfoOut,
+)
+async def get_customer_ctexcel_order_info(customer_id: int, limit: int = 50):
+    """扫描 CTExcel 订单邮件，并把手机号、订单号等资料同步到客户记录。"""
+    c = await get_customer(customer_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="客户不存在")
+    if _normalize_product_type(c.get("product_type")) != "ctexcel":
+        raise HTTPException(status_code=400, detail="该客户不是 CTExcel 模式")
+    return await _sync_ctexcel_order_info(c, limit)
 
 
 @app.get("/api/customers/{customer_id}/payment-info-emails", response_model=PaymentInfoEmailOut)

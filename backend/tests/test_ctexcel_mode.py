@@ -295,3 +295,92 @@ def test_frontend_contains_persistent_ctexcel_mode_and_mode_specific_ui():
     assert "ctexcel-50x40" in html_text
     assert "CTExcel订单号" in html_text
     assert "CTExcel推荐码" in html_text
+
+
+def test_legacy_label_config_is_merged_with_ctexcel_template(ctexcel_client):
+    client, _ = ctexcel_client
+    asyncio.run(
+        crud.set_setting(
+            "label_templates",
+            """[{
+              "id": "legacy-giffgaff-only",
+              "name": "旧 Giffgaff 模板",
+              "width_mm": 50,
+              "height_mm": 30,
+              "elements": []
+            }]""",
+        )
+    )
+
+    response = client.get("/api/label-config")
+
+    assert response.status_code == 200
+    templates = response.json()["templates"]
+    ids = {template["id"] for template in templates}
+    assert "legacy-giffgaff-only" in ids
+    assert "ctexcel-50x40" in ids
+    ctexcel = next(
+        template for template in templates if template["id"] == "ctexcel-50x40"
+    )
+    sources = {element["source"] for element in ctexcel["elements"]}
+    assert {"手机号", "邮箱", "CTExcel订单号", "CTExcel推荐码"} <= sources
+    assert "号码资料二维码" in sources
+
+
+def test_pending_ctexcel_auto_sync_only_selects_recent_incomplete_mailboxes(
+    ctexcel_client,
+):
+    _, db_path = ctexcel_client
+    with sqlite3.connect(db_path) as connection:
+        pending_id = connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date, email_account_id)
+               VALUES ('ctexcel', 'pending@example.com', '2026-07-29', 'pending-mail')"""
+        ).lastrowid
+        connection.execute(
+            """INSERT INTO customers
+               (product_type, email, phone_number, activation_date,
+                email_account_id, ctexcel_order_number)
+               VALUES ('ctexcel', 'complete@example.com', '07900000001',
+                       '2026-07-29', 'complete-mail', 'ORDER-COMPLETE')"""
+        )
+        connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date, email_account_id)
+               VALUES ('giffgaff', 'giffgaff@example.com',
+                       '2026-07-29', 'giffgaff-mail')"""
+        )
+        connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date)
+               VALUES ('ctexcel', 'manual@example.com', '2026-07-29')"""
+        )
+        connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date, email_account_id, created_at)
+               VALUES ('ctexcel', 'old@example.com', '2026-06-01',
+                       'old-mail', datetime('now', '-30 days'))"""
+        )
+        connection.commit()
+
+    rows = asyncio.run(main._pending_ctexcel_auto_sync_customers())
+
+    assert [row["id"] for row in rows] == [pending_id]
+
+
+def test_ctexcel_auto_sync_round_isolates_mailbox_failures():
+    pending = [{"id": 101}, {"id": 102}]
+    success = main.CTExcelOrderInfoOut(found=True)
+    sync_mock = AsyncMock(
+        side_effect=[success, main.HTTPException(status_code=502, detail="mail down")]
+    )
+
+    with patch.object(
+        main,
+        "_pending_ctexcel_auto_sync_customers",
+        new=AsyncMock(return_value=pending),
+    ), patch.object(main, "_sync_ctexcel_order_info", new=sync_mock):
+        result = asyncio.run(main._ctexcel_auto_sync_once())
+
+    assert result == {"checked": 2, "synced": 1, "failed": 1}
+    assert sync_mock.await_count == 2

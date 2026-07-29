@@ -15,6 +15,7 @@
 - **完整邮箱**：客户详情中按需读取托管邮箱的全部邮件，自动识别 Unix 秒/毫秒时间戳，同时显示北京时间与伦敦时间，并提供受控 HTML 预览、纯文本正文和复制功能
 - **双产品常驻模式**：页头可在 giffgaff / CTExcel 间切换，选择保存到 SQLite；新客户自动继承当前模式，历史客户继续保留自己的产品类型
 - **CTExcel 邮件建档**：同时支持 MoEmail 和 CloudMail，自动从订单邮件提取并保存手机号、订单号、交易金额、推荐码和推荐链接
+- **CTExcel Windows 客户端**：先在后台新建 CTExcel 客户并取得专属邮箱，再完成注册、优惠校验与人工微信支付
 - **模式隔离**：CTExcel 客户不分配 SIM 激活码、不生成英国随机身份、不显示 eSIM、支付解绑和关闭语音信箱工具
 - **标签模板**：六个默认模板，可拖拽排版，支持 `50mm x 30mm` 和 `50mm x 40mm`
 - **二维码打印**：模板里可放号码资料二维码、内置 12 步教程的未激活卡二维码和 Giffgaff App 下载二维码
@@ -112,6 +113,18 @@ https://你的后台域名/<ADMIN_ENTRY_PATH 的随机路径>
 - 打开详情或刷新验证码时，自动扫描订单邮件
 - 手动点击“扫描订单邮件”也会把结果写回 SQLite，并同步更新首页状态
 
+后台默认每 60 秒轮转扫描最近 14 天内、仍缺少手机号或订单号的 CTExcel
+客户邮箱，每轮最多处理 6 个。创建客户时保存的邮箱账户 ID 是订单关联键，
+因此客户端支付结束后无需回写订单字段。可通过环境变量调整：
+
+```bash
+export CTEXCEL_AUTO_SYNC_INTERVAL_SECONDS=60
+export CTEXCEL_AUTO_SYNC_LOOKBACK_DAYS=14
+export CTEXCEL_AUTO_SYNC_BATCH_SIZE=6
+```
+
+将扫描间隔设为 `0` 可停用后台定时任务，详情页的“扫描订单邮件”仍可使用。
+
 订单邮件解析字段包括：
 
 ```text
@@ -123,6 +136,13 @@ https://你的后台域名/<ADMIN_ENTRY_PATH 的随机路径>
 ```
 
 每位客户保存自己的 `product_type`，因此切换到另一模式不会改变历史客户的业务类型。CTExcel 号码资料二维码继续复用现有公开 Token 和 Worker 地址，但后端会根据客户类型渲染独立 CTExcel 扫码页；页面不包含 giffgaff 教程、eSIM、支付检查或语音信箱内容。
+
+Windows 自动申请客户端位于
+[`desktop-client`](desktop-client/README.md)。它使用隐藏入口 Cookie 与
+`APP_PASSWORD` 登录现有管理 API，先调用 `POST /api/customers` 创建
+`product_type=ctexcel` 的客户，再使用返回的 `customer_id + email` 完成
+购买。支付成功页只作为流程完成信号，订单号和手机号仍由后台从该邮箱自动
+提取并写入同一客户。
 
 ### 6. SIM 激活码与人工激活
 
@@ -206,6 +226,7 @@ giffgaff-label-manager/
 │   └── giffgaff.db      # 数据库（自动创建，已被 .gitignore 忽略）
 ├── frontend/
 │   └── index.html       # 管理界面
+├── desktop-client/      # CTExcel Windows 自动申请客户端
 └── README.md
 ```
 
