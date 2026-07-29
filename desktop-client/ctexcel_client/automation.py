@@ -23,8 +23,7 @@ from .config import AppConfig, app_config_dir
 from .proxy import (
     ProxyError,
     masked_proxy_label,
-    probe_proxy_endpoint,
-    resolve_proxy,
+    prepare_proxy,
 )
 
 
@@ -193,9 +192,15 @@ class CTExcelAutomation:
         self._validate_registration_defaults()
         self.stage("准备浏览器代理")
         try:
-            browser_proxy = resolve_proxy(self.config.proxy)
+            prepared_proxy = prepare_proxy(self.config.proxy)
+            browser_proxy = prepared_proxy.playwright_proxy
+            if prepared_proxy.public_ip:
+                self.log(
+                    f"当前出口公网 IP：{prepared_proxy.public_ip}"
+                )
+            elif prepared_proxy.public_ip_error:
+                self.log(prepared_proxy.public_ip_error)
             if browser_proxy:
-                probe_proxy_endpoint(browser_proxy)
                 source = (
                     "动态提取"
                     if self.config.proxy.mode == "api"

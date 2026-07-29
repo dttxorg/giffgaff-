@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QCloseEvent, QGuiApplication
@@ -30,10 +32,16 @@ from .config import (
     AppConfig,
     ProxyConfig,
     RegistrationDefaults,
+    is_cliproxy_whitelist_url,
     load_config,
     save_config,
 )
-from .proxy import masked_proxy_label, probe_proxy_endpoint, resolve_proxy
+from .proxy import (
+    ProxyError,
+    masked_proxy_label,
+    parse_proxy_payload,
+    prepare_proxy,
+)
 
 
 class ApiWorker(QThread):
@@ -105,6 +113,7 @@ class MainWindow(QMainWindow):
         self.proxy_worker: Optional[ApiWorker] = None
         self.automation_worker: Optional[AutomationWorker] = None
         self.current_customer: Optional[dict[str, Any]] = None
+        self.current_public_ip = ""
         self.setWindowTitle("CTExcel 申请工作台")
         self.resize(1120, 760)
         self.setMinimumSize(900, 650)
@@ -272,7 +281,7 @@ class MainWindow(QMainWindow):
 
         self.proxy_mode = QComboBox()
         self.proxy_mode.addItem("直连", "none")
-        self.proxy_mode.addItem("固定代理", "custom")
+        self.proxy_mode.addItem("粘贴单条代理", "custom")
         self.proxy_mode.addItem("API 动态提取", "api")
         self.proxy_mode.currentIndexChanged.connect(self._update_proxy_fields)
 
@@ -280,6 +289,18 @@ class MainWindow(QMainWindow):
         self.proxy_type.addItem("SOCKS5", "socks5")
         self.proxy_type.addItem("HTTP", "http")
         self.proxy_type.addItem("HTTPS", "https")
+
+        self.proxy_import = QLineEdit()
+        self.proxy_import.setPlaceholderText(
+            "直接粘贴 hostname:port:username:password"
+        )
+        self.proxy_import.setClearButtonEnabled(True)
+        self.proxy_import.returnPressed.connect(
+            lambda: self._apply_proxy_line(show_error=True)
+        )
+        self.proxy_import_btn = QPushButton("从剪贴板导入")
+        self.proxy_import_btn.setObjectName("miniButton")
+        self.proxy_import_btn.clicked.connect(self.import_proxy_from_clipboard)
 
         self.proxy_host = QLineEdit()
         self.proxy_host.setPlaceholderText("代理主机或 IP")
@@ -298,29 +319,50 @@ class MainWindow(QMainWindow):
 
         self.proxy_mode_label = self._field_label("代理模式")
         self.proxy_type_label = self._field_label("代理协议")
-        self.proxy_host_label = self._field_label("代理地址")
-        self.proxy_port_label = self._field_label("端口")
-        self.proxy_username_label = self._field_label("代理账号")
-        self.proxy_password_label = self._field_label("代理密码")
+        self.proxy_import_label = self._field_label(
+            "整行代理（推荐，无需逐项填写）"
+        )
+        self.proxy_host_label = self._field_label("已解析地址")
+        self.proxy_port_label = self._field_label("已解析端口")
+        self.proxy_username_label = self._field_label("已解析账号")
+        self.proxy_password_label = self._field_label("已解析密码")
         self.proxy_api_url_label = self._field_label("提取接口")
 
         grid.addWidget(self.proxy_mode_label, 0, 0)
         grid.addWidget(self.proxy_type_label, 0, 1)
         grid.addWidget(self.proxy_mode, 1, 0)
         grid.addWidget(self.proxy_type, 1, 1)
-        grid.addWidget(self.proxy_host_label, 2, 0)
-        grid.addWidget(self.proxy_port_label, 2, 1)
-        grid.addWidget(self.proxy_host, 3, 0)
-        grid.addWidget(self.proxy_port, 3, 1)
-        grid.addWidget(self.proxy_username_label, 4, 0)
-        grid.addWidget(self.proxy_password_label, 4, 1)
-        grid.addWidget(self.proxy_username, 5, 0)
-        grid.addWidget(self.proxy_password, 5, 1)
-        grid.addWidget(self.proxy_api_url_label, 6, 0, 1, 2)
-        grid.addWidget(self.proxy_api_url, 7, 0, 1, 2)
+        grid.addWidget(self.proxy_import_label, 2, 0, 1, 2)
+        import_row = QHBoxLayout()
+        import_row.setSpacing(8)
+        import_row.addWidget(self.proxy_import, 1)
+        import_row.addWidget(self.proxy_import_btn)
+        grid.addLayout(import_row, 3, 0, 1, 2)
+        grid.addWidget(self.proxy_host_label, 4, 0)
+        grid.addWidget(self.proxy_port_label, 4, 1)
+        grid.addWidget(self.proxy_host, 5, 0)
+        grid.addWidget(self.proxy_port, 5, 1)
+        grid.addWidget(self.proxy_username_label, 6, 0)
+        grid.addWidget(self.proxy_password_label, 6, 1)
+        grid.addWidget(self.proxy_username, 7, 0)
+        grid.addWidget(self.proxy_password, 7, 1)
+        grid.addWidget(self.proxy_api_url_label, 8, 0, 1, 2)
+        grid.addWidget(self.proxy_api_url, 9, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
+
+        ip_row = QHBoxLayout()
+        self.public_ip_status = QLabel("当前出口公网 IP：测试时自动检测")
+        self.public_ip_status.setObjectName("ipBadge")
+        self.public_ip_status.setWordWrap(True)
+        self.copy_public_ip_btn = QPushButton("复制 IP")
+        self.copy_public_ip_btn.setObjectName("miniButton")
+        self.copy_public_ip_btn.setEnabled(False)
+        self.copy_public_ip_btn.clicked.connect(self.copy_public_ip)
+        ip_row.addWidget(self.public_ip_status, 1)
+        ip_row.addWidget(self.copy_public_ip_btn)
+        layout.addLayout(ip_row)
 
         action_row = QHBoxLayout()
         self.proxy_status = QLabel("当前使用直连")
@@ -335,6 +377,7 @@ class MainWindow(QMainWindow):
 
         for field in (
             self.proxy_type,
+            self.proxy_import,
             self.proxy_host,
             self.proxy_port,
             self.proxy_username,
@@ -494,6 +537,7 @@ class MainWindow(QMainWindow):
         self.proxy_api_url.setText(config.proxy.api_url)
         self.proxy_api_url.setCursorPosition(0)
         self.proxy_api_url.setToolTip(config.proxy.api_url)
+        self.proxy_import.clear()
         self._update_proxy_fields()
 
     def collect_config(self) -> AppConfig:
@@ -530,9 +574,16 @@ class MainWindow(QMainWindow):
         mode = str(self.proxy_mode.currentData() or "none")
         custom = mode == "custom"
         api_mode = mode == "api"
+        self._sync_proxy_protocol()
 
         for widget in (self.proxy_type_label, self.proxy_type):
             widget.setVisible(custom or api_mode)
+        for widget in (
+            self.proxy_import_label,
+            self.proxy_import,
+            self.proxy_import_btn,
+        ):
+            widget.setVisible(custom)
         for widget in (
             self.proxy_host_label,
             self.proxy_host,
@@ -546,25 +597,124 @@ class MainWindow(QMainWindow):
             self.proxy_password_label,
             self.proxy_password,
         ):
-            widget.setVisible(custom or api_mode)
+            widget.setVisible(custom)
         for widget in (self.proxy_api_url_label, self.proxy_api_url):
+            widget.setVisible(api_mode)
+        for widget in (self.public_ip_status, self.copy_public_ip_btn):
             widget.setVisible(api_mode)
         self.proxy_test_btn.setEnabled(mode != "none")
         if mode == "none":
             self.proxy_status.setText("当前使用直连")
+            self.proxy_test_btn.setText("测试代理")
         elif custom:
             self.proxy_status.setText(
-                "固定代理将在建档前验证协议，并测试访问 CTExcel"
+                "粘贴整行代理即可自动拆分；启动前会测试访问 CTExcel"
             )
+            self.proxy_test_btn.setText("测试代理")
         else:
             self.proxy_status.setText(
-                "每次申请前重新提取，并验证代理可访问 CTExcel"
+                "接口返回的 HOST:PORT:USERNAME:PASSWORD 会自动识别，"
+                "无需逐项填写"
             )
+            self.proxy_test_btn.setText("提取并测试")
 
     def _proxy_fields_changed(self, *_args: object) -> None:
         mode = str(self.proxy_mode.currentData() or "none")
+        self._sync_proxy_protocol()
+        self.proxy_api_url.setToolTip(self.proxy_api_url.text().strip())
         if mode != "none":
             self.proxy_status.setText("代理配置已修改，请提取并测试")
+
+    def _sync_proxy_protocol(self) -> None:
+        mode = str(self.proxy_mode.currentData() or "none")
+        cliproxy = (
+            mode == "api"
+            and is_cliproxy_whitelist_url(self.proxy_api_url.text())
+        )
+        if cliproxy:
+            index = self.proxy_type.findData("socks5")
+            if index >= 0 and self.proxy_type.currentIndex() != index:
+                self.proxy_type.blockSignals(True)
+                self.proxy_type.setCurrentIndex(index)
+                self.proxy_type.blockSignals(False)
+            self.proxy_type.setEnabled(False)
+            self.proxy_type.setToolTip(
+                "该白名单提取接口会自动按 SOCKS5 使用"
+            )
+        else:
+            self.proxy_type.setEnabled(mode != "none")
+            self.proxy_type.setToolTip("")
+
+    def import_proxy_from_clipboard(self) -> None:
+        value = QGuiApplication.clipboard().text().strip()
+        self.proxy_import.setText(value)
+        self._apply_proxy_line(show_error=True)
+
+    def _apply_proxy_line(self, *, show_error: bool = False) -> None:
+        value = self.proxy_import.text().strip()
+        if not value:
+            if show_error:
+                self._show_message(
+                    QMessageBox.Warning,
+                    "代理格式",
+                    "请先复制或粘贴整行代理。\n\n"
+                    "支持：hostname:port:username:password",
+                )
+            return
+        try:
+            proxy = parse_proxy_payload(
+                value,
+                default_scheme=str(
+                    self.proxy_type.currentData() or "socks5"
+                ),
+            )
+            parsed = urlsplit(proxy["server"])
+            if not parsed.hostname or not parsed.port:
+                raise ProxyError("代理地址或端口缺失")
+        except (ProxyError, ValueError) as exc:
+            self.proxy_status.setText(f"整行代理识别失败：{exc}")
+            if show_error:
+                self._show_message(
+                    QMessageBox.Warning,
+                    "代理格式错误",
+                    f"{exc}\n\n支持："
+                    "hostname:port:username:password",
+                )
+            return
+
+        type_index = self.proxy_type.findData(parsed.scheme)
+        if type_index >= 0:
+            self.proxy_type.setCurrentIndex(type_index)
+        self.proxy_host.setText(parsed.hostname)
+        self.proxy_port.setText(str(parsed.port))
+        self.proxy_username.setText(str(proxy.get("username") or ""))
+        self.proxy_password.setText(str(proxy.get("password") or ""))
+        label = masked_proxy_label(proxy)
+        self.proxy_import.clear()
+        self.proxy_import.setPlaceholderText(
+            "已自动拆分，可继续粘贴下一条代理"
+        )
+        self.proxy_status.setText(f"整行代理已识别：{label}")
+        self.log(f"固定代理已从整行内容自动识别：{label}")
+
+    def _set_public_ip(self, value: str = "", error: str = "") -> None:
+        self.current_public_ip = value.strip()
+        self.copy_public_ip_btn.setEnabled(bool(self.current_public_ip))
+        if self.current_public_ip:
+            self.public_ip_status.setText(
+                f"当前出口公网 IP：{self.current_public_ip}"
+            )
+        elif error:
+            self.public_ip_status.setText(f"公网 IP：{error}")
+        else:
+            self.public_ip_status.setText(
+                "当前出口公网 IP：测试时自动检测"
+            )
+
+    def copy_public_ip(self) -> None:
+        if self.current_public_ip:
+            QGuiApplication.clipboard().setText(self.current_public_ip)
+            self.log("当前出口公网 IP 已复制")
 
     def test_proxy(self) -> None:
         if self.proxy_worker and self.proxy_worker.isRunning():
@@ -575,13 +725,16 @@ class MainWindow(QMainWindow):
             return
 
         def action() -> dict[str, str]:
-            resolved = resolve_proxy(config.proxy)
-            if not resolved:
-                return {"label": "直连"}
-            probe_proxy_endpoint(resolved)
-            return {"label": masked_proxy_label(resolved)}
+            prepared = prepare_proxy(config.proxy)
+            return {
+                "label": masked_proxy_label(prepared.playwright_proxy),
+                "public_ip": prepared.public_ip,
+                "public_ip_error": prepared.public_ip_error,
+            }
 
         self.proxy_status.setText("正在提取并验证代理连接……")
+        if config.proxy.mode == "api":
+            self._set_public_ip(error="检测中……")
         self.proxy_test_btn.setEnabled(False)
         self.proxy_worker = ApiWorker(action)
         self.proxy_worker.succeeded.connect(self._proxy_test_ok)
@@ -594,13 +747,83 @@ class MainWindow(QMainWindow):
     def _proxy_test_ok(self, result: object) -> None:
         data = result if isinstance(result, dict) else {}
         label = str(data.get("label") or "代理")
+        self._set_public_ip(
+            str(data.get("public_ip") or ""),
+            str(data.get("public_ip_error") or ""),
+        )
         self.proxy_status.setText(f"代理提取和目标连接正常：{label}")
         self.log(f"代理测试成功：{label}")
 
     def _proxy_test_failed(self, message: str) -> None:
+        match = re.search(r"当前出口公网 IP：([^\r\n]+)", message)
+        if match and "检测失败" not in match.group(1):
+            self._set_public_ip(match.group(1).strip())
+        else:
+            self._set_public_ip(error="检测失败")
         self.proxy_status.setText(f"代理测试失败：{message}")
         self.log(f"代理测试失败：{message}")
-        QMessageBox.warning(self, "代理测试失败", message)
+        self._show_message(
+            QMessageBox.Warning,
+            "代理测试失败",
+            message,
+        )
+
+    def _build_message_box(
+        self,
+        icon: QMessageBox.Icon,
+        title: str,
+        message: str,
+    ) -> QMessageBox:
+        box = QMessageBox(self)
+        box.setIcon(icon)
+        box.setWindowTitle(title)
+        box.setText(message)
+        box.setTextFormat(Qt.PlainText)
+        box.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
+        box.setStandardButtons(QMessageBox.Ok)
+        box.setDefaultButton(QMessageBox.Ok)
+        box.setStyleSheet(
+            """
+            QMessageBox {
+                background-color: #ffffff;
+            }
+            QMessageBox QLabel {
+                padding: 6px 4px;
+                color: #172033;
+                background-color: #ffffff;
+                font-family: "Microsoft YaHei UI", "Segoe UI";
+                font-size: 13px;
+            }
+            QMessageBox QPushButton {
+                min-width: 88px;
+                min-height: 36px;
+                padding: 0 16px;
+                color: #ffffff;
+                background-color: #246bfe;
+                border: 1px solid #246bfe;
+                border-radius: 8px;
+                font-weight: 700;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #1758d8;
+            }
+            """
+        )
+        message_label = box.findChild(QLabel, "qt_msgbox_label")
+        if message_label:
+            message_label.setMinimumWidth(460)
+            message_label.setWordWrap(True)
+        return box
+
+    def _show_message(
+        self,
+        icon: QMessageBox.Icon,
+        title: str,
+        message: str,
+    ) -> None:
+        self._build_message_box(icon, title, message).exec()
 
     def _set_connection_state(self, state: str, text: str) -> None:
         self.connection_pill.setProperty("state", state)
@@ -663,7 +886,7 @@ class MainWindow(QMainWindow):
         self._set_connection_state("error", "●  连接失败")
         self.connection_detail.setText(message)
         self.log(f"连接失败：{message}")
-        QMessageBox.warning(self, "连接失败", message)
+        self._show_message(QMessageBox.Warning, "连接失败", message)
 
     def start_automation(self) -> None:
         if self.automation_worker and self.automation_worker.isRunning():
@@ -725,12 +948,16 @@ class MainWindow(QMainWindow):
             f"支付：£{payload.transaction_amount or self.config.registration.expected_price_gbp}"
         )
         self.log("流程已完成；服务器邮件同步会继续运行")
-        QMessageBox.information(self, "CTExcel 申请完成", summary)
+        self._show_message(
+            QMessageBox.Information,
+            "CTExcel 申请完成",
+            summary,
+        )
 
     def on_failure(self, message: str) -> None:
         self.log(f"流程停止：{message}")
         self.start_btn.setText("重试当前客户")
-        QMessageBox.warning(self, "流程未完成", message)
+        self._show_message(QMessageBox.Warning, "流程未完成", message)
 
     def on_finished(self) -> None:
         self.start_btn.setEnabled(True)
@@ -814,6 +1041,15 @@ class MainWindow(QMainWindow):
             QLabel#fieldLabel {
                 color: #526174;
                 font-size: 11px;
+                font-weight: 700;
+            }
+            QLabel#ipBadge {
+                padding: 9px 11px;
+                color: #124e3b;
+                background: #e7f8f1;
+                border: 1px solid #c4eadc;
+                border-radius: 8px;
+                font-size: 12px;
                 font-weight: 700;
             }
             QLineEdit, QComboBox {
@@ -924,6 +1160,13 @@ class MainWindow(QMainWindow):
                 font-family: "Cascadia Mono", "Consolas";
                 font-size: 11px;
                 selection-background-color: #2f6edb;
+            }
+            QMessageBox {
+                background-color: #ffffff;
+            }
+            QMessageBox QLabel {
+                color: #172033;
+                background-color: #ffffff;
             }
             QScrollBar:vertical {
                 width: 9px;

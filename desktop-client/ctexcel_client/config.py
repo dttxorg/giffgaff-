@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 
 APP_NAME = "CTExcelApplyClient"
@@ -20,6 +21,18 @@ DEFAULT_PROXY_API_URL = (
     "https://api.cliproxy.io/white/api"
     "?region=Rand&num=1&time=10&format=n&type=txt"
 )
+
+
+def is_cliproxy_whitelist_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(str(value or "").strip())
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and (parsed.hostname or "").lower() == "api.cliproxy.io"
+        and parsed.path.rstrip("/").lower() == "/white/api"
+    )
 
 
 def app_config_dir() -> Path:
@@ -128,6 +141,11 @@ class ProxyConfig:
     api_url: str = DEFAULT_PROXY_API_URL
     api_timeout_seconds: int = 20
 
+    def effective_proxy_type(self) -> str:
+        if self.mode == "api" and is_cliproxy_whitelist_url(self.api_url):
+            return "socks5"
+        return self.proxy_type.strip().lower() or "socks5"
+
     def playwright_proxy(self) -> Optional[dict[str, str]]:
         if self.mode != "custom":
             return None
@@ -195,6 +213,9 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
     if not proxy_values["password"]:
         proxy_values["password"] = str(proxy_raw.get("password") or "")
     proxy = ProxyConfig(**proxy_values)
+    # 2.0.6 以前保存过 HTTP 时，Cliproxy 白名单接口会被错误地按 HTTP 使用。
+    if proxy.mode == "api" and is_cliproxy_whitelist_url(proxy.api_url):
+        proxy.proxy_type = "socks5"
     registration_raw = (
         raw.get("registration")
         if isinstance(raw.get("registration"), dict)

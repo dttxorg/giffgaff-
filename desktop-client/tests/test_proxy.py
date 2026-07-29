@@ -3,11 +3,13 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from ctexcel_client.config import ProxyConfig
+from ctexcel_client.config import DEFAULT_PROXY_API_URL, ProxyConfig
 from ctexcel_client.proxy import (
     ProxyError,
+    detect_public_ip,
     masked_proxy_label,
     parse_proxy_payload,
+    prepare_proxy,
     probe_proxy_endpoint,
     resolve_proxy,
 )
@@ -31,6 +33,9 @@ def test_proxy_parser_accepts_credentials_and_json_payloads():
     json_server = parse_proxy_payload(
         '{"server": "socks5://203.0.113.13:1080"}'
     )
+    hostname_credentials = parse_proxy_payload(
+        "proxy.example.test:3010:proxy-user:proxy-password"
+    )
 
     assert authenticated == {
         "server": "socks5://203.0.113.11:1080",
@@ -39,6 +44,11 @@ def test_proxy_parser_accepts_credentials_and_json_payloads():
     }
     assert json_proxy == {"server": "http://203.0.113.12:8080"}
     assert json_server == {"server": "socks5://203.0.113.13:1080"}
+    assert hostname_credentials == {
+        "server": "socks5://proxy.example.test:3010",
+        "username": "proxy-user",
+        "password": "proxy-password",
+    }
 
 
 def test_dynamic_proxy_api_is_resolved_for_each_request():
@@ -59,6 +69,50 @@ def test_dynamic_proxy_api_is_resolved_for_each_request():
     assert first == {"server": "socks5://203.0.113.20:2080"}
     assert second == first
     assert len(calls) == 2
+
+
+def test_cliproxy_whitelist_api_is_always_treated_as_socks5():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text="proxy.example.test:3010:proxy-user:proxy-password",
+        )
+
+    config = ProxyConfig(
+        mode="api",
+        proxy_type="http",
+        api_url=DEFAULT_PROXY_API_URL,
+    )
+
+    assert resolve_proxy(
+        config,
+        transport=httpx.MockTransport(handler),
+    ) == {
+        "server": "socks5://proxy.example.test:3010",
+        "username": "proxy-user",
+        "password": "proxy-password",
+    }
+
+
+def test_public_ip_detection_accepts_json_response():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.ipify.org"
+        return httpx.Response(200, json={"ip": "8.8.4.4"})
+
+    assert detect_public_ip(
+        transport=httpx.MockTransport(handler)
+    ) == "8.8.4.4"
+
+
+def test_public_ip_detection_falls_back_to_plain_text():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.ipify.org":
+            return httpx.Response(503)
+        return httpx.Response(200, text="1.1.1.1\n")
+
+    assert detect_public_ip(
+        transport=httpx.MockTransport(handler)
+    ) == "1.1.1.1"
 
 
 def test_fixed_socks5_proxy_uses_optional_credentials():
@@ -203,3 +257,33 @@ def test_proxy_api_http_error_does_not_echo_secret_url():
 
     assert "HTTP 403" in str(exc_info.value)
     assert secret not in str(exc_info.value)
+
+
+def test_prepare_proxy_adds_detected_public_ip_to_whitelist_error(
+    monkeypatch,
+):
+    config = ProxyConfig(mode="api", api_url=DEFAULT_PROXY_API_URL)
+    monkeypatch.setattr(
+        "ctexcel_client.proxy.detect_public_ip",
+        lambda: "8.8.8.8",
+    )
+    monkeypatch.setattr(
+        "ctexcel_client.proxy.resolve_proxy",
+        lambda _config: {"server": "socks5://proxy.example.test:3010"},
+    )
+
+    def reject(_proxy):
+        raise ProxyError("SOCKS5 代理拒绝认证")
+
+    monkeypatch.setattr(
+        "ctexcel_client.proxy.probe_proxy_endpoint",
+        reject,
+    )
+
+    with pytest.raises(ProxyError) as exc_info:
+        prepare_proxy(config)
+
+    message = str(exc_info.value)
+    assert "当前出口公网 IP：8.8.8.8" in message
+    assert "局域网 IP 或服务器 IP" in message
+    assert "已按 SOCKS5 协议验证" in message

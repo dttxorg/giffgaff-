@@ -65,7 +65,7 @@ GitHub Actions 的 `windows-client.yml` 也会生成同名构建产物。
 客户端提供三种模式：
 
 1. 直连
-2. 固定代理：HTTP、HTTPS 或 SOCKS5，支持可选账号密码
+2. 粘贴单条代理：HTTP、HTTPS 或 SOCKS5，可以整行粘贴代理
 3. API 动态提取：每次申请开始前重新请求接口，解析 txt 或 JSON 返回
 
 默认动态提取接口示例：
@@ -74,20 +74,27 @@ GitHub Actions 的 `windows-client.yml` 也会生成同名构建产物。
 https://api.cliproxy.io/white/api?region=Rand&num=1&time=10&format=n&type=txt
 ```
 
-该接口当前返回 `HOST:PORT`，选择 SOCKS5 后会传给 Playwright：
+接口可以返回以下任一种格式，客户端会自动拆分地址、端口、账号和密码：
 
 ```text
-socks5://HOST:PORT
+HOST:PORT
+HOST:PORT:USERNAME:PASSWORD
+USERNAME:PASSWORD@HOST:PORT
+socks5://USERNAME:PASSWORD@HOST:PORT
 ```
+
+Cliproxy 白名单接口会自动锁定为 SOCKS5，旧版本保存的 HTTP 选项也会迁移，
+无需逐项填写代理账号和密码。固定代理可以粘贴整行，或点击“从剪贴板导入”。
 
 “提取并测试”会调用接口，完成真实 SOCKS5/HTTP 协议握手，并通过代理测试
 连接 CTExcel。正式开始申请时仍会重新提取，避免使用测试阶段已经过期的
 短效代理。日志只显示脱敏后的代理地址。
 
 使用 Cliproxy 白名单提取接口时，需要先把运行 Windows 客户端的公网 IP
-加入服务商白名单；也可以填写服务商提供的代理账号和密码。若白名单、
-协议或有效期不正确，客户端会在创建客户之前停止，并显示具体的代理测试
-错误，避免产生新的空客户。
+加入服务商白名单。客户端会在测试和申请前自动检测当前出口公网 IP，
+显示在代理卡片中并提供复制按钮；若白名单、协议或有效期不正确，会在
+创建客户之前停止，并在高对比度提示框中显示当前公网 IP 和具体错误，
+避免产生新的空客户。
 
 ## 第一次设置
 

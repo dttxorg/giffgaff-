@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
+import ipaddress
 import json
 import re
 import socket
@@ -16,6 +18,82 @@ from .config import ProxyConfig
 
 class ProxyError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class PreparedProxy:
+    playwright_proxy: Optional[dict[str, str]]
+    public_ip: str = ""
+    public_ip_error: str = ""
+
+
+PUBLIC_IP_ENDPOINTS = (
+    "https://api.ipify.org?format=json",
+    "https://checkip.amazonaws.com",
+    "https://1.1.1.1/cdn-cgi/trace",
+)
+
+
+def _valid_public_ip(value: str) -> str:
+    candidate = str(value or "").strip()
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return ""
+    if not address.is_global:
+        return ""
+    return str(address)
+
+
+def _public_ip_from_response(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, ValueError):
+        payload = None
+    if isinstance(payload, dict):
+        candidate = _valid_public_ip(str(payload.get("ip") or ""))
+        if candidate:
+            return candidate
+
+    text = response.text.strip()
+    trace_match = re.search(r"(?m)^ip=([^\r\n]+)", text)
+    if trace_match:
+        candidate = _valid_public_ip(trace_match.group(1))
+        if candidate:
+            return candidate
+    first_line = text.splitlines()[0].strip() if text else ""
+    return _valid_public_ip(first_line)
+
+
+def detect_public_ip(
+    *,
+    transport: Optional[httpx.BaseTransport] = None,
+    timeout: float = 5,
+) -> str:
+    """通过直连 HTTPS 检测运行客户端的出口公网 IP。"""
+    try:
+        with httpx.Client(
+            timeout=max(2, timeout),
+            follow_redirects=True,
+            trust_env=False,
+            transport=transport,
+            headers={
+                "Accept": "text/plain, application/json",
+                "User-Agent": "CTExcelApplyClient/2.0.7",
+            },
+        ) as client:
+            for endpoint in PUBLIC_IP_ENDPOINTS:
+                try:
+                    response = client.get(endpoint)
+                    response.raise_for_status()
+                except httpx.HTTPError:
+                    continue
+                public_ip = _public_ip_from_response(response)
+                if public_ip:
+                    return public_ip
+    except httpx.HTTPError:
+        pass
+    raise ProxyError("当前出口公网 IP 检测失败")
 
 
 def _json_proxy_candidate(value: Any) -> str:
@@ -95,9 +173,11 @@ def parse_proxy_payload(
 
     # 同时兼容 host:port:user:password。
     if "://" not in candidate and "@" not in candidate:
-        parts = candidate.split(":")
+        parts = candidate.split(":", 3)
         if len(parts) == 4 and parts[1].isdigit():
-            candidate = f"{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+            candidate = f"{parts[0]}:{parts[1]}"
+            username = parts[2]
+            password = parts[3]
 
     normalized = candidate if "://" in candidate else f"{scheme}://{candidate}"
     parsed = urlsplit(normalized)
@@ -141,7 +221,7 @@ def fetch_proxy_from_api(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.0.6",
+                "User-Agent": "CTExcelApplyClient/2.0.7",
             },
         ) as client:
             response = client.get(url)
@@ -156,7 +236,7 @@ def fetch_proxy_from_api(
         raise ProxyError("代理接口网络连接失败") from exc
     return parse_proxy_payload(
         response.text,
-        default_scheme=config.proxy_type,
+        default_scheme=config.effective_proxy_type(),
         fallback_username=config.username,
         fallback_password=config.password,
     )
@@ -339,6 +419,46 @@ def probe_proxy_endpoint(
         raise
     except OSError as exc:
         raise ProxyError("代理服务器连接或协议握手失败") from exc
+
+
+def prepare_proxy(config: ProxyConfig) -> PreparedProxy:
+    """提取、检测公网 IP，并在创建客户前验证代理。"""
+    public_ip = ""
+    public_ip_error = ""
+    if config.mode.strip().lower() == "api":
+        try:
+            public_ip = detect_public_ip()
+        except ProxyError as exc:
+            public_ip_error = str(exc)
+
+    try:
+        playwright_proxy = resolve_proxy(config)
+        if playwright_proxy:
+            probe_proxy_endpoint(playwright_proxy)
+    except ProxyError as exc:
+        details = [str(exc)]
+        if config.mode.strip().lower() == "api":
+            details.extend(
+                [
+                    "",
+                    (
+                        f"当前出口公网 IP：{public_ip}"
+                        if public_ip
+                        else f"当前出口公网 IP：{public_ip_error or '检测失败'}"
+                    ),
+                    "请确认代理平台白名单填写的是上面的公网 IP，"
+                    "而不是局域网 IP 或服务器 IP。",
+                ]
+            )
+            if config.effective_proxy_type() == "socks5":
+                details.append("当前提取结果已按 SOCKS5 协议验证。")
+        raise ProxyError("\n".join(details)) from exc
+
+    return PreparedProxy(
+        playwright_proxy=playwright_proxy,
+        public_ip=public_ip,
+        public_ip_error=public_ip_error,
+    )
 
 
 def masked_proxy_label(proxy: Optional[dict[str, str]]) -> str:
