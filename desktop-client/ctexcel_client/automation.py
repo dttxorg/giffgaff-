@@ -194,7 +194,8 @@ class CTExcelAutomation:
         with sync_playwright() as playwright:
             launch_options: dict[str, Any] = {
                 "headless": bool(self.config.headless),
-                "slow_mo": max(0, int(self.config.slow_mo_ms)),
+                # 该流程用于逐单人工支付；保留可观察的操作节奏，避免连续快速点击。
+                "slow_mo": max(350, int(self.config.slow_mo_ms)),
             }
             channel = (self.config.browser_channel or "").strip().lower()
             if channel and channel != "chromium":
@@ -471,6 +472,8 @@ class CTExcelAutomation:
     ) -> None:
         self.stage("填写客户资料")
         defaults = self.config.registration
+        # 先选择寄送国家，官网才会按中国地址流程初始化后续表单。
+        self._select_china(page)
         self._fill_placeholder_input(
             page,
             "请填写姓",
@@ -513,7 +516,6 @@ class CTExcelAutomation:
         )
         self.log("验证码已自动填入")
 
-        self._select_china(page)
         self._smart_fill_address(page, defaults.chinese_address.strip())
         self._ensure_marketing_off(page)
         self._click_button(page, "同意提交")
@@ -564,10 +566,21 @@ class CTExcelAutomation:
         country = page.get_by_role("combobox", name=re.compile("寄送国家"))
         if country.count() != 1:
             raise AutomationError("寄送国家下拉框数量异常")
-        country.click()
+        # Element Plus 的透明 placeholder 覆盖 readonly input，点击 el-select 容器。
+        select = country.locator(
+            "xpath=ancestor::div["
+            "contains(concat(' ', normalize-space(@class), ' '), ' el-select ')"
+            "][1]"
+        )
+        if select.count() != 1:
+            raise AutomationError("寄送国家下拉容器数量异常")
+        select.click()
         option = page.get_by_role("option", name="中国", exact=True)
         option.wait_for(state="visible")
         option.click()
+        page.wait_for_timeout(500)
+        if "中国" not in select.inner_text():
+            raise AutomationError("寄送国家没有成功切换为中国")
         self.log("寄送国家已选择中国")
 
     def _smart_fill_address(self, page: Page, address: str) -> None:

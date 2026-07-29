@@ -56,3 +56,20 @@ def test_registration_fields_target_real_inputs_instead_of_placeholder_wrappers(
     assert "page.locator(f'input[placeholder=\"{escaped}\"]')" in source
     assert 'page.get_by_placeholder("请填写姓").fill' not in source
     assert 'page.get_by_placeholder("请填写验证码").fill' not in source
+
+
+def test_country_is_selected_before_registration_fields_at_human_paced_speed():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ctexcel_client"
+        / "automation.py"
+    ).read_text(encoding="utf-8")
+
+    form_start = source.index("def _fill_customer_info")
+    form_end = source.index("def _poll_verification_code", form_start)
+    form_source = source[form_start:form_end]
+    assert form_source.index("self._select_china(page)") < form_source.index(
+        '"请填写姓"'
+    )
+    assert '"slow_mo": max(350, int(self.config.slow_mo_ms))' in source
+    assert "' el-select '" in source
