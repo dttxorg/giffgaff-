@@ -573,6 +573,15 @@ def _plain_text_from_html(value: str) -> str:
     return re.sub(r"[ \t]+", " ", text)
 
 
+def _looks_like_html(value: str) -> bool:
+    return bool(
+        re.search(
+            r"(?is)<(?:!doctype|html|body|div|p|br|table|a|img|span)\b",
+            value or "",
+        )
+    )
+
+
 def _message_body_text(message: dict) -> str:
     plain = _first_text(
         message,
@@ -585,6 +594,11 @@ def _message_body_text(message: dict) -> str:
         "text_content",
     ).strip()
     if plain:
+        if _looks_like_html(plain):
+            rendered = _plain_text_from_html(plain)
+            rendered = re.sub(r"\n[ \t]+", "\n", rendered)
+            rendered = re.sub(r"\n{3,}", "\n\n", rendered)
+            return rendered.strip()
         return plain
     html_body = _first_text(
         message,
@@ -603,7 +617,7 @@ def _message_body_text(message: dict) -> str:
 
 
 def _message_html_body(message: dict) -> str:
-    return _first_text(
+    explicit = _first_text(
         message,
         "html",
         "htmlContent",
@@ -611,6 +625,17 @@ def _message_html_body(message: dict) -> str:
         "htmlBody",
         "html_body",
     )
+    if explicit:
+        return explicit
+    fallback = _first_text(
+        message,
+        "text",
+        "content",
+        "body",
+        "textContent",
+        "text_content",
+    )
+    return fallback if _looks_like_html(fallback) else ""
 
 
 def _extract_verification_code(message: dict) -> Optional[str]:
@@ -1727,16 +1752,36 @@ async def get_customer_inbox_message(
     response.headers["Cache-Control"] = "no-store"
     account_id, client = await _resolve_inbox_provider(c)
     try:
-        mailbox = client.get_email_messages(account_id)
+        mailbox = await asyncio.to_thread(
+            client.get_email_messages,
+            account_id,
+        )
         summaries = _message_list(mailbox)
         summary = next(
             (item for item in summaries if _message_id(item) == message_id),
             {},
         )
         detail = {}
-        if not _message_body_text(summary):
-            detail = _message_detail_payload(client.get_message(account_id, message_id))
-        message = {**summary, **detail}
+        try:
+            detail_payload = await asyncio.to_thread(
+                client.get_message,
+                account_id,
+                message_id,
+            )
+            detail = _message_detail_payload(detail_payload)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404 or not summary:
+                raise
+        except Exception:
+            if not (
+                _message_body_text(summary)
+                or _message_html_body(summary)
+            ):
+                raise
+        message = dict(summary)
+        for key, value in detail.items():
+            if value not in (None, "", [], {}):
+                message[key] = value
         if not message or (not summary and not detail):
             raise HTTPException(status_code=404, detail="邮件不存在或已失效")
         return InboxMessageDetailOut(

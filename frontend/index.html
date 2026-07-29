@@ -1608,6 +1608,7 @@
       justify-content: space-between;
       align-items: center;
       gap: 10px;
+      flex-wrap: wrap;
       margin: 10px 0 0;
     }
     .inbox-body-modes { display: flex; gap: 6px; }
@@ -1615,6 +1616,12 @@
       background: #5f4b8b;
       border-color: #5f4b8b;
       color: #fff;
+    }
+    .inbox-viewer-tools {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+      flex-wrap: wrap;
     }
     .inbox-body-pane {
       flex: 1;
@@ -1630,6 +1637,11 @@
       line-height: 1.72;
       overflow-wrap: anywhere;
       white-space: pre-wrap;
+    }
+    .inbox-body a {
+      color: #5f4b8b;
+      text-decoration: underline;
+      text-underline-offset: 2px;
     }
     .inbox-html-frame {
       display: block;
@@ -2238,13 +2250,16 @@
                 <button type="button" class="small ghost active" id="d-inbox-html-mode" onclick="setInboxBodyMode('html')" disabled>HTML 预览</button>
                 <button type="button" class="small ghost" id="d-inbox-text-mode" onclick="setInboxBodyMode('text')" disabled>文本正文</button>
               </div>
-              <button type="button" class="small ghost" id="d-inbox-copy" onclick="copyInboxBody()" disabled>复制正文</button>
+              <div class="inbox-viewer-tools">
+                <button type="button" class="small ghost" id="d-inbox-load-images" onclick="loadInboxRemoteImages()" disabled>加载外部图片</button>
+                <button type="button" class="small ghost" id="d-inbox-copy" onclick="copyInboxBody()" disabled>复制正文</button>
+              </div>
             </div>
           </div>
           <div class="inbox-body-pane" id="d-inbox-text-pane">
             <pre class="inbox-body" id="d-inbox-message-body">邮件正文会显示在这里。</pre>
           </div>
-          <iframe class="inbox-html-frame" id="d-inbox-html-frame" title="邮件 HTML 正文" sandbox hidden></iframe>
+          <iframe class="inbox-html-frame" id="d-inbox-html-frame" title="邮件 HTML 正文" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" hidden></iframe>
         </article>
       </div>
     </section>
@@ -2727,6 +2742,8 @@ let inboxLoadedCustomerId = null;
 let activeInboxBody = '';
 let activeInboxHtml = '';
 let activeInboxBodyMode = 'text';
+let activeInboxRemoteImageCount = 0;
+let activeInboxRemoteImagesLoaded = false;
 
 function toast(msg, type='') {
   const t = $('toast');
@@ -4037,6 +4054,8 @@ function resetInboxView(customer) {
   activeInboxBody = '';
   activeInboxHtml = '';
   activeInboxBodyMode = 'text';
+  activeInboxRemoteImageCount = 0;
+  activeInboxRemoteImagesLoaded = false;
   const readable = hasReadableInbox(customer);
   $('d-inbox-address').textContent = customer?.moemail_address || customer?.email || '邮箱尚未配置';
   $('d-inbox-status').textContent = readable
@@ -4055,6 +4074,8 @@ function resetInboxView(customer) {
   $('d-inbox-html-frame').srcdoc = '';
   $('d-inbox-html-mode').disabled = true;
   $('d-inbox-text-mode').disabled = true;
+  $('d-inbox-load-images').disabled = true;
+  $('d-inbox-load-images').textContent = '加载外部图片';
   $('d-inbox-copy').disabled = true;
   setInboxBodyMode('text');
 }
@@ -4174,6 +4195,8 @@ async function loadInboxForActive(force=false) {
       $('d-inbox-html-frame').srcdoc = '';
       $('d-inbox-html-mode').disabled = true;
       $('d-inbox-text-mode').disabled = true;
+      $('d-inbox-load-images').disabled = true;
+      $('d-inbox-load-images').textContent = '加载外部图片';
       $('d-inbox-copy').disabled = true;
     }
   } catch (err) {
@@ -4207,7 +4230,11 @@ async function loadInboxMessage(messageId) {
   $('d-inbox-html-frame').srcdoc = '';
   $('d-inbox-html-mode').disabled = true;
   $('d-inbox-text-mode').disabled = true;
+  $('d-inbox-load-images').disabled = true;
+  $('d-inbox-load-images').textContent = '加载外部图片';
   $('d-inbox-copy').disabled = true;
+  activeInboxRemoteImageCount = 0;
+  activeInboxRemoteImagesLoaded = false;
   try {
     const query = new URLSearchParams({ message_id: activeInboxMessageId });
     const res = await fetch(`${API}/customers/${customerId}/inbox-message?${query}`, { cache: 'no-store' });
@@ -4225,15 +4252,23 @@ async function loadInboxMessage(messageId) {
     $('d-inbox-message-meta').textContent = meta.join('\n');
     activeInboxBody = data.body || '';
     activeInboxHtml = data.html_body || '';
-    $('d-inbox-message-body').textContent = activeInboxBody || '该邮件没有可显示的文本正文。';
+    renderInboxTextBody(activeInboxBody);
     $('d-inbox-text-mode').disabled = !activeInboxBody;
     $('d-inbox-html-mode').disabled = !activeInboxHtml;
     $('d-inbox-copy').disabled = !activeInboxBody;
     if (activeInboxHtml) {
-      renderInboxHtml(activeInboxHtml);
+      activeInboxRemoteImageCount = countInboxRemoteImages(activeInboxHtml);
+      activeInboxRemoteImagesLoaded = false;
+      $('d-inbox-load-images').disabled = activeInboxRemoteImageCount === 0;
+      $('d-inbox-load-images').textContent = activeInboxRemoteImageCount
+        ? `加载外部图片 (${activeInboxRemoteImageCount})`
+        : '没有外部图片';
+      renderInboxHtml(activeInboxHtml, false);
       setInboxBodyMode('html');
     } else {
       $('d-inbox-html-frame').srcdoc = '';
+      $('d-inbox-load-images').disabled = true;
+      $('d-inbox-load-images').textContent = '没有外部图片';
       setInboxBodyMode('text');
     }
   } catch (err) {
@@ -4244,15 +4279,81 @@ async function loadInboxMessage(messageId) {
     $('d-inbox-html-frame').srcdoc = '';
     activeInboxBody = '';
     activeInboxHtml = '';
+    activeInboxRemoteImageCount = 0;
+    activeInboxRemoteImagesLoaded = false;
     $('d-inbox-html-mode').disabled = true;
     $('d-inbox-text-mode').disabled = true;
+    $('d-inbox-load-images').disabled = true;
+    $('d-inbox-load-images').textContent = '加载外部图片';
     toast(err.message, 'error');
   }
 }
 
-function sanitizeInboxHtml(rawHtml) {
+function safeInboxUrl(rawValue, allowedProtocols) {
+  const value = String(rawValue || '').trim();
+  if (!value) return '';
+  try {
+    const parsed = new URL(value);
+    return allowedProtocols.includes(parsed.protocol.toLowerCase()) ? parsed.href : '';
+  } catch (_err) {
+    return '';
+  }
+}
+
+function countInboxRemoteImages(rawHtml) {
   const doc = new DOMParser().parseFromString(String(rawHtml || ''), 'text/html');
-  doc.querySelectorAll('script, iframe, object, embed, form, input, button, textarea, select, meta, base, link').forEach(node => node.remove());
+  return [...doc.querySelectorAll('img[src]')].filter(image => (
+    !!safeInboxUrl(image.getAttribute('src'), ['https:', 'http:'])
+  )).length;
+}
+
+function sanitizeInboxHtml(rawHtml, allowRemoteImages=false) {
+  const doc = new DOMParser().parseFromString(String(rawHtml || ''), 'text/html');
+  doc.querySelectorAll('script, iframe, object, embed, form, input, button, textarea, select, meta, base, link, svg, math, video, audio, source').forEach(node => node.remove());
+
+  doc.querySelectorAll('a').forEach(anchor => {
+    const safeHref = safeInboxUrl(
+      anchor.getAttribute('href'),
+      ['https:', 'http:', 'mailto:', 'tel:'],
+    );
+    if (!safeHref) {
+      anchor.removeAttribute('href');
+      anchor.removeAttribute('target');
+      return;
+    }
+    anchor.setAttribute('href', safeHref);
+    anchor.setAttribute('target', '_blank');
+    anchor.setAttribute('rel', 'noopener noreferrer nofollow');
+    anchor.setAttribute('referrerpolicy', 'no-referrer');
+  });
+
+  doc.querySelectorAll('img').forEach(image => {
+    const rawSource = image.getAttribute('src') || '';
+    const embedded = /^data:image\/(?:png|jpe?g|gif|webp|avif);/i.test(rawSource);
+    const remoteSource = safeInboxUrl(rawSource, ['https:', 'http:']);
+    if (embedded) {
+      image.setAttribute('loading', 'lazy');
+      image.setAttribute('referrerpolicy', 'no-referrer');
+      return;
+    }
+    if (remoteSource && allowRemoteImages) {
+      image.setAttribute('src', remoteSource);
+      image.setAttribute('loading', 'lazy');
+      image.setAttribute('referrerpolicy', 'no-referrer');
+      return;
+    }
+    if (remoteSource) {
+      const placeholder = doc.createElement('span');
+      placeholder.className = 'remote-image-placeholder';
+      placeholder.textContent = image.getAttribute('alt')
+        ? `外部图片：${image.getAttribute('alt')}`
+        : '外部图片已隐藏，点击邮件上方“加载外部图片”查看';
+      image.replaceWith(placeholder);
+      return;
+    }
+    image.removeAttribute('src');
+  });
+
   doc.querySelectorAll('*').forEach(node => {
     [...node.attributes].forEach(attr => {
       const name = attr.name.toLowerCase();
@@ -4261,10 +4362,19 @@ function sanitizeInboxHtml(rawHtml) {
         node.removeAttribute(attr.name);
         return;
       }
-      if (['href', 'src', 'srcset', 'action', 'formaction', 'poster', 'background'].includes(name)) {
-        if (!(name === 'src' && /^data:image\//i.test(value))) {
-          node.removeAttribute(attr.name);
-        }
+      if (
+        ['srcset', 'action', 'formaction', 'poster', 'background', 'ping', 'xlink:href']
+          .includes(name)
+      ) {
+        node.removeAttribute(attr.name);
+        return;
+      }
+      if (name === 'href' && node.tagName !== 'A') {
+        node.removeAttribute(attr.name);
+        return;
+      }
+      if (name === 'src' && node.tagName !== 'IMG') {
+        node.removeAttribute(attr.name);
         return;
       }
       if (name === 'style' && /(url\s*\(|expression\s*\(|@import)/i.test(value)) {
@@ -4275,10 +4385,57 @@ function sanitizeInboxHtml(rawHtml) {
   return doc.body.innerHTML;
 }
 
-function renderInboxHtml(rawHtml) {
-  const safeBody = sanitizeInboxHtml(rawHtml);
-  const csp = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'";
-  $('d-inbox-html-frame').srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html{color:#312a38;background:#fff;font:14px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif}body{margin:0;padding:18px;overflow-wrap:anywhere}img{max-width:100%;height:auto}table{max-width:100%;border-collapse:collapse}td,th{padding:4px 6px}pre{white-space:pre-wrap}a{color:#5f4b8b;text-decoration:underline}</style></head><body>${safeBody}</body></html>`;
+function renderInboxTextBody(rawText) {
+  const container = $('d-inbox-message-body');
+  container.replaceChildren();
+  const value = String(rawText || '');
+  if (!value) {
+    container.textContent = '该邮件没有可显示的文本正文。';
+    return;
+  }
+  const urlPattern = /https?:\/\/[^\s<>"']+/gi;
+  let cursor = 0;
+  for (const match of value.matchAll(urlPattern)) {
+    if (match.index > cursor) {
+      container.appendChild(document.createTextNode(value.slice(cursor, match.index)));
+    }
+    const safeHref = safeInboxUrl(match[0], ['https:', 'http:']);
+    if (safeHref) {
+      const link = document.createElement('a');
+      link.href = safeHref;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer nofollow';
+      link.referrerPolicy = 'no-referrer';
+      link.textContent = match[0];
+      container.appendChild(link);
+    } else {
+      container.appendChild(document.createTextNode(match[0]));
+    }
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < value.length) {
+    container.appendChild(document.createTextNode(value.slice(cursor)));
+  }
+}
+
+function renderInboxHtml(rawHtml, allowRemoteImages=false) {
+  const safeBody = sanitizeInboxHtml(rawHtml, allowRemoteImages);
+  const imageSources = allowRemoteImages ? 'https: http: data:' : 'data:';
+  const csp = `default-src 'none'; img-src ${imageSources}; style-src 'unsafe-inline'; font-src data:; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'`;
+  $('d-inbox-html-frame').srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html{color:#312a38;background:#fff;font:14px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif}body{margin:0;padding:18px;overflow-wrap:anywhere}img{max-width:100%;height:auto}table{max-width:100%;border-collapse:collapse}td,th{padding:4px 6px}pre{white-space:pre-wrap}a{color:#5f4b8b;text-decoration:underline;text-underline-offset:2px}.remote-image-placeholder{display:inline-flex;align-items:center;min-width:220px;min-height:48px;padding:8px 12px;border:1px dashed #cfc4dc;border-radius:6px;color:#6f647b;background:#f8f5fb;font:12px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif}</style></head><body>${safeBody}</body></html>`;
+}
+
+function loadInboxRemoteImages() {
+  if (
+    !activeInboxHtml
+    || !activeInboxRemoteImageCount
+    || activeInboxRemoteImagesLoaded
+  ) return;
+  activeInboxRemoteImagesLoaded = true;
+  renderInboxHtml(activeInboxHtml, true);
+  $('d-inbox-load-images').disabled = true;
+  $('d-inbox-load-images').textContent = `外部图片已加载 (${activeInboxRemoteImageCount})`;
+  toast('外部图片已加载；邮件链接可直接点击', 'success');
 }
 
 function setInboxBodyMode(mode) {

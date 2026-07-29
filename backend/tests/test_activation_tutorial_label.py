@@ -370,7 +370,17 @@ def test_frontend_uses_customer_inbox_workspace_and_independent_print_flows():
     assert 'id="d-inbox-list"' in html
     assert 'id="d-inbox-message-body"' in html
     assert 'id="d-inbox-html-frame"' in html
+    assert 'id="d-inbox-load-images"' in html
+    assert 'sandbox="allow-popups allow-popups-to-escape-sandbox"' in html
+    assert 'referrerpolicy="no-referrer"' in html
     assert "function sanitizeInboxHtml" in html
+    assert "function safeInboxUrl" in html
+    assert "function renderInboxTextBody" in html
+    assert "function loadInboxRemoteImages" in html
+    assert "noopener noreferrer nofollow" in html
+    assert "['https:', 'http:', 'mailto:', 'tel:']" in html
+    assert "img-src ${imageSources}" in html
+    assert "connect-src 'none'" in html
     assert "function setInboxBodyMode" in html
     assert "function formatInboxDualTime" in html
     assert "'Asia/Shanghai'" in html

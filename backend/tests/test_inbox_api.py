@@ -141,6 +141,84 @@ def test_inbox_message_returns_full_plain_body_with_html_fallback(inbox_client):
     provider.get_message.assert_called_once_with("account-1", "message-1")
 
 
+def test_inbox_message_fetches_html_even_when_summary_has_plain_text(
+    inbox_client,
+):
+    client, customer_id, _ = inbox_client
+    provider = MagicMock()
+    provider.get_email_messages.return_value = {
+        "messages": [
+            {
+                "id": "message-with-image",
+                "subject": "Rich message",
+                "text": "Plain summary body",
+            }
+        ]
+    }
+    provider.get_message.return_value = {
+        "message": {
+            "id": "message-with-image",
+            "html": (
+                '<a href="https://example.com/open">'
+                '<img src="https://images.example.com/card.png" '
+                'alt="Open card"></a>'
+            ),
+        }
+    }
+
+    with patch.object(
+        main,
+        "_resolve_inbox_provider",
+        new=AsyncMock(return_value=("account-1", provider)),
+    ):
+        response = client.get(
+            f"/api/customers/{customer_id}/inbox-message",
+            params={"message_id": "message-with-image"},
+        )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["body"] == "Plain summary body"
+    assert 'href="https://example.com/open"' in data["html_body"]
+    assert 'src="https://images.example.com/card.png"' in data["html_body"]
+    provider.get_message.assert_called_once_with(
+        "account-1",
+        "message-with-image",
+    )
+
+
+def test_inbox_message_recognizes_html_returned_in_text_field(inbox_client):
+    client, customer_id, _ = inbox_client
+    provider = MagicMock()
+    provider.get_email_messages.return_value = {
+        "messages": [
+            {
+                "id": "html-in-text",
+                "subject": "Provider HTML",
+                "text": (
+                    '<p>Hello <a href="https://example.com">website</a></p>'
+                ),
+            }
+        ]
+    }
+    provider.get_message.return_value = {}
+
+    with patch.object(
+        main,
+        "_resolve_inbox_provider",
+        new=AsyncMock(return_value=("account-1", provider)),
+    ):
+        response = client.get(
+            f"/api/customers/{customer_id}/inbox-message",
+            params={"message_id": "html-in-text"},
+        )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["body"] == "Hello website"
+    assert '<a href="https://example.com">' in data["html_body"]
+
+
 def test_inbox_message_missing_returns_404(inbox_client):
     client, customer_id, _ = inbox_client
     provider = MagicMock()
