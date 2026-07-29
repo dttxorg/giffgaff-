@@ -3,6 +3,7 @@ import os
 
 from ctexcel_client.config import (
     AppConfig,
+    ProxyConfig,
     RegistrationDefaults,
     load_config,
     save_config,
@@ -27,6 +28,7 @@ def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
     config = AppConfig(
         app_password="super-secret-password",
         remember_credentials=True,
+        proxy=ProxyConfig(password="super-secret-proxy-password"),
         registration=RegistrationDefaults(
             last_name="Fixed",
             first_name="Name",
@@ -39,10 +41,25 @@ def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
 
     raw = target.read_text(encoding="utf-8")
     assert "super-secret-password" not in raw
+    assert "super-secret-proxy-password" not in raw
     assert "fixed shipping address" in raw
     if os.name == "nt":
         loaded = load_config(target)
         assert loaded.app_password == "super-secret-password"
+        assert loaded.proxy.password == "super-secret-proxy-password"
+
+
+def test_proxy_ui_exposes_fixed_and_dynamic_socks5_modes():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ctexcel_client"
+        / "main_window.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"固定代理", "custom"' in source
+    assert '"API 动态提取", "api"' in source
+    assert '"SOCKS5", "socks5"' in source
+    assert "提取并测试" in source
 
 
 def test_non_secret_registration_defaults_round_trip(tmp_path: Path):

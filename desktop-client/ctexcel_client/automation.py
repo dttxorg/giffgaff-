@@ -20,6 +20,12 @@ from playwright.sync_api import (
 
 from .api import AdminApi, ApiError
 from .config import AppConfig, app_config_dir
+from .proxy import (
+    ProxyError,
+    masked_proxy_label,
+    probe_proxy_endpoint,
+    resolve_proxy,
+)
 
 
 LogCallback = Callable[[str], None]
@@ -185,6 +191,24 @@ class CTExcelAutomation:
     def run(self) -> AutomationResult:
         registration = self.config.registration
         self._validate_registration_defaults()
+        self.stage("准备浏览器代理")
+        try:
+            browser_proxy = resolve_proxy(self.config.proxy)
+            if browser_proxy:
+                probe_proxy_endpoint(browser_proxy)
+                source = (
+                    "动态提取"
+                    if self.config.proxy.mode == "api"
+                    else "固定配置"
+                )
+                self.log(
+                    f"{source}代理已就绪：{masked_proxy_label(browser_proxy)}"
+                )
+            else:
+                self.log("浏览器使用直连")
+        except ProxyError as exc:
+            raise AutomationError(f"浏览器代理准备失败：{exc}") from exc
+
         self.stage("连接客户管理")
         with AdminApi(
             self.config.server_url,
@@ -212,7 +236,12 @@ class CTExcelAutomation:
                     f"已新建 CTExcel 客户 #{customer_id}，专属邮箱：{email}"
                 )
             self._check_stop()
-            return self._run_browser(api, customer_id, email)
+            return self._run_browser(
+                api,
+                customer_id,
+                email,
+                browser_proxy=browser_proxy,
+            )
 
     def _refresh_pending_customers(self, api: AdminApi) -> None:
         """开始新流程前先扫描无手机号客户，避免重复建立空记录。"""
@@ -261,6 +290,8 @@ class CTExcelAutomation:
         api: AdminApi,
         customer_id: int,
         email: str,
+        *,
+        browser_proxy: Optional[dict[str, str]],
     ) -> AutomationResult:
         self.stage("启动浏览器")
         with sync_playwright() as playwright:
@@ -272,9 +303,8 @@ class CTExcelAutomation:
             channel = (self.config.browser_channel or "").strip().lower()
             if channel and channel != "chromium":
                 launch_options["channel"] = channel
-            proxy = self.config.proxy.playwright_proxy()
-            if proxy:
-                launch_options["proxy"] = proxy
+            if browser_proxy:
+                launch_options["proxy"] = browser_proxy
             self.context = playwright.chromium.launch_persistent_context(
                 self.config.user_data_dir,
                 **launch_options,

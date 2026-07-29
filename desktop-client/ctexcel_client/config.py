@@ -16,6 +16,10 @@ DEFAULT_APPLICATION_URL = (
     "https://www.ctexcel.com/uk/buyCard/buyCardPackage/1"
     "?recommendCode=NTKWJX"
 )
+DEFAULT_PROXY_API_URL = (
+    "https://api.cliproxy.io/white/api"
+    "?region=Rand&num=1&time=10&format=n&type=txt"
+)
 
 
 def app_config_dir() -> Path:
@@ -116,11 +120,13 @@ def unprotect_secret(value: str) -> str:
 @dataclass
 class ProxyConfig:
     mode: str = "none"
-    proxy_type: str = "http"
+    proxy_type: str = "socks5"
     host: str = ""
     port: str = ""
     username: str = ""
     password: str = ""
+    api_url: str = DEFAULT_PROXY_API_URL
+    api_timeout_seconds: int = 20
 
     def playwright_proxy(self) -> Optional[dict[str, str]]:
         if self.mode != "custom":
@@ -129,7 +135,12 @@ class ProxyConfig:
         port = self.port.strip()
         if not host or not port:
             return None
-        result = {"server": f"{self.proxy_type}://{host}:{port}"}
+        proxy_type = self.proxy_type.strip().lower()
+        if proxy_type not in {"http", "https", "socks5"}:
+            return None
+        if not port.isdigit() or not (1 <= int(port) <= 65535):
+            return None
+        result = {"server": f"{proxy_type}://{host}:{port}"}
         if self.username:
             result["username"] = self.username
         if self.password:
@@ -171,13 +182,19 @@ class AppConfig:
 
 def _merge_config(raw: dict[str, Any]) -> AppConfig:
     proxy_raw = raw.get("proxy") if isinstance(raw.get("proxy"), dict) else {}
-    proxy = ProxyConfig(
-        **{
-            key: value
-            for key, value in proxy_raw.items()
-            if key in ProxyConfig.__dataclass_fields__
-        }
+    proxy_values = {
+        key: value
+        for key, value in proxy_raw.items()
+        if key in ProxyConfig.__dataclass_fields__
+        and key != "password"
+    }
+    proxy_values["password"] = unprotect_secret(
+        str(proxy_raw.get("password_protected") or "")
     )
+    # 兼容曾经写入明文 password 的内部开发配置，下一次保存会自动迁移。
+    if not proxy_values["password"]:
+        proxy_values["password"] = str(proxy_raw.get("password") or "")
+    proxy = ProxyConfig(**proxy_values)
     registration_raw = (
         raw.get("registration")
         if isinstance(raw.get("registration"), dict)
@@ -224,10 +241,14 @@ def save_config(config: AppConfig, path: Optional[Path] = None) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     raw = asdict(config)
     raw.pop("app_password", None)
+    proxy_raw = raw.get("proxy") if isinstance(raw.get("proxy"), dict) else {}
+    proxy_raw.pop("password", None)
     if config.remember_credentials:
         raw["app_password_protected"] = protect_secret(config.app_password)
+        proxy_raw["password_protected"] = protect_secret(config.proxy.password)
     else:
         raw["app_password_protected"] = ""
+        proxy_raw["password_protected"] = ""
     target.write_text(
         json.dumps(raw, ensure_ascii=False, indent=2),
         encoding="utf-8",

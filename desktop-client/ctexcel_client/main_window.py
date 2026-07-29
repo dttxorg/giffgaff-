@@ -26,7 +26,14 @@ from PySide6.QtWidgets import (
 
 from .api import AdminApi
 from .automation import AutomationResult, CTExcelAutomation
-from .config import AppConfig, RegistrationDefaults, load_config, save_config
+from .config import (
+    AppConfig,
+    ProxyConfig,
+    RegistrationDefaults,
+    load_config,
+    save_config,
+)
+from .proxy import masked_proxy_label, probe_proxy_endpoint, resolve_proxy
 
 
 class ApiWorker(QThread):
@@ -77,6 +84,7 @@ class AutomationWorker(QThread):
 
 class MainWindow(QMainWindow):
     STAGES = [
+        "准备浏览器代理",
         "连接客户管理",
         "准备 CTExcel 客户",
         "启动浏览器",
@@ -94,6 +102,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = load_config()
         self.api_worker: Optional[ApiWorker] = None
+        self.proxy_worker: Optional[ApiWorker] = None
         self.automation_worker: Optional[AutomationWorker] = None
         self.current_customer: Optional[dict[str, Any]] = None
         self.setWindowTitle("CTExcel 申请工作台")
@@ -196,6 +205,7 @@ class MainWindow(QMainWindow):
         left = QVBoxLayout()
         left.setSpacing(16)
         left.addWidget(self._connection_card())
+        left.addWidget(self._proxy_card())
         left.addWidget(self._registration_card())
         left.addStretch(1)
 
@@ -249,6 +259,92 @@ class MainWindow(QMainWindow):
         self.connection_detail.setObjectName("inlineNote")
         self.connection_detail.setWordWrap(True)
         layout.addWidget(self.connection_detail)
+        return card
+
+    def _proxy_card(self) -> QFrame:
+        card, layout = self._card(
+            "浏览器代理",
+            "支持固定 HTTP / SOCKS5，也可以在每次申请前从 API 动态提取一条代理。",
+        )
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+
+        self.proxy_mode = QComboBox()
+        self.proxy_mode.addItem("直连", "none")
+        self.proxy_mode.addItem("固定代理", "custom")
+        self.proxy_mode.addItem("API 动态提取", "api")
+        self.proxy_mode.currentIndexChanged.connect(self._update_proxy_fields)
+
+        self.proxy_type = QComboBox()
+        self.proxy_type.addItem("SOCKS5", "socks5")
+        self.proxy_type.addItem("HTTP", "http")
+        self.proxy_type.addItem("HTTPS", "https")
+
+        self.proxy_host = QLineEdit()
+        self.proxy_host.setPlaceholderText("代理主机或 IP")
+        self.proxy_port = QLineEdit()
+        self.proxy_port.setPlaceholderText("端口")
+        self.proxy_username = QLineEdit()
+        self.proxy_username.setPlaceholderText("可选")
+        self.proxy_password = QLineEdit()
+        self.proxy_password.setPlaceholderText("可选")
+        self.proxy_password.setEchoMode(QLineEdit.Password)
+        self.proxy_api_url = QLineEdit()
+        self.proxy_api_url.setPlaceholderText(
+            "https://代理服务/api?...&format=n&type=txt"
+        )
+        self.proxy_api_url.setClearButtonEnabled(True)
+
+        self.proxy_mode_label = self._field_label("代理模式")
+        self.proxy_type_label = self._field_label("代理协议")
+        self.proxy_host_label = self._field_label("代理地址")
+        self.proxy_port_label = self._field_label("端口")
+        self.proxy_username_label = self._field_label("代理账号")
+        self.proxy_password_label = self._field_label("代理密码")
+        self.proxy_api_url_label = self._field_label("提取接口")
+
+        grid.addWidget(self.proxy_mode_label, 0, 0)
+        grid.addWidget(self.proxy_type_label, 0, 1)
+        grid.addWidget(self.proxy_mode, 1, 0)
+        grid.addWidget(self.proxy_type, 1, 1)
+        grid.addWidget(self.proxy_host_label, 2, 0)
+        grid.addWidget(self.proxy_port_label, 2, 1)
+        grid.addWidget(self.proxy_host, 3, 0)
+        grid.addWidget(self.proxy_port, 3, 1)
+        grid.addWidget(self.proxy_username_label, 4, 0)
+        grid.addWidget(self.proxy_password_label, 4, 1)
+        grid.addWidget(self.proxy_username, 5, 0)
+        grid.addWidget(self.proxy_password, 5, 1)
+        grid.addWidget(self.proxy_api_url_label, 6, 0, 1, 2)
+        grid.addWidget(self.proxy_api_url, 7, 0, 1, 2)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+
+        action_row = QHBoxLayout()
+        self.proxy_status = QLabel("当前使用直连")
+        self.proxy_status.setObjectName("inlineNote")
+        self.proxy_status.setWordWrap(True)
+        self.proxy_test_btn = QPushButton("提取并测试")
+        self.proxy_test_btn.setObjectName("secondaryButton")
+        self.proxy_test_btn.clicked.connect(self.test_proxy)
+        action_row.addWidget(self.proxy_status, 1)
+        action_row.addWidget(self.proxy_test_btn)
+        layout.addLayout(action_row)
+
+        for field in (
+            self.proxy_type,
+            self.proxy_host,
+            self.proxy_port,
+            self.proxy_username,
+            self.proxy_password,
+            self.proxy_api_url,
+        ):
+            if isinstance(field, QLineEdit):
+                field.textChanged.connect(self._proxy_fields_changed)
+            else:
+                field.currentIndexChanged.connect(self._proxy_fields_changed)
         return card
 
     def _registration_card(self) -> QFrame:
@@ -387,6 +483,18 @@ class MainWindow(QMainWindow):
         self.expected_price.setText(config.registration.expected_price_gbp)
         index = self.browser_channel.findText(config.browser_channel)
         self.browser_channel.setCurrentIndex(max(0, index))
+        mode_index = self.proxy_mode.findData(config.proxy.mode)
+        self.proxy_mode.setCurrentIndex(max(0, mode_index))
+        type_index = self.proxy_type.findData(config.proxy.proxy_type)
+        self.proxy_type.setCurrentIndex(max(0, type_index))
+        self.proxy_host.setText(config.proxy.host)
+        self.proxy_port.setText(config.proxy.port)
+        self.proxy_username.setText(config.proxy.username)
+        self.proxy_password.setText(config.proxy.password)
+        self.proxy_api_url.setText(config.proxy.api_url)
+        self.proxy_api_url.setCursorPosition(0)
+        self.proxy_api_url.setToolTip(config.proxy.api_url)
+        self._update_proxy_fields()
 
     def collect_config(self) -> AppConfig:
         registration = RegistrationDefaults(
@@ -398,14 +506,101 @@ class MainWindow(QMainWindow):
             coupon_code=self.coupon_code.text().strip() or "DEAL50OFF",
             expected_price_gbp=self.expected_price.text().strip() or "5.95",
         )
+        proxy = ProxyConfig(
+            mode=str(self.proxy_mode.currentData() or "none"),
+            proxy_type=str(self.proxy_type.currentData() or "socks5"),
+            host=self.proxy_host.text().strip(),
+            port=self.proxy_port.text().strip(),
+            username=self.proxy_username.text().strip(),
+            password=self.proxy_password.text(),
+            api_url=self.proxy_api_url.text().strip(),
+            api_timeout_seconds=self.config.proxy.api_timeout_seconds,
+        )
         return replace(
             self.config,
             server_url=self.server_url.text().strip(),
             app_password=self.app_password.text(),
             remember_credentials=self.remember_credentials.isChecked(),
             browser_channel=self.browser_channel.currentText(),
+            proxy=proxy,
             registration=registration,
         )
+
+    def _update_proxy_fields(self, *_args: object) -> None:
+        mode = str(self.proxy_mode.currentData() or "none")
+        custom = mode == "custom"
+        api_mode = mode == "api"
+
+        for widget in (self.proxy_type_label, self.proxy_type):
+            widget.setVisible(custom or api_mode)
+        for widget in (
+            self.proxy_host_label,
+            self.proxy_host,
+            self.proxy_port_label,
+            self.proxy_port,
+        ):
+            widget.setVisible(custom)
+        for widget in (
+            self.proxy_username_label,
+            self.proxy_username,
+            self.proxy_password_label,
+            self.proxy_password,
+        ):
+            widget.setVisible(custom or api_mode)
+        for widget in (self.proxy_api_url_label, self.proxy_api_url):
+            widget.setVisible(api_mode)
+        self.proxy_test_btn.setEnabled(mode != "none")
+        if mode == "none":
+            self.proxy_status.setText("当前使用直连")
+        elif custom:
+            self.proxy_status.setText(
+                "固定代理将在建档前验证协议，并测试访问 CTExcel"
+            )
+        else:
+            self.proxy_status.setText(
+                "每次申请前重新提取，并验证代理可访问 CTExcel"
+            )
+
+    def _proxy_fields_changed(self, *_args: object) -> None:
+        mode = str(self.proxy_mode.currentData() or "none")
+        if mode != "none":
+            self.proxy_status.setText("代理配置已修改，请提取并测试")
+
+    def test_proxy(self) -> None:
+        if self.proxy_worker and self.proxy_worker.isRunning():
+            return
+        config = self.collect_config()
+        if config.proxy.mode == "none":
+            self.proxy_status.setText("当前使用直连")
+            return
+
+        def action() -> dict[str, str]:
+            resolved = resolve_proxy(config.proxy)
+            if not resolved:
+                return {"label": "直连"}
+            probe_proxy_endpoint(resolved)
+            return {"label": masked_proxy_label(resolved)}
+
+        self.proxy_status.setText("正在提取并验证代理连接……")
+        self.proxy_test_btn.setEnabled(False)
+        self.proxy_worker = ApiWorker(action)
+        self.proxy_worker.succeeded.connect(self._proxy_test_ok)
+        self.proxy_worker.failed.connect(self._proxy_test_failed)
+        self.proxy_worker.finished.connect(
+            lambda: self.proxy_test_btn.setEnabled(True)
+        )
+        self.proxy_worker.start()
+
+    def _proxy_test_ok(self, result: object) -> None:
+        data = result if isinstance(result, dict) else {}
+        label = str(data.get("label") or "代理")
+        self.proxy_status.setText(f"代理提取和目标连接正常：{label}")
+        self.log(f"代理测试成功：{label}")
+
+    def _proxy_test_failed(self, message: str) -> None:
+        self.proxy_status.setText(f"代理测试失败：{message}")
+        self.log(f"代理测试失败：{message}")
+        QMessageBox.warning(self, "代理测试失败", message)
 
     def _set_connection_state(self, state: str, text: str) -> None:
         self.connection_pill.setProperty("state", state)
