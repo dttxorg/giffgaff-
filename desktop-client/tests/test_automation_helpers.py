@@ -1,8 +1,11 @@
 from decimal import Decimal
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ctexcel_client.automation import (
+    assess_verification_freshness,
     normalize_money,
+    parse_message_timestamp,
     parse_success_text,
     price_is_expected,
 )
@@ -73,3 +76,64 @@ def test_country_is_selected_before_registration_fields_at_human_paced_speed():
     )
     assert '"slow_mo": max(350, int(self.config.slow_mo_ms))' in source
     assert "' el-select '" in source
+
+
+def test_verification_timestamp_parser_supports_provider_formats():
+    milliseconds = parse_message_timestamp("1784918151251")
+    iso_time = parse_message_timestamp("2026-07-24T18:35:51.251Z")
+
+    assert milliseconds is not None
+    assert milliseconds.timestamp() == 1784918151.251
+    assert iso_time == datetime(
+        2026,
+        7,
+        24,
+        18,
+        35,
+        51,
+        251000,
+        tzinfo=timezone.utc,
+    )
+
+
+def test_verification_freshness_rejects_baseline_and_old_messages():
+    requested_at = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+
+    same_message = assess_verification_freshness(
+        {
+            "message_id": "old-message",
+            "received_at": "2026-07-29T12:00:05Z",
+        },
+        baseline_message_id="old-message",
+        requested_at=requested_at,
+    )
+    old_timestamp = assess_verification_freshness(
+        {
+            "message_id": "different-old-message",
+            "received_at": "2026-07-29T11:50:00Z",
+        },
+        baseline_message_id="old-message",
+        requested_at=requested_at,
+    )
+
+    assert same_message[0] is False
+    assert same_message[1] == "邮件 ID 与发送前相同"
+    assert old_timestamp[0] is False
+    assert old_timestamp[1] == "邮件收件时间早于本次请求"
+
+
+def test_verification_freshness_accepts_new_message_after_request():
+    requested_at = datetime.now(timezone.utc)
+    fresh = assess_verification_freshness(
+        {
+            "message_id": "new-message",
+            "received_at": (
+                requested_at + timedelta(seconds=4)
+            ).isoformat(),
+        },
+        baseline_message_id="old-message",
+        requested_at=requested_at,
+    )
+
+    assert fresh[0] is True
+    assert fresh[1] == "验证码邮件属于本次请求"

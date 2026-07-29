@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import contextlib
 from pathlib import Path
@@ -79,6 +80,58 @@ def parse_success_text(page_text: str) -> dict[str, str]:
         "phone_number": phone_match.group(1) if phone_match else "",
         "transaction_amount": amount_match.group(1) if amount_match else "",
     }
+
+
+def parse_message_timestamp(value: Any) -> Optional[datetime]:
+    """兼容邮件供应商返回的秒、毫秒、微秒时间戳和 ISO 时间。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+        try:
+            numeric = float(text)
+            magnitude = abs(numeric)
+            if magnitude >= 1e14:
+                numeric /= 1_000_000
+            elif magnitude >= 1e11:
+                numeric /= 1_000
+            return datetime.fromtimestamp(numeric, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def assess_verification_freshness(
+    result: dict[str, Any],
+    *,
+    baseline_message_id: str,
+    requested_at: datetime,
+    clock_skew_seconds: int = 60,
+) -> tuple[bool, str, Optional[datetime]]:
+    """只接受本次发送后出现的新验证码邮件。"""
+    message_id = str(result.get("message_id") or "").strip()
+    received_at = parse_message_timestamp(result.get("received_at"))
+    if baseline_message_id and message_id == baseline_message_id:
+        return False, "邮件 ID 与发送前相同", received_at
+    earliest = requested_at.astimezone(timezone.utc) - timedelta(
+        seconds=max(0, int(clock_skew_seconds))
+    )
+    if received_at and received_at < earliest:
+        return False, "邮件收件时间早于本次请求", received_at
+    if not received_at and not (
+        baseline_message_id
+        and message_id
+        and message_id != baseline_message_id
+    ):
+        return False, "缺少可核验的收件时间或新邮件 ID", None
+    return True, "验证码邮件属于本次请求", received_at
 
 
 class CTExcelAutomation:
@@ -505,9 +558,34 @@ class CTExcelAutomation:
             "推荐码",
         )
 
+        baseline: dict[str, Any] = {}
+        try:
+            baseline = api.verification_code(customer_id)
+        except ApiError as exc:
+            self.log(f"验证码发送前邮箱基线读取暂未完成：{exc}")
+        baseline_message_id = str(baseline.get("message_id") or "").strip()
+        baseline_received_at = parse_message_timestamp(baseline.get("received_at"))
+        if baseline_message_id:
+            baseline_text = f"邮件 {baseline_message_id}"
+            if baseline_received_at:
+                baseline_text += f"，{self._format_mail_time(baseline_received_at)}"
+            self.log(f"已记录验证码发送前基线：{baseline_text}")
+
+        requested_at = datetime.now(timezone.utc)
         self._click_visible_text(page, "获取验证码")
-        self.log("验证码已请求，等待客户管理系统读取专属邮箱")
-        code = self._poll_verification_code(api, customer_id)
+        self.log(
+            "验证码已请求，等待新邮件；请求时间："
+            f"{self._format_mail_time(requested_at)}"
+        )
+        self._wait_interruptibly(
+            max(3, int(self.config.verification_min_wait_seconds))
+        )
+        code = self._poll_verification_code(
+            api,
+            customer_id,
+            baseline_message_id=baseline_message_id,
+            requested_at=requested_at,
+        )
         self._fill_placeholder_input(
             page,
             "请填写验证码",
@@ -539,12 +617,20 @@ class CTExcelAutomation:
         )
         field.fill(value)
 
-    def _poll_verification_code(self, api: AdminApi, customer_id: int) -> str:
+    def _poll_verification_code(
+        self,
+        api: AdminApi,
+        customer_id: int,
+        *,
+        baseline_message_id: str,
+        requested_at: datetime,
+    ) -> str:
         deadline = time.monotonic() + max(
             30,
             int(self.config.verification_timeout_seconds),
         )
         last_detail = ""
+        last_rejection = ""
         while time.monotonic() < deadline:
             self._check_stop()
             try:
@@ -555,11 +641,50 @@ class CTExcelAutomation:
                 last_detail = str(result.get("detail") or "")
                 code = str(result.get("code") or "").strip()
                 if result.get("found") and re.fullmatch(r"\d{6}", code):
-                    return code
-            time.sleep(3)
+                    fresh, reason, received_at = assess_verification_freshness(
+                        result,
+                        baseline_message_id=baseline_message_id,
+                        requested_at=requested_at,
+                    )
+                    if fresh:
+                        timing = (
+                            self._format_mail_time(received_at)
+                            if received_at
+                            else "新邮件 ID 已确认"
+                        )
+                        self.log(f"验证码邮件已核验：{timing}")
+                        return code
+                    marker = (
+                        f"{result.get('message_id')}|"
+                        f"{result.get('received_at')}|{reason}"
+                    )
+                    if marker != last_rejection:
+                        last_rejection = marker
+                        timing = (
+                            f"，收件时间 {self._format_mail_time(received_at)}"
+                            if received_at
+                            else ""
+                        )
+                        self.log(f"已忽略旧验证码：{reason}{timing}")
+            self._wait_interruptibly(3)
         raise AutomationError(
-            "等待邮箱验证码超时"
+            "等待本次请求的新验证码超时"
             + (f"：{last_detail}" if last_detail else "")
+        )
+
+    def _wait_interruptibly(self, seconds: float) -> None:
+        deadline = time.monotonic() + max(0, float(seconds))
+        while time.monotonic() < deadline:
+            self._check_stop()
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+
+    @staticmethod
+    def _format_mail_time(value: datetime) -> str:
+        utc_value = value.astimezone(timezone.utc)
+        beijing = utc_value.astimezone(timezone(timedelta(hours=8)))
+        return (
+            f"{beijing:%Y-%m-%d %H:%M:%S} 北京时间"
+            f"（{utc_value:%H:%M:%S} UTC）"
         )
 
     def _select_china(self, page: Page) -> None:

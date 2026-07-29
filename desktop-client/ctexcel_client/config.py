@@ -160,6 +160,7 @@ class AppConfig:
     slow_mo_ms: int = 350
     page_timeout_ms: int = 120000
     step_timeout_ms: int = 20000
+    verification_min_wait_seconds: int = 8
     verification_timeout_seconds: int = 180
     payment_timeout_seconds: int = 1800
     order_sync_timeout_seconds: int = 180
