@@ -382,15 +382,15 @@ def test_frontend_uses_customer_inbox_workspace_and_independent_print_flows():
     payment_refresh = html[html.index("async function refreshPaymentInfoForActive"):html.index("async function refreshVerificationCodeForActive")]
     assert "await loadCustomers();" in payment_refresh
     assert "activeCustomer = await getCustomer(customerId);" in payment_refresh
-    assert "const TEXT_SOURCES = ['固定文字', '手机号', '邮箱', '开通日期', '收货地址', '快递公司', '快递单号', 'SIM激活码', '激活状态', 'Giffgaff下载链接'];" in html
+    assert "const TEXT_SOURCES = ['固定文字', '手机号', '邮箱', '开通日期', '收货地址', '快递公司', '快递单号', 'SIM激活码', '激活状态', 'CTExcel订单号', 'CTExcel推荐码', 'Giffgaff下载链接'];" in html
     assert "element.type === 'text' && element.source === '初始密码'" in html
-    assert '<th>收货地址</th>' in html
+    assert '<th class="th-address">收货地址</th>' in html
     assert "addCell('收货地址', 'ledger-address ledger-ellipsis')" in html
-    assert "cell.colSpan = 11;" in html
+    assert "cell.colSpan = appMode === 'ctexcel' ? 10 : 11;" in html
     assert "$('d-identity-disclosure').open = false;" in html
-    assert '<details class="identity-disclosure" id="d-identity-disclosure">' in html
+    assert '<details class="identity-disclosure" id="d-identity-disclosure" data-mode-only="giffgaff">' in html
     info_section = html.index('<section class="tab-content active detail-section" data-tab="info">')
-    activation_section = html.index('<section class="tab-content detail-section" data-tab="activation">')
+    activation_section = html.index('<section class="tab-content detail-section" data-tab="activation" data-mode-only="giffgaff">')
     verification_box = html.index('id="d-code-box"')
     identity_disclosure = html.index('id="d-identity-disclosure"')
     assert info_section < verification_box < identity_disclosure < activation_section

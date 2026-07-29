@@ -140,6 +140,32 @@
       flex-wrap: wrap;
       justify-content: flex-end;
     }
+    .header-actions > span,
+    .app-mode-switch { flex: 0 0 auto; white-space: nowrap; }
+    .app-mode-switch {
+      display: inline-flex;
+      padding: 3px;
+      border: 1px solid var(--on-purple-translucent-border);
+      border-radius: var(--radius-pill);
+      background: rgba(255,255,255,.1);
+    }
+    .app-mode-switch button {
+      min-height: 30px;
+      padding: 5px 12px;
+      border: 0;
+      border-radius: var(--radius-pill);
+      color: rgba(255,255,255,.74);
+      background: transparent;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .app-mode-switch button.active {
+      color: var(--purple-dark);
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(25,14,53,.18);
+    }
+    [hidden] { display: none !important; }
     .btn-header {
       padding: 7px 14px;
       background: var(--on-purple-translucent);
@@ -1149,17 +1175,19 @@
       white-space: nowrap;
       text-align: left;
     }
-    #tab-customers .customer-ledger-table th:nth-child(1) { width: 118px; }
-    #tab-customers .customer-ledger-table th:nth-child(2) { width: 180px; }
-    #tab-customers .customer-ledger-table th:nth-child(3) { width: 250px; }
-    #tab-customers .customer-ledger-table th:nth-child(4) { width: 84px; }
-    #tab-customers .customer-ledger-table th:nth-child(5) { width: 100px; }
-    #tab-customers .customer-ledger-table th:nth-child(6) { width: 96px; }
-    #tab-customers .customer-ledger-table th:nth-child(7) { width: 88px; }
-    #tab-customers .customer-ledger-table th:nth-child(8) { width: 78px; }
-    #tab-customers .customer-ledger-table th:nth-child(9) { width: 120px; }
-    #tab-customers .customer-ledger-table th:nth-child(10) { width: 88px; }
-    #tab-customers .customer-ledger-table th:nth-child(11) { width: 60px; text-align: center; }
+    #tab-customers .customer-ledger-table .th-phone { width: 118px; }
+    #tab-customers .customer-ledger-table .th-email { width: 180px; }
+    #tab-customers .customer-ledger-table .th-address { width: 250px; }
+    #tab-customers .customer-ledger-table .th-status { width: 84px; }
+    #tab-customers .customer-ledger-table .th-activation { width: 100px; }
+    #tab-customers .customer-ledger-table .th-sim { width: 96px; }
+    #tab-customers .customer-ledger-table .th-payment { width: 88px; }
+    #tab-customers .customer-ledger-table .th-order { width: 205px; }
+    #tab-customers .customer-ledger-table .th-sync { width: 88px; }
+    #tab-customers .customer-ledger-table .th-courier { width: 78px; }
+    #tab-customers .customer-ledger-table .th-tracking { width: 120px; }
+    #tab-customers .customer-ledger-table .th-date { width: 88px; }
+    #tab-customers .customer-ledger-table .th-action { width: 60px; text-align: center; }
     #tab-customers tbody tr {
       background: #fff;
       cursor: pointer;
@@ -1186,6 +1214,7 @@
     .ledger-address { color: #5f5968 !important; }
     .ledger-date { white-space: nowrap; color: #6f6878 !important; }
     .ledger-action { text-align: center; }
+    .ledger-order { color: #204f92 !important; }
     .customer-phone-link {
       min-height: 0;
       padding: 0;
@@ -1823,10 +1852,14 @@
 <body>
 <header>
   <div>
-    <h1>客户收件箱 <span class="brand-en">/ Customer Inbox</span></h1>
-    <span>客户资料、邮箱收件箱与标签打印</span>
+    <h1><span id="app-brand-name">giffgaff</span> 客户收件箱 <span class="brand-en">/ Customer Inbox</span></h1>
+    <span id="app-brand-subtitle">客户资料、邮箱收件箱与标签打印</span>
   </div>
   <div class="header-actions">
+    <div class="app-mode-switch" role="radiogroup" aria-label="产品模式">
+      <button type="button" id="mode-giffgaff" onclick="switchAppMode('giffgaff')">giffgaff</button>
+      <button type="button" id="mode-ctexcel" onclick="switchAppMode('ctexcel')">CTExcel</button>
+    </div>
     <span id="total-count"></span>
     <button class="btn-header" type="button" onclick="exportData()">导出</button>
     <button class="btn-header" type="button" onclick="$('import-file').click()">导入</button>
@@ -1857,7 +1890,7 @@
 <div class="container">
   <div class="tabs">
     <button class="tab active" id="tab-btn-customers" type="button" onclick="switchTab('customers', this)">客户列表</button>
-    <button class="tab" id="tab-btn-sim-codes" type="button" onclick="switchTab('sim-codes', this)">SIM 激活码</button>
+    <button class="tab" id="tab-btn-sim-codes" data-mode-only="giffgaff" type="button" onclick="switchTab('sim-codes', this)">SIM 激活码</button>
     <button class="tab" id="tab-btn-labels" type="button" onclick="switchTab('labels', this)">标签模板</button>
     <button class="tab" id="tab-btn-settings" type="button" onclick="switchTab('settings', this)">系统设置</button>
     <button class="tab" id="tab-btn-email-providers" type="button" onclick="switchTab('email-providers', this)">邮箱服务商</button>
@@ -1873,7 +1906,7 @@
       </div>
       <div class="card-body">
         <form class="form-grid add-form-compact" id="add-form">
-          <div>
+          <div id="add-sim-code-field" data-mode-only="giffgaff">
             <label>开通日期</label>
             <input type="date" id="act-date" required>
           </div>
@@ -1923,7 +1956,7 @@
             <option value="丢失">丢失</option>
             <option value="作废">作废</option>
           </select>
-          <select id="customer-activation-filter" aria-label="激活状态筛选">
+          <select id="customer-activation-filter" data-mode-only="giffgaff" aria-label="激活状态筛选">
             <option value="">全部激活状态</option>
             <option value="未开始">未开始</option>
             <option value="已分配激活码">已分配激活码</option>
@@ -1933,7 +1966,7 @@
             <option value="已完成">已完成</option>
             <option value="失败">失败</option>
           </select>
-          <select id="customer-payment-filter" aria-label="解绑查询筛选">
+          <select id="customer-payment-filter" data-mode-only="giffgaff" aria-label="解绑查询筛选">
             <option value="">全部解绑查询</option>
             <option value="changed">已解绑</option>
             <option value="updated">已更新</option>
@@ -1953,17 +1986,19 @@
         <table class="customer-ledger-table">
           <thead>
             <tr>
-              <th>手机号</th>
-              <th>邮箱</th>
-              <th>收货地址</th>
-              <th>号码状态</th>
-              <th>激活状态</th>
-              <th>SIM 激活码</th>
-              <th>解绑查询</th>
-              <th>快递公司</th>
-              <th>快递单号</th>
-              <th>开通日期</th>
-              <th>操作</th>
+              <th class="th-phone">手机号</th>
+              <th class="th-email">邮箱</th>
+              <th class="th-address">收货地址</th>
+              <th class="th-status">号码状态</th>
+              <th class="th-activation" data-mode-only="giffgaff">激活状态</th>
+              <th class="th-sim" data-mode-only="giffgaff">SIM 激活码</th>
+              <th class="th-payment" data-mode-only="giffgaff">解绑查询</th>
+              <th class="th-order" data-mode-only="ctexcel">CTExcel 订单号</th>
+              <th class="th-sync" data-mode-only="ctexcel">邮件同步</th>
+              <th class="th-courier">快递公司</th>
+              <th class="th-tracking">快递单号</th>
+              <th class="th-date">开通日期</th>
+              <th class="th-action">操作</th>
             </tr>
           </thead>
           <tbody id="customer-table"></tbody>
@@ -2002,9 +2037,9 @@
     <div class="tabs" id="d-tabs-nav">
       <button class="tab active" data-tab="info" type="button">账号与身份</button>
       <button class="tab" data-tab="shipping" type="button">发货</button>
-      <button class="tab" data-tab="activation" type="button">激活与 eSIM</button>
+      <button class="tab" data-tab="activation" data-mode-only="giffgaff" type="button">激活与 eSIM</button>
       <button class="tab" data-tab="inbox" type="button">完整邮箱</button>
-      <button class="tab" data-tab="payment" type="button">支付检查</button>
+      <button class="tab" data-tab="payment" data-mode-only="giffgaff" type="button">支付检查</button>
       <button class="tab" data-tab="tools" type="button">工具</button>
     </div>
 
@@ -2023,7 +2058,7 @@
             <code id="d-registration-email">—</code>
             <button type="button" class="small blue" onclick="copyElText('d-registration-email', '已复制注册邮箱')">复制</button>
           </div>
-          <div class="registration-quick-item">
+          <div class="registration-quick-item" data-mode-only="giffgaff">
             <span>SIM 激活码</span>
             <code id="d-registration-sim-code">—</code>
             <button type="button" class="small blue" onclick="copyElText('d-registration-sim-code', '已复制 SIM 激活码')">复制</button>
@@ -2035,10 +2070,33 @@
           <button type="button" class="small blue" id="d-code-refresh" onclick="refreshVerificationCodeForActive()">刷新验证码</button>
           <div class="code-meta" id="d-code-meta"></div>
         </div>
+        <div class="code-box" id="d-ctexcel-order-box" data-mode-only="ctexcel">
+          <div class="code-box-head">
+            <strong>CTExcel 订单邮件资料</strong>
+            <button type="button" class="small blue" id="d-ctexcel-refresh" onclick="refreshCTExcelOrderForActive()">扫描订单邮件</button>
+          </div>
+          <div class="registration-quick-grid">
+            <div class="registration-quick-item">
+              <span>订单号</span>
+              <code id="d-ctexcel-order-number">—</code>
+              <button type="button" class="small blue" onclick="copyElText('d-ctexcel-order-number', '已复制订单号')">复制</button>
+            </div>
+            <div class="registration-quick-item">
+              <span>交易金额</span>
+              <code id="d-ctexcel-amount">—</code>
+            </div>
+            <div class="registration-quick-item">
+              <span>专属推荐码</span>
+              <code id="d-ctexcel-referral-code">—</code>
+              <button type="button" class="small blue" onclick="copyElText('d-ctexcel-referral-code', '已复制推荐码')">复制</button>
+            </div>
+          </div>
+          <div class="code-meta" id="d-ctexcel-meta">点击扫描，或刷新验证码时自动同步。</div>
+        </div>
       </div>
 
       <!-- 随机身份信息默认折叠，注册填写地址时再展开 -->
-      <details class="identity-disclosure" id="d-identity-disclosure">
+      <details class="identity-disclosure" id="d-identity-disclosure" data-mode-only="giffgaff">
         <summary>
           <span>随机身份与英国地址</span>
           <span class="identity-disclosure-hint">展开复制姓名、地址、城市和邮编</span>
@@ -2099,9 +2157,9 @@
       <!-- 已激活号码资料扫码页 -->
       <div class="info-box" id="d-public-link-box" hidden>
         <div class="code-box-head">
-          <strong>已激活号码资料扫码页</strong>
+          <strong id="d-public-link-title">已激活号码资料扫码页</strong>
         </div>
-        <p class="code-meta">客户扫码后可复制 giffgaff 手机号码和初始注册邮箱，不会暴露客户管理后台。</p>
+        <p class="code-meta" id="d-public-link-description">客户扫码后可复制 giffgaff 手机号码和初始注册邮箱，不会暴露客户管理后台。</p>
         <input type="text" id="d-public-link-input" readonly>
         <div class="button-row" style="margin-top:8px;">
           <button type="button" class="small blue" id="d-public-link-copy">复制链接</button>
@@ -2137,7 +2195,7 @@
     </section>
 
     <!-- Tab: 激活 -->
-    <section class="tab-content detail-section" data-tab="activation">
+    <section class="tab-content detail-section" data-tab="activation" data-mode-only="giffgaff">
       <h3 class="detail-section-title">激活与 eSIM</h3>
       <div class="info-box" id="d-activation-box"></div>
       <div class="info-box" id="d-moemail-box"></div>
@@ -2192,7 +2250,7 @@
     </section>
 
     <!-- Tab: 支付 -->
-    <section class="tab-content detail-section" data-tab="payment">
+    <section class="tab-content detail-section" data-tab="payment" data-mode-only="giffgaff">
       <h3 class="detail-section-title">支付检查</h3>
       <div class="code-box" id="d-payment-box">
         <div class="code-box-head">
@@ -2209,8 +2267,8 @@
         <button type="button" class="blue" onclick="generateMoemailForActive()">生成或更换邮箱</button>
         <button type="button" class="green" onclick="openPrintPanelForActive()">打印标签</button>
         <button type="button" class="green" onclick="openPrintPanelForActive(COURIER_TEMPLATE_ID)">打印快递单</button>
-        <button type="button" class="ghost" onclick="copyVoicemailTemplate()">复制关闭语音信箱模板</button>
-        <button type="button" class="ghost" onclick="openVoicemailForm()">打开关闭语音信箱表单</button>
+        <button type="button" class="ghost" data-mode-only="giffgaff" onclick="copyVoicemailTemplate()">复制关闭语音信箱模板</button>
+        <button type="button" class="ghost" data-mode-only="giffgaff" onclick="openVoicemailForm()">打开关闭语音信箱表单</button>
         <button type="button" class="danger" onclick="deleteActiveCustomer()">删除客户</button>
       </div>
     </section>
@@ -2287,9 +2345,11 @@
               
               <button type="button" onclick="addLabelElement('text', '快递公司')">快递公司</button>
               <button type="button" onclick="addLabelElement('text', '快递单号')">快递单号</button>
+              <button type="button" data-mode-only="ctexcel" onclick="addLabelElement('text', 'CTExcel订单号')">CTExcel 订单号</button>
+              <button type="button" data-mode-only="ctexcel" onclick="addLabelElement('text', 'CTExcel推荐码')">CTExcel 推荐码</button>
               <button type="button" onclick="addLabelElement('qr', '号码资料二维码')">号码资料二维码</button>
-              <button type="button" onclick="addLabelElement('qr', 'Giffgaff下载二维码')">下载二维码</button>
-              <button type="button" onclick="addLabelElement('qr', '激活教程二维码')">教程二维码</button>
+              <button type="button" data-mode-only="giffgaff" onclick="addLabelElement('qr', 'Giffgaff下载二维码')">下载二维码</button>
+              <button type="button" data-mode-only="giffgaff" onclick="addLabelElement('qr', '激活教程二维码')">教程二维码</button>
             </div>
           </aside>
           <main class="stage-wrap">
@@ -2598,6 +2658,7 @@ window.fetch = async function guardedFetch(input, init) {
 
 const DEMO_CUSTOMER = {
   id: 0,
+  product_type: 'giffgaff',
   phone_number: '447400123456',
   email: 'sample@giffgaff.example',
   activation_date: '2026-06-13',
@@ -2611,7 +2672,11 @@ const DEMO_CUSTOMER = {
 	  tracking_number: 'SF1234567890',
   sim_activation_code: '123456',
 	  activation_status: '已分配激活码',
+  ctexcel_order_number: 'ORDER2026072512362267544904',
+  ctexcel_transaction_amount: '178.8',
+  ctexcel_referral_code: 'NTKWJX',
 	};
+const PRODUCT_TYPES = ['giffgaff', 'ctexcel'];
 	const PHONE_STATUSES = ['激活', '封号', '投诉', '退款', '丢失', '作废'];
 const ACTIVATION_STATUSES = ['未开始', '已分配激活码', '激活中', '等待人工支付', '等待转 eSIM', '已完成', '失败'];
 const SIM_CODE_STATUSES = ['未分配', '作废', '已分配', '激活中', '已使用', '失败'];
@@ -2623,7 +2688,7 @@ const SIM_CODE_STATUS_LABELS = {
   '已使用': '已使用',
   '失败': '失败',
 };
-	const TEXT_SOURCES = ['固定文字', '手机号', '邮箱', '开通日期', '收货地址', '快递公司', '快递单号', 'SIM激活码', '激活状态', 'Giffgaff下载链接'];
+	const TEXT_SOURCES = ['固定文字', '手机号', '邮箱', '开通日期', '收货地址', '快递公司', '快递单号', 'SIM激活码', '激活状态', 'CTExcel订单号', 'CTExcel推荐码', 'Giffgaff下载链接'];
 const PUBLIC_ACCOUNT_QR_SOURCE = '号码资料二维码';
 const LEGACY_PUBLIC_ACCOUNT_QR_SOURCES = new Set(['邮箱二维码', '联系方式二维码']);
 const QR_SOURCES = [PUBLIC_ACCOUNT_QR_SOURCE, 'Giffgaff下载二维码', '激活教程二维码'];
@@ -2649,7 +2714,8 @@ let labelConfig = {
   default_template_id: null,
   templates: [],
 };
-let appSettings = { public_worker_domain: null };
+let appMode = 'giffgaff';
+let appSettings = { app_mode: 'giffgaff', public_worker_domain: null };
 let selectedTemplateId = '';
 let selectedElementId = '';
 let dragging = null;
@@ -2673,6 +2739,63 @@ function normalizeQrSource(source) {
   return LEGACY_PUBLIC_ACCOUNT_QR_SOURCES.has(source) ? PUBLIC_ACCOUNT_QR_SOURCE : source;
 }
 
+function normalizeProductType(value) {
+  return PRODUCT_TYPES.includes(value) ? value : 'giffgaff';
+}
+
+function applyModeVisibility(mode, root=document) {
+  const normalized = normalizeProductType(mode);
+  root.querySelectorAll('[data-mode-only]').forEach(element => {
+    element.hidden = element.dataset.modeOnly !== normalized;
+  });
+}
+
+function applyAppMode(mode) {
+  appMode = normalizeProductType(mode);
+  appSettings.app_mode = appMode;
+  document.documentElement.dataset.appMode = appMode;
+  applyModeVisibility(appMode);
+  $('mode-giffgaff').classList.toggle('active', appMode === 'giffgaff');
+  $('mode-ctexcel').classList.toggle('active', appMode === 'ctexcel');
+  $('mode-giffgaff').setAttribute('aria-checked', appMode === 'giffgaff' ? 'true' : 'false');
+  $('mode-ctexcel').setAttribute('aria-checked', appMode === 'ctexcel' ? 'true' : 'false');
+  $('app-brand-name').textContent = appMode === 'ctexcel' ? 'CTExcel' : 'giffgaff';
+  $('app-brand-subtitle').textContent = appMode === 'ctexcel'
+    ? '订单资料、邮箱收件箱与标签打印'
+    : '客户资料、邮箱收件箱与标签打印';
+  document.title = appMode === 'ctexcel' ? 'CTExcel 客户管理' : 'Giffgaff 客户管理';
+  $('use-sim-code').value = appMode === 'ctexcel' ? 'false' : 'true';
+  $('customer-activation-filter').value = '';
+  $('customer-payment-filter').value = '';
+  customerFilters.activation = '';
+  customerFilters.payment = '';
+  customerPage = 1;
+  if (activeCustomer && normalizeProductType(activeCustomer.product_type) !== appMode) closeDetail();
+  const activeTopTab = document.querySelector('.container > .tabs .tab.active');
+  if (activeTopTab?.hidden) switchTab('customers', $('tab-btn-customers'));
+  renderCustomers();
+}
+
+async function switchAppMode(mode) {
+  const normalized = normalizeProductType(mode);
+  if (normalized === appMode) return;
+  try {
+    const res = await fetch(API + '/settings', {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ app_mode: normalized }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || '模式保存失败');
+    applyAppMode(normalized);
+    resetAddFormDefaults();
+    if (normalized === 'giffgaff') await loadSimCodes();
+    toast(`已切换到 ${normalized === 'ctexcel' ? 'CTExcel' : 'giffgaff'} 模式`, 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
 function num(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -2692,7 +2815,7 @@ function resetAddFormDefaults() {
   const dateInput = $('act-date');
   const useSimCodeInput = $('use-sim-code');
   if (dateInput) dateInput.value = todayDateValue();
-  if (useSimCodeInput) useSimCodeInput.value = 'true';
+  if (useSimCodeInput) useSimCodeInput.value = appMode === 'ctexcel' ? 'false' : 'true';
   // Load provider picker list (async, no-op if no providers yet)
   loadCustomerProviderPicker();
   // Reset auto-rotate to checked
@@ -2848,6 +2971,7 @@ function bindCustomerSearch() {
 }
 
 function customerMatchesFilters(customer) {
+  if (normalizeProductType(customer.product_type) !== appMode) return false;
   if (customerFilters.phone && normalizePhoneStatus(customer.phone_status) !== customerFilters.phone) return false;
   if (customerFilters.activation && (customer.activation_status || '未开始') !== customerFilters.activation) return false;
   if (customerFilters.payment === 'changed' && !customer.payment_changed_at) return false;
@@ -2958,26 +3082,28 @@ async function loadSimCodes() {
 
 function renderCustomers() {
   const tbody = $('customer-table');
+  const modeCustomers = customers.filter(customer => normalizeProductType(customer.product_type) === appMode);
   const visibleCustomers = customers.filter(customerMatchesFilters);
+  const modeTotal = currentSearch ? modeCustomers.length : modeCustomers.length;
   const filtersActive = Object.values(customerFilters).some(Boolean);
   const totalPages = Math.max(1, Math.ceil(visibleCustomers.length / customerPageSize));
   customerPage = Math.min(customerPage, totalPages);
   const pageStart = (customerPage - 1) * customerPageSize;
   const pageCustomers = visibleCustomers.slice(pageStart, pageStart + customerPageSize);
-  $('total-count').textContent = totalCustomerCount ? `共 ${totalCustomerCount} 位客户` : '';
+  $('total-count').textContent = modeTotal ? `共 ${modeTotal} 位客户` : '';
   const listCount = $('list-count');
   if (currentSearch || filtersActive) {
     listCount.innerHTML = visibleCustomers.length
-      ? ` · 当前 <span class="count">${visibleCustomers.length}</span> / ${totalCustomerCount}`
-      : ` · 匹配 0 / ${totalCustomerCount}`;
+      ? ` · 当前 <span class="count">${visibleCustomers.length}</span> / ${modeTotal}`
+      : ` · 匹配 0 / ${modeTotal}`;
   } else {
-    listCount.textContent = customers.length ? `共 ${customers.length} 条` : '';
+    listCount.textContent = modeCustomers.length ? `共 ${modeCustomers.length} 条` : '';
   }
   renderCustomerPagination(visibleCustomers.length);
   if (!visibleCustomers.length) {
     const row = document.createElement('tr');
     const cell = document.createElement('td');
-    cell.colSpan = 11;
+    cell.colSpan = appMode === 'ctexcel' ? 10 : 11;
     cell.className = 'empty-state';
     cell.textContent = currentSearch || filtersActive
       ? `没有符合当前搜索或筛选条件的客户`
@@ -3309,18 +3435,42 @@ function buildCustomerRow(c, index) {
   phoneBadge.textContent = normalizePhoneStatus(c.phone_status);
   phoneStatusCell.appendChild(phoneBadge);
 
-  const activationCell = addCell('激活状态', 'ledger-status');
-  const activationBadge = document.createElement('span');
-  activationBadge.className = `badge ${activationBadgeClass(c.activation_status)}`;
-  activationBadge.textContent = c.activation_status || '未开始';
-  activationCell.appendChild(activationBadge);
+  if (normalizeProductType(c.product_type) === 'ctexcel') {
+    const orderCell = addCell('CTExcel 订单号', 'mono ledger-order ledger-ellipsis');
+    if (c.ctexcel_order_number) highlightInto(orderCell, c.ctexcel_order_number, currentSearch);
+    else orderCell.textContent = '—';
+    orderCell.title = c.ctexcel_order_number || '等待从订单邮件同步';
 
-  const simCell = addCell('SIM 激活码', 'mono ledger-ellipsis');
-  simCell.textContent = c.sim_activation_code || '—';
-  simCell.title = c.sim_activation_code || '未分配 SIM 激活码';
+    const syncCell = addCell('邮件同步', 'ledger-status');
+    const syncBadge = document.createElement('span');
+    if (c.ctexcel_order_number && c.phone_number) {
+      syncBadge.className = 'badge badge-activation-done';
+      syncBadge.textContent = '✓ 已同步';
+    } else if (c.ctexcel_last_checked_at) {
+      syncBadge.className = 'badge badge-warning';
+      syncBadge.textContent = '待补全';
+    } else {
+      syncBadge.className = 'badge badge-manual';
+      syncBadge.textContent = '未扫描';
+    }
+    syncBadge.title = c.ctexcel_last_checked_at
+      ? `最近扫描：${formatShortDate(c.ctexcel_last_checked_at)}`
+      : '打开详情后自动扫描订单邮件';
+    syncCell.appendChild(syncBadge);
+  } else {
+    const activationCell = addCell('激活状态', 'ledger-status');
+    const activationBadge = document.createElement('span');
+    activationBadge.className = `badge ${activationBadgeClass(c.activation_status)}`;
+    activationBadge.textContent = c.activation_status || '未开始';
+    activationCell.appendChild(activationBadge);
 
-  const paymentCell = addCell('解绑查询', 'ledger-payment');
-  paymentCell.appendChild(buildPaymentStatusBadge(c));
+    const simCell = addCell('SIM 激活码', 'mono ledger-ellipsis');
+    simCell.textContent = c.sim_activation_code || '—';
+    simCell.title = c.sim_activation_code || '未分配 SIM 激活码';
+
+    const paymentCell = addCell('解绑查询', 'ledger-payment');
+    paymentCell.appendChild(buildPaymentStatusBadge(c));
+  }
 
   const courierCell = addCell('快递公司', 'ledger-ellipsis');
   courierCell.textContent = c.courier_company || '—';
@@ -3347,7 +3497,12 @@ function buildCustomerRow(c, index) {
 
 function isPaymentCheckEligible(c) {
   // 使用了激活码 + 填了手机号 + 有 MoEmail 邮箱
-  return !!(c.phone_number && (c.sim_activation_code || c.sim_code_id) && hasReadableInbox(c));
+  return !!(
+    normalizeProductType(c.product_type) === 'giffgaff'
+    && c.phone_number
+    && (c.sim_activation_code || c.sim_code_id)
+    && hasReadableInbox(c)
+  );
 }
 
 async function getCustomer(id) {
@@ -3362,6 +3517,10 @@ async function getCustomer(id) {
 async function viewCustomer(id, focusTarget='') {
   try {
     activeCustomer = await getCustomer(id);
+    const customerMode = normalizeProductType(activeCustomer.product_type);
+    applyModeVisibility(customerMode, $('detail-panel'));
+    const infoTab = $('detail-panel').querySelector('#d-tabs-nav [data-tab="info"]');
+    if (infoTab) infoTab.textContent = customerMode === 'ctexcel' ? '账号与订单' : '账号与身份';
     $('d-phone-input').value = activeCustomer.phone_number || '';
     renderDetailHeader(activeCustomer);
     renderRegistrationQuick(activeCustomer);
@@ -3374,6 +3533,7 @@ async function viewCustomer(id, focusTarget='') {
     renderEsimDetail(activeCustomer);
     renderVerificationCodeBox(activeCustomer);
     renderPaymentInfoBox(activeCustomer);
+    renderCTExcelOrderBox(activeCustomer);
     resetInboxView(activeCustomer);
     const detailPanel = $('detail-panel');
     $('d-identity-disclosure').open = false;
@@ -3388,6 +3548,13 @@ async function viewCustomer(id, focusTarget='') {
     if (focusTarget === 'phone') setTimeout(() => $('d-phone-input').focus(), 0);
     if (focusTarget === 'address') setTimeout(() => $('d-address-input').focus(), 0);
     if (focusTarget === 'status') setTimeout(() => $('d-phone-status-input').focus(), 0);
+    if (
+      customerMode === 'ctexcel'
+      && hasReadableInbox(activeCustomer)
+      && (!activeCustomer.phone_number || !activeCustomer.ctexcel_order_number)
+    ) {
+      setTimeout(() => refreshCTExcelOrderForActive({ silent: true }), 0);
+    }
   } catch (err) {
     toast(err.message, 'error');
   }
@@ -3399,6 +3566,7 @@ function renderDetailHeader(customer) {
   summary.replaceChildren();
   [
     `#${customer.id}`,
+    normalizeProductType(customer.product_type) === 'ctexcel' ? 'CTExcel' : 'giffgaff',
     customer.email || '邮箱待补充',
     `号码状态：${normalizePhoneStatus(customer.phone_status)}`,
     `开通：${customer.activation_date || '—'}`,
@@ -3427,8 +3595,13 @@ function renderRegistrationQuick(customer) {
 
   email.textContent = customer.email || '—';
   simCode.textContent = customer.sim_activation_code || '—';
-  status.className = `badge ${activationBadgeClass(customer.activation_status)}`;
-  status.textContent = customer.activation_status || '未开始';
+  if (normalizeProductType(customer.product_type) === 'ctexcel') {
+    status.className = 'badge badge-activation-done';
+    status.textContent = 'CTExcel';
+  } else {
+    status.className = `badge ${activationBadgeClass(customer.activation_status)}`;
+    status.textContent = customer.activation_status || '未开始';
+  }
 }
 
 function renderActivationDetail(customer) {
@@ -3561,8 +3734,8 @@ function renderMoemailBox(c) {
   const box = $('d-moemail-box');
   box.replaceChildren();
   const lines = [];
-  lines.push(`邮箱来源：${c.is_moemail_auto ? 'MoEmail 自动生成' : '手填邮箱'}`);
-  if (c.moemail_address) lines.push(`MoEmail 地址：${c.moemail_address}`);
+  lines.push(`邮箱来源：${c.is_moemail_auto ? '托管邮箱自动生成' : '手填邮箱'}`);
+  if (c.moemail_address) lines.push(`邮箱地址：${c.moemail_address}`);
   if (c.share_link) lines.push('分享链接：');
   for (const line of lines) {
     const p = document.createElement('p');
@@ -3590,6 +3763,11 @@ function renderPublicLinkBox(c) {
   const url = getPublicPageUrl(c.public_token);
   input.value = url;
   box.hidden = false;
+  const isCTExcel = normalizeProductType(c.product_type) === 'ctexcel';
+  $('d-public-link-title').textContent = isCTExcel ? 'CTExcel 号码与订单资料扫码页' : '已激活号码资料扫码页';
+  $('d-public-link-description').textContent = isCTExcel
+    ? '客户扫码后可复制 CTExcel 手机号码、注册邮箱、订单号和推荐码，不显示 giffgaff 内容。'
+    : '客户扫码后可复制 giffgaff 手机号码和初始注册邮箱，不会暴露客户管理后台。';
   const copyBtn = $('d-public-link-copy');
   const openBtn = $('d-public-link-open');
   const regenBtn = $('d-public-link-regenerate');
@@ -3752,6 +3930,53 @@ async function openCodeForCustomer(id) {
   await viewCustomer(id);
   if (activeCustomer && activeCustomer.id === id && hasReadableInbox(activeCustomer)) {
     await refreshVerificationCodeForActive();
+  }
+}
+
+function renderCTExcelOrderBox(c) {
+  if (normalizeProductType(c?.product_type) !== 'ctexcel') return;
+  $('d-ctexcel-order-number').textContent = c.ctexcel_order_number || '—';
+  $('d-ctexcel-amount').textContent = c.ctexcel_transaction_amount
+    ? `£ ${c.ctexcel_transaction_amount}`
+    : '—';
+  $('d-ctexcel-referral-code').textContent = c.ctexcel_referral_code || '—';
+  const readable = hasReadableInbox(c);
+  $('d-ctexcel-refresh').disabled = !readable;
+  $('d-ctexcel-meta').textContent = c.ctexcel_last_checked_at
+    ? `最近扫描：${formatShortDate(c.ctexcel_last_checked_at)}`
+    : (readable ? '打开详情后会自动扫描；也可以手动刷新。' : '该客户没有可读取的托管邮箱账户。');
+}
+
+async function refreshCTExcelOrderForActive(options={}) {
+  if (!activeCustomer || normalizeProductType(activeCustomer.product_type) !== 'ctexcel') return;
+  const silent = !!options.silent;
+  const button = $('d-ctexcel-refresh');
+  const meta = $('d-ctexcel-meta');
+  button.disabled = true;
+  button.textContent = '扫描中...';
+  meta.textContent = '正在读取 MoEmail / CloudMail 订单邮件并提取号码资料...';
+  try {
+    const res = await fetch(`${API}/customers/${activeCustomer.id}/ctexcel-order-info`, {
+      cache: 'no-store',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || 'CTExcel 订单资料扫描失败');
+    activeCustomer = await getCustomer(activeCustomer.id);
+    $('d-phone-input').value = activeCustomer.phone_number || '';
+    renderDetailHeader(activeCustomer);
+    renderRegistrationQuick(activeCustomer);
+    renderCTExcelOrderBox(activeCustomer);
+    renderPublicLinkBox(activeCustomer);
+    await loadCustomers();
+    if (!silent || data.found) {
+      toast(data.detail || 'CTExcel 订单资料已同步', data.found ? 'success' : '');
+    }
+  } catch (err) {
+    meta.textContent = err.message;
+    if (!silent) toast(err.message, 'error');
+  } finally {
+    button.disabled = !hasReadableInbox(activeCustomer);
+    button.textContent = '扫描订单邮件';
   }
 }
 
@@ -4128,6 +4353,9 @@ async function refreshVerificationCodeForActive() {
     if (!res.ok) throw new Error(data.detail || '接码失败');
     renderVerificationCodeResult(data);
     toast(data.found && data.code ? `验证码：${data.code}` : (data.detail || '没有找到验证码'), data.found ? 'success' : '');
+    if (normalizeProductType(activeCustomer.product_type) === 'ctexcel') {
+      await refreshCTExcelOrderForActive({ silent: true });
+    }
   } catch (err) {
     value.textContent = err.message;
     meta.textContent = '';
@@ -4194,7 +4422,7 @@ async function deleteCustomer(id, phone) {
 $('add-form').onsubmit = async (e) => {
   e.preventDefault();
   const actDate = $('act-date').value;
-  const useSimCode = $('use-sim-code').value === 'true';
+  const useSimCode = appMode === 'giffgaff' && $('use-sim-code').value === 'true';
   const autoRotate = $('customer-auto-rotate').checked;
   const providerPick = $('customer-provider-pick');
   const manualProviderId = (!autoRotate && providerPick.value) ? parseInt(providerPick.value, 10) : null;
@@ -4202,6 +4430,7 @@ $('add-form').onsubmit = async (e) => {
   // phone/email/shipping/courier default to empty in the backend and are filled in later
   // via the customer detail panel.
   const body = {
+    product_type: appMode,
     activation_date: actDate,
     use_sim_code: useSimCode,
   };
@@ -4374,6 +4603,8 @@ async function loadSettings() {
   try {
     const res = await fetch(API + '/settings');
     const s = await res.json();
+    if (!res.ok) throw new Error(s.detail || '加载设置失败');
+    applyAppMode(s.app_mode || 'giffgaff');
 	    // moemail settings are now configured per-provider on the 邮箱服务商 tab; legacy fields are intentionally ignored
 	    $('s-giffgaff-url').value = s.giffgaff_download_url || DEFAULT_GIFFGAFF_URL;
     $('s-public-worker-domain').value = s.public_worker_domain || '';
@@ -4392,6 +4623,7 @@ async function loadSettings() {
 
 async function saveSettings() {
   const payload = {
+    app_mode: appMode,
     // moemail_url/api_key are now configured per-provider; legacy fields intentionally removed
     giffgaff_download_url: $('s-giffgaff-url').value.trim() || DEFAULT_GIFFGAFF_URL,
     public_worker_domain: $('s-public-worker-domain').value.trim(),
@@ -4771,6 +5003,21 @@ function fallbackTemplates() {
       ],
     },
     {
+      id: 'ctexcel-50x40',
+      name: 'CTExcel 号码资料 50x40',
+      width_mm: 50,
+      height_mm: 40,
+      elements: [
+        {id:'ctexcel-title', type:'text', source:'固定文字', text:'CTExcel 号码资料', x:3, y:3, w:30, h:5, fontSize:8, bold:true},
+        {id:'ctexcel-phone', type:'text', source:'手机号', text:'', x:3, y:10, w:31, h:6, fontSize:11, bold:true},
+        {id:'ctexcel-email', type:'text', source:'邮箱', text:'', x:3, y:18, w:31, h:6, fontSize:6, bold:false},
+        {id:'ctexcel-order', type:'text', source:'CTExcel订单号', text:'', x:3, y:27, w:31, h:7, fontSize:5, bold:true},
+        {id:'ctexcel-public-qr', type:'qr', source:PUBLIC_ACCOUNT_QR_SOURCE, text:'', x:35, y:4, w:12, h:12, fontSize:8, bold:false},
+        {id:'ctexcel-qr-hint', type:'text', source:'固定文字', text:'扫码查看号码和订单', x:34, y:17, w:14, h:5, fontSize:5, bold:true},
+        {id:'ctexcel-referral', type:'text', source:'CTExcel推荐码', text:'', x:34, y:26, w:14, h:7, fontSize:6, bold:true},
+      ],
+    },
+    {
       id: COURIER_TEMPLATE_ID,
       name: '快递单 50x40',
       width_mm: 50,
@@ -4946,6 +5193,8 @@ function resolveTextValue(el, customer) {
     case '快递单号': return customer.tracking_number || '';
     case 'SIM激活码': return customer.sim_activation_code || '';
     case '激活状态': return customer.activation_status || '未开始';
+    case 'CTExcel订单号': return customer.ctexcel_order_number || '';
+    case 'CTExcel推荐码': return customer.ctexcel_referral_code || '';
     case 'Giffgaff下载链接': return labelConfig.giffgaff_download_url || DEFAULT_GIFFGAFF_URL;
     case '激活教程地址': return labelConfig.activation_tutorial_url || DEFAULT_ACTIVATION_TUTORIAL_URL;
     default: return el.text || '';
@@ -5045,7 +5294,14 @@ function renderPropertyPanel() {
   $('prop-panel').style.display = el ? 'grid' : 'none';
   if (!el) return;
   const sourceSelect = $('prop-source');
-  const sources = el.type === 'qr' ? QR_SOURCES : TEXT_SOURCES;
+  const sources = el.type === 'qr'
+    ? QR_SOURCES.filter(source => appMode === 'giffgaff' || !['Giffgaff下载二维码', '激活教程二维码'].includes(source))
+    : TEXT_SOURCES.filter(source => (
+      appMode === 'giffgaff'
+        ? !['CTExcel订单号', 'CTExcel推荐码'].includes(source)
+        : !['SIM激活码', '激活状态', 'Giffgaff下载链接'].includes(source)
+    ));
+  if (!sources.includes(el.source)) sources.push(el.source);
   sourceSelect.replaceChildren(...sources.map(source => new Option(source, source)));
   sourceSelect.value = el.source;
   $('prop-text').value = el.text || '';
@@ -5090,7 +5346,13 @@ async function openPrintPanel(id, templateId='') {
     printMode = templateId === COURIER_TEMPLATE_ID ? 'courier' : 'label';
     printTemplateId = printMode === 'courier'
       ? COURIER_TEMPLATE_ID
-      : (templateId || labelConfig.default_template_id || getPrintTemplates()[0]?.id || '');
+      : (
+        templateId
+        || (normalizeProductType(printCustomer.product_type) === 'ctexcel' ? 'ctexcel-50x40' : '')
+        || labelConfig.default_template_id
+        || getPrintTemplates()[0]?.id
+        || ''
+      );
     $('print-panel').classList.add('open');
     $('print-panel-title').textContent = printMode === 'courier' ? '打印快递单' : '打印标签';
     $('print-template-field').style.display = printMode === 'courier' ? 'none' : '';
@@ -5243,7 +5505,12 @@ async function initApp() {
   bindCustomerFilters();
   bindCustomerPagination();
   bindDetailTabs();
-  await Promise.all([loadCustomers(), loadSimCodes(), loadSettings(), loadLabelConfig()]);
+  await loadSettings();
+  await Promise.all([
+    loadCustomers(),
+    appMode === 'giffgaff' ? loadSimCodes() : Promise.resolve(),
+    loadLabelConfig(),
+  ]);
   renderWorkerSetup();
 }
 

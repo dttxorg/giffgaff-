@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <title>CTExcel 号码与订单资料</title>
+  <style>
+    :root {
+      --ink: #10243e;
+      --blue: #1858d5;
+      --cyan: #18b7d8;
+      --ice: #eaf6ff;
+      --line: #c8d9ea;
+      --muted: #62758a;
+      --lime: #d6ff52;
+      --coral: #ff765f;
+    }
+    * { box-sizing: border-box; }
+    html { background: #dceaf6; }
+    body {
+      margin: 0;
+      padding: 14px 10px 38px;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 7% 5%, rgba(24,183,216,.22), transparent 29%),
+        radial-gradient(circle at 92% 17%, rgba(24,88,213,.15), transparent 28%),
+        #eef7fc;
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    .page { width: min(100%, 620px); margin: 0 auto; }
+    .hero {
+      position: relative;
+      overflow: hidden;
+      min-height: 280px;
+      padding: 25px 24px 30px;
+      border: 2px solid var(--ink);
+      border-radius: 30px;
+      color: #fff;
+      background: linear-gradient(145deg, #0c2446 0%, #1458be 58%, #1fc2d2 100%);
+      box-shadow: 8px 8px 0 var(--ink);
+    }
+    .hero::before {
+      content: "";
+      position: absolute;
+      width: 230px;
+      height: 230px;
+      right: -75px;
+      bottom: -95px;
+      border: 40px solid rgba(255,255,255,.13);
+      border-radius: 50%;
+    }
+    .hero-top { position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: center; }
+    .wordmark { font-size: 19px; font-weight: 950; letter-spacing: -.04em; }
+    .status {
+      padding: 7px 10px;
+      border: 1px solid rgba(255,255,255,.48);
+      border-radius: 999px;
+      font: 900 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .12em;
+    }
+    .hero-copy { position: relative; z-index: 1; margin-top: 56px; }
+    .eyebrow { margin: 0 0 11px; color: #b7f4ff; font: 900 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .16em; }
+    .hero h1 { max-width: 430px; margin: 0; font-size: clamp(34px, 10vw, 52px); line-height: .98; letter-spacing: -.065em; }
+    .hero h1 span { color: var(--lime); }
+    .hero p:last-child { max-width: 390px; margin: 18px 0 0; color: rgba(255,255,255,.78); font-size: 13px; line-height: 1.65; }
+    .panel {
+      position: relative;
+      z-index: 2;
+      margin: -20px 10px 0;
+      padding: 22px 18px;
+      border: 2px solid var(--ink);
+      border-radius: 24px;
+      background: #fff;
+      box-shadow: 6px 6px 0 var(--cyan);
+    }
+    .section-index { margin: 0 0 7px; color: var(--blue); font: 900 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .13em; }
+    h2 { margin: 0; font-size: 26px; line-height: 1.05; letter-spacing: -.045em; }
+    .caption { margin: 8px 0 18px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .data-stack { display: grid; gap: 9px; }
+    .data-row {
+      display: grid;
+      grid-template-columns: minmax(0,1fr) auto;
+      gap: 8px 10px;
+      align-items: center;
+      padding: 13px 12px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: #f8fbfe;
+    }
+    .data-label { grid-column: 1 / -1; color: var(--muted); font-size: 10px; font-weight: 850; letter-spacing: .04em; }
+    .data-row code { overflow-wrap: anywhere; font: 800 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .data-row button {
+      min-width: 68px;
+      min-height: 38px;
+      border: 2px solid var(--ink);
+      border-radius: 11px;
+      color: #fff;
+      background: var(--blue);
+      box-shadow: 3px 3px 0 var(--ink);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 900;
+    }
+    .data-row button.copied { color: var(--ink); background: var(--lime); }
+    .order-summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0,1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .summary-card { padding: 14px; border: 1px solid var(--line); border-radius: 15px; background: var(--ice); }
+    .summary-card span { display: block; color: var(--muted); font-size: 10px; font-weight: 800; }
+    .summary-card strong { display: block; margin-top: 7px; font-size: 17px; overflow-wrap: anywhere; }
+    .referral-link {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 48px;
+      margin-top: 10px;
+      padding: 0 14px;
+      border: 2px solid var(--ink);
+      border-radius: 13px;
+      color: #fff;
+      background: var(--ink);
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 900;
+    }
+    .referral-link span { color: var(--lime); font-size: 19px; }
+    .notice {
+      margin: 28px 10px 0;
+      padding: 20px;
+      border: 2px solid var(--ink);
+      border-radius: 22px;
+      background: #fff5d9;
+      box-shadow: 6px 6px 0 #ffd063;
+    }
+    .notice b { display: block; margin-bottom: 8px; font-size: 18px; }
+    .notice p { margin: 0; color: #5f5235; font-size: 12px; line-height: 1.7; }
+    .notice a { color: var(--blue); font-weight: 900; }
+    .wechat-card {
+      position: relative;
+      overflow: hidden;
+      margin: 30px 10px 0;
+      padding: 24px 20px 22px;
+      border: 2px solid var(--ink);
+      border-radius: 26px;
+      background: var(--ink);
+      color: #fff;
+      box-shadow: 7px 7px 0 var(--coral);
+    }
+    .wechat-card::after { content: ""; position: absolute; right: -54px; top: -54px; width: 145px; height: 145px; border: 26px solid var(--lime); border-radius: 50%; opacity: .14; pointer-events: none; }
+    .wechat-card-top { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .wechat-kicker { color: var(--lime); font: 900 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; }
+    .wechat-online { display: inline-flex; align-items: center; gap: 6px; color: rgba(255,255,255,.72); font-size: 10px; font-weight: 800; }
+    .wechat-online i { width: 7px; height: 7px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 0 4px rgba(214,255,82,.13); }
+    .wechat-card h2 { position: relative; z-index: 1; margin: 17px 0 8px; font-size: 31px; line-height: 1; letter-spacing: -.055em; }
+    .wechat-subtitle { position: relative; z-index: 1; max-width: 360px; margin: 0; color: rgba(255,255,255,.7); font-size: 13px; line-height: 1.6; }
+    .wechat-qr-stage { position: relative; z-index: 1; width: min(100%,330px); margin: 22px auto 16px; padding: 14px; border-radius: 22px; background: #fff; }
+    .wechat-qr-crop { position: relative; width: 100%; aspect-ratio: 1; overflow: hidden; background: #fff; }
+    .wechat-qr-source { position: absolute; left: 0; top: 0; width: 130.588%; max-width: none; height: auto; transform: translate(-11.712%,-24.138%); user-select: none; -webkit-touch-callout: default; }
+    .wechat-corner { position: absolute; z-index: 2; width: 25px; height: 25px; border-color: var(--lime); border-style: solid; pointer-events: none; }
+    .corner-tl { left: 5px; top: 5px; border-width: 4px 0 0 4px; border-radius: 10px 0 0; }
+    .corner-tr { right: 5px; top: 5px; border-width: 4px 4px 0 0; border-radius: 0 10px 0 0; }
+    .corner-bl { left: 5px; bottom: 5px; border-width: 0 0 4px 4px; border-radius: 0 0 0 10px; }
+    .corner-br { right: 5px; bottom: 5px; border-width: 0 4px 4px 0; border-radius: 0 0 10px; }
+    .wechat-actions { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(2,1fr); gap: 8px; }
+    .wechat-actions span { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 42px; border: 1px solid rgba(255,255,255,.28); border-radius: 999px; color: #fff; font-size: 12px; font-weight: 900; }
+    .wechat-actions b { color: var(--lime); font-size: 17px; }
+    .wechat-note { position: relative; z-index: 1; margin: 12px 0 0; color: rgba(255,255,255,.58); font-size: 11px; line-height: 1.5; text-align: center; }
+    .footer { margin: 28px 0 0; color: var(--muted); text-align: center; font: 800 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
+    @media (max-width: 380px) {
+      body { padding-inline: 8px; }
+      .hero { padding-inline: 19px; }
+      .panel, .notice, .wechat-card { margin-inline: 4px; }
+      .order-summary { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <div class="hero-top">
+        <span class="wordmark">CTExcel</span>
+        <span class="status">ORDER READY</span>
+      </div>
+      <div class="hero-copy">
+        <p class="eyebrow">MOBILE ACCOUNT / UK</p>
+        <h1>号码与订单，<br><span>都在这里。</span></h1>
+        <p>这是您的 CTExcel 手机号码、注册邮箱与订单资料。复制按钮只复制对应值。</p>
+      </div>
+    </header>
+
+    <section class="panel" aria-labelledby="account-title">
+      <p class="section-index">01 / ACCOUNT</p>
+      <h2 id="account-title">账号资料</h2>
+      <p class="caption">订单邮件同步完成后，手机号和订单号会自动出现在这里。</p>
+      <div class="data-stack">
+        __PHONE_ROW__
+        __EMAIL_ROW__
+        __ORDER_ROW__
+        __REFERRAL_ROW__
+      </div>
+      <div class="order-summary">
+        <div class="summary-card"><span>交易金额</span><strong>__AMOUNT__</strong></div>
+        <div class="summary-card"><span>订单服务</span><strong>CTExcel UK</strong></div>
+      </div>
+      __REFERRAL_LINK__
+    </section>
+
+    <section class="notice">
+      <b>需要帮助或续费服务？</b>
+      <p>如遇订单、号码、套餐或使用问题，请通过下方微信联系客服。官方服务可前往
+        <a href="https://www.ctexcel.com/uk/" target="_blank" rel="noopener noreferrer">CTExcel UK 官网</a>。
+      </p>
+    </section>
+
+    __WECHAT_GUIDE_HTML__
+    <p class="footer">CTEXCEL UK · PRIVATE ACCOUNT DETAILS</p>
+  </main>
+  <script>
+    function copyValue(id, button, message) {
+      const element = document.getElementById(id);
+      const value = element ? (element.dataset.copy || element.textContent.trim()) : "";
+      if (!value) return;
+      const done = () => {
+        const original = button.textContent;
+        button.classList.add("copied");
+        button.textContent = message || "已复制";
+        setTimeout(() => {
+          button.classList.remove("copied");
+          button.textContent = original;
+        }, 1400);
+      };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(value).then(done).catch(() => fallbackCopy(value, done));
+      } else {
+        fallbackCopy(value, done);
+      }
+    }
+    function fallbackCopy(value, done) {
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+      done();
+    }
+  </script>
+</body>
+</html>

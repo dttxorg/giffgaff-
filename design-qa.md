@@ -103,5 +103,19 @@ No actionable P0, P1, or P2 issue remains.
 - [x] Direct full-inbox list and plain-text body reader for provider-backed customer email accounts.
 - [x] Sandboxed HTML preview, plain-text fallback, sent/received timestamps and immediate payment-status synchronization.
 - [x] Random identity and UK address collapsed by default.
+- [x] Persistent giffgaff / CTExcel mode switch with product-specific customer lists.
+- [x] CTExcel desktop ledger replaces SIM/payment columns with order number and mailbox-sync state.
+- [x] CTExcel detail hides SIM, eSIM, random UK identity, payment check and voicemail tools.
+- [x] CTExcel order fields remain visible and copyable without opening the full mailbox.
+- [x] CTExcel public QR page has its own responsive visual system and contains no giffgaff voicemail flow.
+
+## CTExcel mode verification
+
+- Desktop `1440 × 1024`: the CTExcel ledger displayed 10 aligned columns and only CTExcel customers; the persistent switch restored the giffgaff ledger, SIM tab and giffgaff-only filters.
+- Mobile `390 × 844`: header mode controls remained horizontally usable, customer rows rendered as two-column cards, and order/sync fields stayed readable.
+- CTExcel detail: tabs were limited to 账号与订单、发货、完整邮箱、工具. Order number, amount and referral code were visible in the first section.
+- CTExcel public page: mobile viewport rendered the phone, email, order number and referral code as separate copy rows; no second tutorial jump, eSIM, payment or voicemail section appeared.
+- Persistence: switching to CTExcel, reloading `/index.html`, and reading the page again retained CTExcel as the active mode.
+- Browser console: zero error-level entries after list, detail, public page, mobile and mode-switch checks.
 
 final result: passed

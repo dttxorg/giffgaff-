@@ -9,6 +9,7 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS customers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_type TEXT NOT NULL DEFAULT 'giffgaff',
                 phone_number TEXT UNIQUE,
                 email TEXT NOT NULL,
                 shipping_address TEXT,
@@ -40,6 +41,11 @@ async def init_db():
                 address TEXT,
                 city TEXT,
                 postcode TEXT,
+                ctexcel_order_number TEXT,
+                ctexcel_transaction_amount TEXT,
+                ctexcel_referral_code TEXT,
+                ctexcel_referral_link TEXT,
+                ctexcel_last_checked_at TEXT,
                 activation_error TEXT,
                 activated_at TEXT,
                 automation_lock_owner TEXT,
@@ -47,6 +53,7 @@ async def init_db():
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        await _ensure_column(db, "customers", "product_type", "TEXT NOT NULL DEFAULT 'giffgaff'")
         await _ensure_column(db, "customers", "moemail_id", "TEXT")
         await _ensure_column(db, "customers", "moemail_address", "TEXT")
         await _ensure_column(db, "customers", "share_link", "TEXT")
@@ -70,6 +77,11 @@ async def init_db():
         await _ensure_column(db, "customers", "address", "TEXT")
         await _ensure_column(db, "customers", "city", "TEXT")
         await _ensure_column(db, "customers", "postcode", "TEXT")
+        await _ensure_column(db, "customers", "ctexcel_order_number", "TEXT")
+        await _ensure_column(db, "customers", "ctexcel_transaction_amount", "TEXT")
+        await _ensure_column(db, "customers", "ctexcel_referral_code", "TEXT")
+        await _ensure_column(db, "customers", "ctexcel_referral_link", "TEXT")
+        await _ensure_column(db, "customers", "ctexcel_last_checked_at", "TEXT")
         await _ensure_column(
             db, "customers", "public_version", "INTEGER NOT NULL DEFAULT 1"
         )
@@ -88,8 +100,20 @@ async def init_db():
         await _ensure_column(db, "customers", "activated_at", "TEXT")
         await _ensure_column(db, "customers", "automation_lock_owner", "TEXT")
         await _ensure_column(db, "customers", "automation_locked_at", "TEXT")
+        await db.execute(
+            """UPDATE customers
+               SET product_type = 'giffgaff'
+               WHERE product_type IS NULL
+                  OR product_type NOT IN ('giffgaff', 'ctexcel')"""
+        )
         await _ensure_activation_status_values(db)
         await _ensure_nullable_phone_number(db)
+        # 旧版 phone_number NOT NULL 表重建时 SQLite 会随旧表删除索引，
+        # 因此在迁移后再次确保公开 Token 唯一索引存在。
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_customers_public_token "
+            "ON customers(public_token) WHERE public_token IS NOT NULL"
+        )
         await db.execute("""
             CREATE TABLE IF NOT EXISTS sim_codes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -162,6 +186,7 @@ async def _ensure_nullable_phone_number(db: aiosqlite.Connection):
     await db.execute("""
         CREATE TABLE customers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_type TEXT NOT NULL DEFAULT 'giffgaff',
             phone_number TEXT UNIQUE,
             email TEXT NOT NULL,
             shipping_address TEXT,
@@ -178,12 +203,27 @@ async def _ensure_nullable_phone_number(db: aiosqlite.Connection):
             sim_code_id INTEGER,
             sim_activation_code TEXT,
             initial_password TEXT,
+            esim_raw_code TEXT,
+            email_provider_id INTEGER,
+            email_account_id TEXT,
+            email_provider_domain TEXT,
             public_token TEXT,
             public_version INTEGER NOT NULL DEFAULT 1,
+            phone_status TEXT NOT NULL DEFAULT '激活',
             payment_changed_at TEXT,
             payment_updated_at TEXT,
             payment_last_checked_at TEXT,
             activation_status TEXT NOT NULL DEFAULT '未开始',
+            first_name TEXT,
+            last_name TEXT,
+            address TEXT,
+            city TEXT,
+            postcode TEXT,
+            ctexcel_order_number TEXT,
+            ctexcel_transaction_amount TEXT,
+            ctexcel_referral_code TEXT,
+            ctexcel_referral_link TEXT,
+            ctexcel_last_checked_at TEXT,
             activation_error TEXT,
             activated_at TEXT,
             automation_lock_owner TEXT,
@@ -191,22 +231,14 @@ async def _ensure_nullable_phone_number(db: aiosqlite.Connection):
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
     """)
-    await db.execute("""
-        INSERT INTO customers
-            (id, phone_number, email, shipping_address, shipping_status, courier_company, tracking_number,
-             courier_order_code, courier_print_data, activation_date, moemail_id, moemail_address, share_link,
-             is_moemail_auto, sim_code_id, sim_activation_code, initial_password, public_token, activation_status,
-             public_version,
-             payment_changed_at, payment_updated_at, payment_last_checked_at,
-             activation_error, activated_at, automation_lock_owner, automation_locked_at, created_at)
-        SELECT id, phone_number, email, shipping_address, shipping_status, courier_company, tracking_number,
-               courier_order_code, courier_print_data, activation_date, moemail_id, moemail_address, share_link,
-               is_moemail_auto, sim_code_id, sim_activation_code, initial_password, public_token, activation_status,
-               public_version,
-               payment_changed_at, payment_updated_at, payment_last_checked_at,
-               activation_error, activated_at, automation_lock_owner, automation_locked_at, created_at
-        FROM customers_old
-    """)
+    # init_db 已先补齐所有当前字段；按字段名整体复制，避免表重建时遗失
+    # provider、英国地址、CTExcel 订单或公开二维码版本等后加数据。
+    column_names = [row[1] for row in rows]
+    quoted_columns = ", ".join(f'"{name}"' for name in column_names)
+    await db.execute(
+        f"""INSERT INTO customers ({quoted_columns})
+            SELECT {quoted_columns} FROM customers_old"""
+    )
     await db.execute("DROP TABLE customers_old")
 
 

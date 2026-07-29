@@ -6,9 +6,11 @@ from typing import Any, Literal, Optional
 PhoneStatus = Literal["激活", "封号", "投诉", "退款", "丢失", "作废"]
 ActivationStatus = Literal["未开始", "已分配激活码", "激活中", "等待人工支付", "等待转 eSIM", "已完成", "失败"]
 SimCodeStatus = Literal["未分配", "已分配", "激活中", "已使用", "失败", "作废"]
+ProductType = Literal["giffgaff", "ctexcel"]
 
 
 class CustomerCreate(BaseModel):
+    product_type: ProductType = "giffgaff"
     phone_number: Optional[str] = None
     email: str = ""
     shipping_address: Optional[str] = None
@@ -40,10 +42,15 @@ class CustomerUpdate(BaseModel):
     address: Optional[str] = None
     city: Optional[str] = None
     postcode: Optional[str] = None
+    ctexcel_order_number: Optional[str] = None
+    ctexcel_transaction_amount: Optional[str] = None
+    ctexcel_referral_code: Optional[str] = None
+    ctexcel_referral_link: Optional[str] = None
 
 
 class CustomerOut(BaseModel):
     id: int
+    product_type: ProductType = "giffgaff"
     phone_number: Optional[str]
     email: str
     shipping_address: Optional[str]
@@ -67,6 +74,11 @@ class CustomerOut(BaseModel):
     address: Optional[str] = None
     city: Optional[str] = None
     postcode: Optional[str] = None
+    ctexcel_order_number: Optional[str] = None
+    ctexcel_transaction_amount: Optional[str] = None
+    ctexcel_referral_code: Optional[str] = None
+    ctexcel_referral_link: Optional[str] = None
+    ctexcel_last_checked_at: Optional[str] = None
     payment_changed_at: Optional[str] = None
     payment_updated_at: Optional[str] = None
     payment_last_checked_at: Optional[str] = None
@@ -79,6 +91,7 @@ class CustomerOut(BaseModel):
 
 class CustomerDetail(BaseModel):
     id: int
+    product_type: ProductType = "giffgaff"
     phone_number: Optional[str]
     email: str
     shipping_address: Optional[str]
@@ -103,6 +116,11 @@ class CustomerDetail(BaseModel):
     address: Optional[str] = None
     city: Optional[str] = None
     postcode: Optional[str] = None
+    ctexcel_order_number: Optional[str] = None
+    ctexcel_transaction_amount: Optional[str] = None
+    ctexcel_referral_code: Optional[str] = None
+    ctexcel_referral_link: Optional[str] = None
+    ctexcel_last_checked_at: Optional[str] = None
     payment_changed_at: Optional[str] = None
     payment_updated_at: Optional[str] = None
     payment_last_checked_at: Optional[str] = None
@@ -114,6 +132,7 @@ class CustomerDetail(BaseModel):
 
 
 class SystemSettings(BaseModel):
+    app_mode: Optional[ProductType] = None
     giffgaff_download_url: Optional[str] = None
     activation_tutorial_url: Optional[str] = None
     activation_page_markdown: Optional[str] = None
@@ -183,6 +202,21 @@ class PaymentInfoEmailOut(BaseModel):
     latest_changed_message_id: Optional[str] = None
     latest_changed_subject: Optional[str] = None
     latest_changed_received_at: Optional[str] = None
+    detail: str = ""
+
+
+class CTExcelOrderInfoOut(BaseModel):
+    found: bool = False
+    phone_number: Optional[str] = None
+    order_number: Optional[str] = None
+    transaction_amount: Optional[str] = None
+    referral_code: Optional[str] = None
+    referral_link: Optional[str] = None
+    message_id: Optional[str] = None
+    subject: Optional[str] = None
+    from_address: Optional[str] = None
+    received_at: Optional[str] = None
+    checked_count: int = 0
     detail: str = ""
 
 

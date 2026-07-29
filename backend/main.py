@@ -25,7 +25,7 @@ from models import (
     CustomerCreate, CustomerUpdate, CustomerOut, CustomerDetail,
     SystemSettings, AuthLoginRequest, MoEmailCreateRequest,
     SimCodeImport, SimCodeUpdate, SimCodeOut, ActivationStatusUpdate,
-    VerificationCodeOut, PaymentInfoEmailOut,
+    VerificationCodeOut, PaymentInfoEmailOut, CTExcelOrderInfoOut,
     InboxMessageSummaryOut, InboxMessageListOut, InboxMessageDetailOut,
     DomainInfo, LabelConfig, EsimCodeUpdate,
     EmailProviderCreate, EmailProviderOut, EmailProviderUpdate,
@@ -36,7 +36,7 @@ from crud import (
     update_customer, delete_customer,
     update_customer_moemail,
     regenerate_public_link, ensure_public_link, bump_all_public_versions,
-    save_payment_check_result,
+    save_payment_check_result, save_ctexcel_order_info,
     regenerate_identity,
     get_public_email,
     get_settings, set_setting, fetch_one, normalize_optional_text
@@ -70,6 +70,8 @@ DEFAULT_GIFFGAFF_DOWNLOAD_URL = "https://www.giffgaff.com/mobile-app"
 DEFAULT_ACTIVATION_TUTORIAL_URL = "https://gg.681218.xyz/activation.html"
 DEFAULT_ACTIVATION_PAGE_VERSION = 1
 DEFAULT_PHONE_STATUS = "激活"
+DEFAULT_APP_MODE = "giffgaff"
+PRODUCT_TYPES = {"giffgaff", "ctexcel"}
 PHONE_STATUSES = {"激活", "封号", "投诉", "退款", "丢失", "作废"}
 ACTIVATION_STATUSES = {
     "未开始", "已分配激活码", "激活中",
@@ -129,6 +131,21 @@ DEFAULT_LABEL_TEMPLATES = [
             {"id": "activation-url", "type": "text", "source": "固定文字", "text": "giffgaff 12 步激活教程", "x": 3, "y": 3, "w": 44, "h": 6, "fontSize": 8, "bold": True},
             {"id": "activation-qr", "type": "qr", "source": "激活教程二维码", "text": "", "x": 13, "y": 9, "w": 24, "h": 24, "fontSize": 8, "bold": False},
             {"id": "activation-tip", "type": "text", "source": "固定文字", "text": "扫码后直接查看，无需二次跳转", "x": 5, "y": 34, "w": 40, "h": 4, "fontSize": 6, "bold": True},
+        ],
+    },
+    {
+        "id": "ctexcel-50x40",
+        "name": "CTExcel 号码资料 50x40",
+        "width_mm": 50,
+        "height_mm": 40,
+        "elements": [
+            {"id": "ctexcel-title", "type": "text", "source": "固定文字", "text": "CTExcel 号码资料", "x": 3, "y": 3, "w": 30, "h": 5, "fontSize": 8, "bold": True},
+            {"id": "ctexcel-phone", "type": "text", "source": "手机号", "text": "", "x": 3, "y": 10, "w": 31, "h": 6, "fontSize": 11, "bold": True},
+            {"id": "ctexcel-email", "type": "text", "source": "邮箱", "text": "", "x": 3, "y": 18, "w": 31, "h": 6, "fontSize": 6, "bold": False},
+            {"id": "ctexcel-order", "type": "text", "source": "CTExcel订单号", "text": "", "x": 3, "y": 27, "w": 31, "h": 7, "fontSize": 5, "bold": True},
+            {"id": "ctexcel-public-qr", "type": "qr", "source": "号码资料二维码", "text": "", "x": 35, "y": 4, "w": 12, "h": 12, "fontSize": 8, "bold": False},
+            {"id": "ctexcel-qr-hint", "type": "text", "source": "固定文字", "text": "扫码查看号码和订单", "x": 34, "y": 17, "w": 14, "h": 5, "fontSize": 5, "bold": True},
+            {"id": "ctexcel-referral", "type": "text", "source": "CTExcel推荐码", "text": "", "x": 34, "y": 26, "w": 14, "h": 7, "fontSize": 6, "bold": True},
         ],
     },
     {
@@ -335,6 +352,11 @@ def _customer_payload(row) -> dict:
 def _normalize_phone_status(value: Optional[str]) -> str:
     value = (value or "").strip()
     return value if value in PHONE_STATUSES else DEFAULT_PHONE_STATUS
+
+
+def _normalize_product_type(value: Optional[str]) -> str:
+    value = (value or "").strip().lower()
+    return value if value in PRODUCT_TYPES else DEFAULT_APP_MODE
 
 
 def _normalize_activation_status(value: Optional[str]) -> str:
@@ -547,7 +569,9 @@ def _message_html_body(message: dict) -> str:
 def _extract_verification_code(message: dict) -> Optional[str]:
     subject = _first_text(message, "subject")
     content = _first_text(message, "content", "text", "body", "plainText", "plain_text")
-    html_content = _plain_text_from_html(_first_text(message, "html", "htmlContent", "html_content"))
+    html_content = _plain_text_from_html(
+        _first_text(message, "html", "htmlContent", "html_content", "htmlBody", "html_body")
+    )
     text = "\n".join(part for part in (subject, content, html_content) if part)
     if not text:
         return None
@@ -567,7 +591,9 @@ def _extract_verification_code(message: dict) -> Optional[str]:
 def _message_search_text(message: dict) -> str:
     subject = _first_text(message, "subject")
     content = _first_text(message, "content", "text", "body", "plainText", "plain_text")
-    html_content = _plain_text_from_html(_first_text(message, "html", "htmlContent", "html_content"))
+    html_content = _plain_text_from_html(
+        _first_text(message, "html", "htmlContent", "html_content", "htmlBody", "html_body")
+    )
     return "\n".join(part for part in (subject, content, html_content) if part)
 
 
@@ -578,6 +604,45 @@ def _payment_info_email_kind(message: dict) -> Optional[str]:
     if re.search(r"payment\s+info\s+has\s+been\s+updated", text, re.I):
         return "updated"
     return None
+
+
+def _extract_ctexcel_order_info(message: dict) -> dict:
+    """从 CTExcel 订单邮件的纯文本或 HTML 正文中提取关键资料。"""
+    text = _message_search_text(message)
+    if not text:
+        return {}
+    normalized = html.unescape(text).replace("\u00a0", " ")
+    # 邮件正文有时会保留 Markdown 的 **粗体** 标记；字段解析不依赖排版符号。
+    normalized = re.sub(r"\*+", "", normalized)
+
+    def find(pattern: str, flags: int = re.I) -> Optional[str]:
+        match = re.search(pattern, normalized, flags)
+        return match.group(1).strip() if match else None
+
+    order_number = find(
+        r"(?:订单号|order\s*(?:number|no\.?))\s*[:：]\s*\**\s*([A-Z0-9][A-Z0-9-]{7,})"
+    )
+    phone_number = find(
+        r"(?:手机号码|电话号码|mobile\s*(?:number|no\.?))\s*[:：]\s*\**\s*((?:\+?44|0)7\d{9})"
+    )
+    transaction_amount = find(
+        r"(?:交易金额|订单金额|transaction\s*amount)\s*[:：]\s*\**\s*[£￡]?\s*([0-9]+(?:\.[0-9]{1,2})?)"
+    )
+    referral_code = find(
+        r"(?:专属推荐码|推荐码|referral\s*code)\s*[:：]\s*\**\s*([A-Z0-9]{4,20})"
+    )
+    referral_link = find(
+        r"(https?://(?:www\.)?ctexcel\.com/[^\s<>\])\"']+recommendCode=[A-Z0-9]+)"
+    )
+    if referral_link:
+        referral_link = referral_link.rstrip(".,;，。；")
+    return {
+        "phone_number": phone_number,
+        "order_number": order_number,
+        "transaction_amount": transaction_amount,
+        "referral_code": referral_code,
+        "referral_link": referral_link,
+    }
 
 
 def _merge_default_label_templates(templates: list[dict]) -> list[dict]:
@@ -711,6 +776,7 @@ async def _bump_activation_page_version(settings: dict) -> int:
 async def get_sys_settings():
     rows = await get_settings()
     return SystemSettings(
+        app_mode=_normalize_product_type(rows.get("app_mode")),
         giffgaff_download_url=rows.get("giffgaff_download_url", DEFAULT_GIFFGAFF_DOWNLOAD_URL),
         activation_tutorial_url=rows.get(
             "activation_tutorial_url", DEFAULT_ACTIVATION_TUTORIAL_URL
@@ -728,6 +794,8 @@ async def update_settings(data: SystemSettings):
     rows = await get_settings()
     activation_page_changed = False
     contact_page_changed = False
+    if data.app_mode is not None:
+        await set_setting("app_mode", _normalize_product_type(data.app_mode))
     if data.giffgaff_download_url is not None:
         await set_setting("giffgaff_download_url", data.giffgaff_download_url)
     if data.activation_tutorial_url is not None:
@@ -869,12 +937,13 @@ async def _create_customer_without_activation(data: CustomerCreate, email_bundle
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
             """INSERT INTO customers
-               (phone_number, email, shipping_address, courier_company,
+               (product_type, phone_number, email, shipping_address, courier_company,
                 tracking_number, courier_order_code, courier_print_data, activation_date,
                 moemail_id, moemail_address, share_link, is_moemail_auto,
                 email_provider_id, email_account_id, email_provider_domain, activation_status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
+                _normalize_product_type(data.product_type),
                 phone_number,
                 email_bundle.get("email", ""),
                 shipping_address,
@@ -916,13 +985,14 @@ async def _create_customer_with_activation(data: CustomerCreate, email_bundle: d
                 raise HTTPException(status_code=400, detail="没有可用 SIM 激活码，请先导入激活码")
             cursor = await db.execute(
                 """INSERT INTO customers
-                   (phone_number, email, shipping_address, courier_company,
+                   (product_type, phone_number, email, shipping_address, courier_company,
                     tracking_number, courier_order_code, courier_print_data, activation_date,
                     moemail_id, moemail_address, share_link, is_moemail_auto,
                     sim_code_id, sim_activation_code, initial_password,
                     email_provider_id, email_account_id, email_provider_domain, activation_status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
+                    _normalize_product_type(data.product_type),
                     phone_number,
                     email_bundle.get("email", ""),
                     shipping_address,
@@ -968,6 +1038,7 @@ async def list_customers(search: str = ""):
     rows = await (search_customers(search) if (search or "").strip() else get_all_customers())
     return [CustomerOut(
         id=r["id"],
+        product_type=_normalize_product_type(r.get("product_type")),
         phone_number=r["phone_number"],
         email=r["email"],
         shipping_address=r.get("shipping_address"),
@@ -991,6 +1062,11 @@ async def list_customers(search: str = ""):
         address=r.get("address"),
         city=r.get("city"),
         postcode=r.get("postcode"),
+        ctexcel_order_number=r.get("ctexcel_order_number"),
+        ctexcel_transaction_amount=r.get("ctexcel_transaction_amount"),
+        ctexcel_referral_code=r.get("ctexcel_referral_code"),
+        ctexcel_referral_link=r.get("ctexcel_referral_link"),
+        ctexcel_last_checked_at=r.get("ctexcel_last_checked_at"),
         payment_changed_at=r.get("payment_changed_at"),
         payment_updated_at=r.get("payment_updated_at"),
         payment_last_checked_at=r.get("payment_last_checked_at"),
@@ -1009,6 +1085,7 @@ async def get_customer_detail(customer_id: int):
         raise HTTPException(status_code=404, detail="客户不存在")
     return CustomerDetail(
         id=c["id"],
+        product_type=_normalize_product_type(c.get("product_type")),
         phone_number=c["phone_number"],
         email=c["email"],
         shipping_address=c.get("shipping_address"),
@@ -1033,6 +1110,11 @@ async def get_customer_detail(customer_id: int):
         address=c.get("address"),
         city=c.get("city"),
         postcode=c.get("postcode"),
+        ctexcel_order_number=c.get("ctexcel_order_number"),
+        ctexcel_transaction_amount=c.get("ctexcel_transaction_amount"),
+        ctexcel_referral_code=c.get("ctexcel_referral_code"),
+        ctexcel_referral_link=c.get("ctexcel_referral_link"),
+        ctexcel_last_checked_at=c.get("ctexcel_last_checked_at"),
         payment_changed_at=c.get("payment_changed_at"),
         payment_updated_at=c.get("payment_updated_at"),
         payment_last_checked_at=c.get("payment_last_checked_at"),
@@ -1046,6 +1128,8 @@ async def get_customer_detail(customer_id: int):
 
 @app.post("/api/customers", status_code=201)
 async def add_customer(data: CustomerCreate):
+    product_type = _normalize_product_type(data.product_type)
+    use_sim_code = bool(data.use_sim_code and product_type == "giffgaff")
     phone_number = normalize_optional_text(data.phone_number)
     if phone_number:
         async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -1057,7 +1141,7 @@ async def add_customer(data: CustomerCreate):
             if existing:
                 raise HTTPException(status_code=409, detail="该手机号已录入")
 
-    if data.use_sim_code and not await _has_available_sim_code():
+    if use_sim_code and not await _has_available_sim_code():
         raise HTTPException(status_code=400, detail="没有可用 SIM 激活码，请先导入激活码，或选择不使用激活码")
 
     try:
@@ -1074,7 +1158,7 @@ async def add_customer(data: CustomerCreate):
             email_bundle["moemail_id"] = email_bundle.get("email_account_id")
             email_bundle["moemail_address"] = email_bundle.get("email")
             email_bundle["is_moemail_auto"] = True
-        if data.use_sim_code:
+        if use_sim_code:
             initial_password = _generate_initial_password()
             customer_id, sim = await _create_customer_with_activation(data, email_bundle, initial_password)
             message = "客户已录入并分配激活码"
@@ -1082,7 +1166,11 @@ async def add_customer(data: CustomerCreate):
         else:
             initial_password = None
             customer_id = await _create_customer_without_activation(data, email_bundle)
-            message = "客户已录入，未使用激活码"
+            message = (
+                "CTExcel 客户已录入，等待从订单邮件同步号码资料"
+                if product_type == "ctexcel"
+                else "客户已录入，未使用激活码"
+            )
             sim_activation_code = None
     except aiosqlite.IntegrityError:
         raise HTTPException(status_code=409, detail="该手机号已录入")
@@ -1097,11 +1185,16 @@ async def add_customer(data: CustomerCreate):
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning("failed to record provider use after commit: %s", exc)
-    # 创建后自动生成英国人名 / 地址 / 邮编（占位用，运营可编辑或重新随机）
-    identity = await regenerate_identity(customer_id) or {}
+    # 仅 giffgaff 注册需要英国身份；CTExcel 订单不生成无关资料。
+    identity = (
+        await regenerate_identity(customer_id) or {}
+        if product_type == "giffgaff"
+        else {}
+    )
 
     return {
         "customer_id": customer_id,
+        "product_type": product_type,
         "message": message,
         "email": email_bundle.get("email", ""),
         "email_provider_id": email_bundle.get("email_provider_id"),
@@ -1144,6 +1237,8 @@ async def update_customer_activation_status(customer_id: int, data: ActivationSt
     c = await get_customer(customer_id)
     if not c:
         raise HTTPException(status_code=404, detail="客户不存在")
+    if _normalize_product_type(c.get("product_type")) == "ctexcel":
+        raise HTTPException(status_code=400, detail="CTExcel 客户不使用 SIM 激活流程")
     await _apply_activation_status(customer_id, data.status, data.error)
     message = data.message or f"后台手动标记激活状态：{data.status}"
     await _insert_activation_log(customer_id, "info", data.step or "admin", message)
@@ -1234,6 +1329,8 @@ async def save_customer_esim_code(customer_id: int, data: EsimCodeUpdate):
     c = await get_customer(customer_id)
     if not c:
         raise HTTPException(status_code=404, detail="客户不存在")
+    if _normalize_product_type(c.get("product_type")) == "ctexcel":
+        raise HTTPException(status_code=400, detail="CTExcel 客户不使用 eSIM 激活码二维码")
     raw = (data.code or "").strip()
     if raw and not parse_esim_raw(raw):
         raise HTTPException(status_code=400, detail="eSIM 激活码格式无效，需为 1$SM-DP+$激活码")
@@ -1251,6 +1348,8 @@ async def get_customer_esim_qr(customer_id: int):
     c = await get_customer(customer_id)
     if not c:
         raise HTTPException(status_code=404, detail="客户不存在")
+    if _normalize_product_type(c.get("product_type")) == "ctexcel":
+        raise HTTPException(status_code=400, detail="CTExcel 客户不使用 eSIM 激活码二维码")
     raw = (c.get("esim_raw_code") or "").strip()
     if not raw:
         raise HTTPException(status_code=404, detail="该客户尚未保存 eSIM 激活码")
@@ -1313,6 +1412,11 @@ async def ensure_public_link_route(customer_id: int):
 async def regenerate_identity_route(customer_id: int):
     """重新随机 first_name / last_name / address / city / postcode。
     覆盖已存在的值，返回新的身份信息。"""
+    customer = await get_customer(customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="客户不存在")
+    if _normalize_product_type(customer.get("product_type")) == "ctexcel":
+        raise HTTPException(status_code=400, detail="CTExcel 客户不使用随机身份和英国地址")
     result = await regenerate_identity(customer_id)
     if not result:
         raise HTTPException(status_code=404, detail="客户不存在")
@@ -1562,7 +1666,115 @@ async def get_customer_verification_code(customer_id: int):
             ),
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"MoEmail 接码失败：{e}") from e
+        raise HTTPException(status_code=502, detail=f"邮箱接码失败：{e}") from e
+
+
+@app.get(
+    "/api/customers/{customer_id}/ctexcel-order-info",
+    response_model=CTExcelOrderInfoOut,
+)
+async def get_customer_ctexcel_order_info(customer_id: int, limit: int = 50):
+    """扫描 CTExcel 订单邮件，并把手机号、订单号等资料同步到客户记录。"""
+    c = await get_customer(customer_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="客户不存在")
+    if _normalize_product_type(c.get("product_type")) != "ctexcel":
+        raise HTTPException(status_code=400, detail="该客户不是 CTExcel 模式")
+    account_id, client = await _resolve_inbox_provider(c)
+    limit = min(max(1, limit), 100)
+    try:
+        mailbox = client.get_email_messages(account_id)
+        messages = _message_list(mailbox)
+        messages.sort(key=_message_received_at, reverse=True)
+        found: dict[str, Optional[str]] = {
+            "phone_number": None,
+            "order_number": None,
+            "transaction_amount": None,
+            "referral_code": None,
+            "referral_link": None,
+        }
+        matched_message: dict = {}
+        checked_count = 0
+        detail_miss_count = 0
+
+        for summary in messages[:limit]:
+            message_id = _message_id(summary)
+            detail = {}
+            summary_info = _extract_ctexcel_order_info(summary)
+            if message_id and not (summary_info.get("phone_number") and summary_info.get("order_number")):
+                try:
+                    detail = _message_detail_payload(client.get_message(account_id, message_id))
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 404:
+                        raise
+                    detail_miss_count += 1
+            message = {**summary, **detail}
+            checked_count += 1
+            parsed = _extract_ctexcel_order_info(message)
+            if any(parsed.values()) and not matched_message:
+                matched_message = message
+            for key in found:
+                if not found[key] and parsed.get(key):
+                    found[key] = parsed[key]
+            if found["phone_number"] and found["order_number"] and all(
+                found[key] for key in ("transaction_amount", "referral_code", "referral_link")
+            ):
+                break
+
+        checked_at = _utc_now()
+        persisted = await save_ctexcel_order_info(
+            customer_id,
+            phone_number=found["phone_number"],
+            order_number=found["order_number"],
+            transaction_amount=found["transaction_amount"],
+            referral_code=found["referral_code"],
+            referral_link=found["referral_link"],
+            checked_at=checked_at,
+        )
+        if not persisted:
+            raise RuntimeError("CTExcel 订单资料未写入客户记录")
+
+        output = {
+            "phone_number": found["phone_number"] or c.get("phone_number"),
+            "order_number": found["order_number"] or c.get("ctexcel_order_number"),
+            "transaction_amount": found["transaction_amount"] or c.get("ctexcel_transaction_amount"),
+            "referral_code": found["referral_code"] or c.get("ctexcel_referral_code"),
+            "referral_link": found["referral_link"] or c.get("ctexcel_referral_link"),
+        }
+        has_core_info = bool(output["phone_number"] or output["order_number"])
+        detail_text = (
+            "已从 CTExcel 订单邮件同步手机号码和订单资料"
+            if found["phone_number"] and found["order_number"]
+            else (
+                "已读取邮件，但只提取到部分 CTExcel 订单资料"
+                if any(found.values())
+                else "没有找到包含 CTExcel 手机号码和订单号的邮件"
+            )
+        )
+        if detail_miss_count:
+            detail_text += f"；{detail_miss_count} 封邮件详情已失效"
+        return CTExcelOrderInfoOut(
+            found=has_core_info,
+            **output,
+            message_id=_message_id(matched_message) or None,
+            subject=_first_text(matched_message, "subject") or None,
+            from_address=_message_address(
+                matched_message, "fromAddress", "from_address", "from", "sender"
+            ) or None,
+            received_at=(
+                _message_received_at(matched_message)
+                or _message_sent_at(matched_message)
+                or None
+            ),
+            checked_count=checked_count,
+            detail=detail_text,
+        )
+    except aiosqlite.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="邮件中的 CTExcel 手机号码已关联其他客户") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"CTExcel 订单邮件检查失败：{exc}") from exc
 
 
 @app.get("/api/customers/{customer_id}/payment-info-emails", response_model=PaymentInfoEmailOut)
@@ -1570,6 +1782,8 @@ async def get_customer_payment_info_emails(customer_id: int, limit: int = 50):
     c = await get_customer(customer_id)
     if not c:
         raise HTTPException(status_code=404, detail="客户不存在")
+    if _normalize_product_type(c.get("product_type")) == "ctexcel":
+        raise HTTPException(status_code=400, detail="CTExcel 模式使用订单资料抓取，不执行支付解绑检查")
     moemail_id, client = await _resolve_inbox_provider(c)
     email_address = c.get("moemail_address") or c.get("email") or ""
     limit = min(max(1, limit), 100)
@@ -1652,7 +1866,7 @@ async def get_customer_payment_info_emails(customer_id: int, limit: int = 50):
             detail=detail,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"MoEmail 支付信息邮件检查失败：{e}") from e
+        raise HTTPException(status_code=502, detail=f"支付信息邮件检查失败：{e}") from e
 
 
 # ── MoEmail 域名列表 ──
@@ -2219,6 +2433,7 @@ async def _export_backup_payload() -> dict:
         "customers": [_customer_payload(r) for r in customers],
         "sim_codes": [dict(r) for r in sim_codes],
         "settings": {
+            "app_mode": _normalize_product_type(rows.get("app_mode")),
             "moemail_url": _normalize_base_url(rows.get("moemail_url", "")),
             "giffgaff_download_url": rows.get("giffgaff_download_url", DEFAULT_GIFFGAFF_DOWNLOAD_URL),
             "activation_tutorial_url": rows.get(
@@ -2268,6 +2483,8 @@ async def _restore_backup_payload(data: dict) -> dict:
     settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}
     safe_settings = {}
 
+    if settings.get("app_mode") in PRODUCT_TYPES:
+        safe_settings["app_mode"] = _normalize_product_type(settings["app_mode"])
     if isinstance(settings.get("moemail_url"), str):
         safe_settings["moemail_url"] = _normalize_base_url(settings["moemail_url"])
     if isinstance(settings.get("giffgaff_download_url"), str):
@@ -2330,27 +2547,54 @@ async def _restore_backup_payload(data: dict) -> dict:
                     ),
                 )
             for c in customers:
+                restore_values = {
+                    "id": c["id"],
+                    "product_type": _normalize_product_type(c.get("product_type")),
+                    "phone_number": normalize_optional_text(c.get("phone_number")),
+                    "email": c["email"],
+                    "shipping_address": normalize_optional_text(c.get("shipping_address")),
+                    "phone_status": _normalize_phone_status(c.get("phone_status") or c.get("shipping_status")),
+                    "courier_company": normalize_optional_text(c.get("courier_company")),
+                    "tracking_number": normalize_optional_text(c.get("tracking_number")),
+                    "courier_order_code": normalize_optional_text(c.get("courier_order_code")),
+                    "courier_print_data": normalize_optional_text(c.get("courier_print_data")),
+                    "activation_date": c["activation_date"],
+                    "moemail_id": c.get("moemail_id"),
+                    "moemail_address": c.get("moemail_address"),
+                    "share_link": _normalize_share_link(c.get("share_link")),
+                    "is_moemail_auto": c.get("is_moemail_auto", 0),
+                    "email_provider_id": c.get("email_provider_id"),
+                    "email_account_id": c.get("email_account_id"),
+                    "email_provider_domain": c.get("email_provider_domain"),
+                    "sim_code_id": c.get("sim_code_id"),
+                    "sim_activation_code": _normalize_sim_code(c.get("sim_activation_code")),
+                    "public_token": c.get("public_token"),
+                    "public_version": max(1, int(c.get("public_version") or 1)),
+                    "first_name": normalize_optional_text(c.get("first_name")),
+                    "last_name": normalize_optional_text(c.get("last_name")),
+                    "address": normalize_optional_text(c.get("address")),
+                    "city": normalize_optional_text(c.get("city")),
+                    "postcode": normalize_optional_text(c.get("postcode")),
+                    "payment_changed_at": c.get("payment_changed_at"),
+                    "payment_updated_at": c.get("payment_updated_at"),
+                    "payment_last_checked_at": c.get("payment_last_checked_at"),
+                    "esim_raw_code": normalize_optional_text(c.get("esim_raw_code")),
+                    "activation_status": _normalize_activation_status(c.get("activation_status")),
+                    "activation_error": normalize_optional_text(c.get("activation_error")),
+                    "activated_at": c.get("activated_at"),
+                    "ctexcel_order_number": normalize_optional_text(c.get("ctexcel_order_number")),
+                    "ctexcel_transaction_amount": normalize_optional_text(c.get("ctexcel_transaction_amount")),
+                    "ctexcel_referral_code": normalize_optional_text(c.get("ctexcel_referral_code")),
+                    "ctexcel_referral_link": normalize_optional_text(c.get("ctexcel_referral_link")),
+                    "ctexcel_last_checked_at": c.get("ctexcel_last_checked_at"),
+                    "created_at": c["created_at"],
+                }
+                restore_columns = list(restore_values)
+                placeholders = ", ".join("?" for _ in restore_columns)
                 await db.execute(
-                    """INSERT INTO customers
-                       (id, phone_number, email, shipping_address, courier_company,
-                        tracking_number, courier_order_code, courier_print_data, activation_date,
-                        moemail_id, moemail_address, share_link, is_moemail_auto,
-                        sim_code_id, sim_activation_code, activation_status, activation_error, activated_at,
-                        created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (c["id"], normalize_optional_text(c.get("phone_number")), c["email"],
-                     normalize_optional_text(c.get("shipping_address")),
-                     _normalize_phone_status(c.get("phone_status") or c.get("shipping_status")),
-                     normalize_optional_text(c.get("courier_company")),
-                     normalize_optional_text(c.get("tracking_number")),
-                     normalize_optional_text(c.get("courier_order_code")),
-                     normalize_optional_text(c.get("courier_print_data")), c["activation_date"],
-                     c.get("moemail_id"), c.get("moemail_address"),
-                     _normalize_share_link(c.get("share_link")), c.get("is_moemail_auto", 0),
-                     c.get("sim_code_id"), _normalize_sim_code(c.get("sim_activation_code")),
-                     _normalize_activation_status(c.get("activation_status")),
-                     normalize_optional_text(c.get("activation_error")), c.get("activated_at"),
-                     c["created_at"]),
+                    f"""INSERT INTO customers ({", ".join(restore_columns)})
+                        VALUES ({placeholders})""",
+                    tuple(restore_values[column] for column in restore_columns),
                 )
             for key, value in safe_settings.items():
                 await db.execute(

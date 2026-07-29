@@ -16,6 +16,9 @@ import crud
 router = APIRouter()
 
 _TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "templates", "public_card.html")
+_CTEXCEL_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(__file__), "templates", "ctexcel_card.html"
+)
 _ACTIVATION_TEMPLATE_PATH = os.path.join(
     os.path.dirname(__file__), "templates", "activation_card.html"
 )
@@ -30,6 +33,7 @@ ACTIVATION_GUIDE_PUBLIC_TOKEN = "activation-guide-public-page"
 # 比后端更早部署时把旧 HTML 缓存到新 Worker 版本下。
 ACTIVATION_GUIDE_CONTENT_VERSION = 5
 ACTIVATED_CARD_CONTENT_VERSION = 3
+CTEXCEL_CARD_CONTENT_VERSION = 4
 _ACTIVATION_VERSION_FACTOR = 1_000_000
 
 VOICEMAIL_SUPPORT_URL = "https://support2.giffgaff.com/app/ask/International-and-Roaming/Accessing-voicemail-while-abroad/form/"
@@ -215,6 +219,11 @@ def _load_activation_template() -> str:
         return f.read()
 
 
+def _load_ctexcel_template() -> str:
+    with open(_CTEXCEL_TEMPLATE_PATH, "r", encoding="utf-8") as f:
+        return f.read()
+
+
 def _activation_guide_public_version(settings: dict) -> int:
     try:
         settings_version = max(1, int(settings.get("activation_page_version") or 1))
@@ -229,6 +238,13 @@ def _activation_guide_public_version(settings: dict) -> int:
 def _activated_card_public_version(customer_version: int) -> int:
     return (
         ACTIVATED_CARD_CONTENT_VERSION * _ACTIVATION_VERSION_FACTOR
+        + max(1, int(customer_version or 1))
+    )
+
+
+def _ctexcel_card_public_version(customer_version: int) -> int:
+    return (
+        CTEXCEL_CARD_CONTENT_VERSION * _ACTIVATION_VERSION_FACTOR
         + max(1, int(customer_version or 1))
     )
 
@@ -536,6 +552,10 @@ def _build_substitution_vars(customer_row: dict) -> dict:
         "activation_date": customer_row.get("activation_date") or "",
         "phone_status": customer_row.get("phone_status") or "激活",
         "shipping_address": customer_row.get("shipping_address") or "",
+        "ctexcel_order_number": customer_row.get("ctexcel_order_number") or "",
+        "ctexcel_transaction_amount": customer_row.get("ctexcel_transaction_amount") or "",
+        "ctexcel_referral_code": customer_row.get("ctexcel_referral_code") or "",
+        "ctexcel_referral_link": customer_row.get("ctexcel_referral_link") or "",
     }
 
 
@@ -592,6 +612,49 @@ def _render_activation_card() -> str:
     )
 
 
+def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
+    phone = vars_.get("phone_number") or ""
+    email = customer.get("email") or ""
+    order_number = vars_.get("ctexcel_order_number") or ""
+    amount = vars_.get("ctexcel_transaction_amount") or ""
+    referral_code = vars_.get("ctexcel_referral_code") or ""
+    referral_link = vars_.get("ctexcel_referral_link") or ""
+
+    def copy_row(row_id: str, label: str, value: str, message: str) -> str:
+        if not value:
+            return ""
+        safe_value = html.escape(value)
+        return (
+            f'<div class="data-row" id="{row_id}-row">'
+            f'<span class="data-label">{html.escape(label)}</span>'
+            f'<code id="{row_id}" data-copy="{safe_value}">{safe_value}</code>'
+            f'<button type="button" onclick="copyValue(\'{row_id}\', this, \'{html.escape(message)}\')">复制</button>'
+            f'</div>'
+        )
+
+    email_row = copy_row("email", "注册邮箱", email, "已复制邮箱")
+    # Cloudflare 邮箱混淆只会检查 HTML 注释之间的邮箱文本。
+    email_row = f"<!--email_off-->{email_row}<!--/email_off-->"
+    referral_link_html = ""
+    if referral_link:
+        safe_link = html.escape(referral_link, quote=True)
+        referral_link_html = (
+            '<a class="referral-link" target="_blank" rel="noopener noreferrer" '
+            f'href="{safe_link}">打开专属推荐链接 <span>↗</span></a>'
+        )
+    amount_display = f"£ {html.escape(amount)}" if amount else "邮件同步后显示"
+    return (
+        _load_ctexcel_template()
+        .replace("__PHONE_ROW__", copy_row("phone", "CTExcel 手机号码", phone, "已复制手机号码"))
+        .replace("__EMAIL_ROW__", email_row)
+        .replace("__ORDER_ROW__", copy_row("order", "CTExcel 订单号", order_number, "已复制订单号"))
+        .replace("__AMOUNT__", amount_display)
+        .replace("__REFERRAL_ROW__", copy_row("referral", "专属推荐码", referral_code, "已复制推荐码"))
+        .replace("__REFERRAL_LINK__", referral_link_html)
+        .replace("__WECHAT_GUIDE_HTML__", _render_wechat_guide())
+    )
+
+
 @router.get("/p/{token}", response_class=HTMLResponse)
 async def public_card_page(token: str):
     if token == ACTIVATION_GUIDE_PUBLIC_TOKEN:
@@ -617,13 +680,20 @@ async def public_card_page(token: str):
             headers=_security_headers(),
         )
     # 号码与初始邮箱来自客户记录；下方运营说明固定在代码中。
-    hint_md = ACTIVATED_PAGE_CONTENT
     vars_ = _build_substitution_vars(card)
     headers = _security_headers()
+    if card.get("product_type") == "ctexcel":
+        headers["X-Cache-Version"] = str(
+            _ctexcel_card_public_version(card["public_version"])
+        )
+        return HTMLResponse(_render_ctexcel_card(card, vars_), headers=headers)
     headers["X-Cache-Version"] = str(
         _activated_card_public_version(card["public_version"])
     )
-    return HTMLResponse(_render_card(card["email"], hint_md, vars_), headers=headers)
+    return HTMLResponse(
+        _render_card(card["email"], ACTIVATED_PAGE_CONTENT, vars_),
+        headers=headers,
+    )
 
 
 @router.get("/api/public/{token}/version")
@@ -634,9 +704,13 @@ async def public_token_version(token: str):
         settings = await crud.get_settings()
         version = _activation_guide_public_version(settings)
     else:
-        version = await crud.get_public_version(token)
-        if version is not None:
-            version = _activated_card_public_version(version)
+        info = await crud.get_public_version_info(token)
+        version = None
+        if info is not None:
+            if info.get("product_type") == "ctexcel":
+                version = _ctexcel_card_public_version(info["public_version"])
+            else:
+                version = _activated_card_public_version(info["public_version"])
     if version is None:
         return JSONResponse({"detail": "invalid"}, status_code=404)
     return JSONResponse(

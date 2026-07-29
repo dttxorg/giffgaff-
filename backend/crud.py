@@ -42,9 +42,10 @@ async def search_customers(query: str):
                   OR LOWER(COALESCE(tracking_number, '')) LIKE ?
                   OR LOWER(COALESCE(courier_company, '')) LIKE ?
                   OR LOWER(COALESCE(courier_order_code, '')) LIKE ?
+                  OR LOWER(COALESCE(ctexcel_order_number, '')) LIKE ?
                   OR LOWER(COALESCE(email, '')) LIKE ?
                ORDER BY created_at DESC""",
-            (pattern, pattern, pattern, pattern, pattern),
+            (pattern, pattern, pattern, pattern, pattern, pattern),
         )
         return [dict(r) for r in rows] 
 
@@ -69,11 +70,11 @@ async def create_customer(data: CustomerCreate):
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
             """INSERT INTO customers
-               (phone_number, email, shipping_address, courier_company,
+               (product_type, phone_number, email, shipping_address, courier_company,
                 tracking_number, courier_order_code, courier_print_data, activation_date,
                 public_token)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (phone_number, data.email, shipping_address, courier_company, tracking_number,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (data.product_type, phone_number, data.email, shipping_address, courier_company, tracking_number,
              courier_order_code, courier_print_data, data.activation_date.isoformat(),
              secrets.token_urlsafe(32)),
         )
@@ -115,6 +116,14 @@ async def update_customer(customer_id: int, data: CustomerUpdate):
         fields.append("city = ?"); values.append(data.city)
     if data.postcode is not None:
         fields.append("postcode = ?"); values.append(data.postcode)
+    if data.ctexcel_order_number is not None:
+        fields.append("ctexcel_order_number = ?"); values.append(normalize_optional_text(data.ctexcel_order_number))
+    if data.ctexcel_transaction_amount is not None:
+        fields.append("ctexcel_transaction_amount = ?"); values.append(normalize_optional_text(data.ctexcel_transaction_amount))
+    if data.ctexcel_referral_code is not None:
+        fields.append("ctexcel_referral_code = ?"); values.append(normalize_optional_text(data.ctexcel_referral_code))
+    if data.ctexcel_referral_link is not None:
+        fields.append("ctexcel_referral_link = ?"); values.append(normalize_optional_text(data.ctexcel_referral_link))
     if not fields:
         return True
     values.append(customer_id)
@@ -186,10 +195,12 @@ async def get_public_card(token: str) -> Optional[dict]:
         db.row_factory = aiosqlite.Row
         row = await fetch_one(
             db,
-            """SELECT email, public_version, phone_number, moemail_address,
+            """SELECT email, public_version, product_type, phone_number, moemail_address,
                       first_name, last_name, address, city, postcode,
                       sim_activation_code, initial_password, share_link,
-                      activation_date, phone_status, shipping_address
+                      activation_date, phone_status, shipping_address,
+                      ctexcel_order_number, ctexcel_transaction_amount,
+                      ctexcel_referral_code, ctexcel_referral_link
                FROM customers WHERE public_token = ?""",
             (token,),
         )
@@ -200,6 +211,7 @@ async def get_public_card(token: str) -> Optional[dict]:
             return None
         return {
             "email": email,
+            "product_type": row["product_type"] or "giffgaff",
             "public_version": int(row["public_version"] or 1),
             "phone_number": row["phone_number"],
             "moemail_address": row["moemail_address"],
@@ -214,6 +226,10 @@ async def get_public_card(token: str) -> Optional[dict]:
             "activation_date": row["activation_date"],
             "phone_status": row["phone_status"],
             "shipping_address": row["shipping_address"],
+            "ctexcel_order_number": row["ctexcel_order_number"],
+            "ctexcel_transaction_amount": row["ctexcel_transaction_amount"],
+            "ctexcel_referral_code": row["ctexcel_referral_code"],
+            "ctexcel_referral_link": row["ctexcel_referral_link"],
         }
 
 
@@ -231,6 +247,26 @@ async def get_public_version(token: str) -> Optional[int]:
         if not row:
             return None
         return int(row[0] or 1)
+
+
+async def get_public_version_info(token: str) -> Optional[dict]:
+    """返回公开页缓存版本和产品类型，不返回邮箱或客户资料。"""
+    if not token or len(token) > 128:
+        return None
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await fetch_one(
+            db,
+            """SELECT public_version, product_type
+               FROM customers WHERE public_token = ?""",
+            (token,),
+        )
+        if not row:
+            return None
+        return {
+            "public_version": int(row["public_version"] or 1),
+            "product_type": row["product_type"] or "giffgaff",
+        }
 
 
 async def regenerate_public_link(customer_id: int) -> Optional[dict]:
@@ -326,6 +362,41 @@ async def save_payment_check_result(
                SET payment_changed_at = ?, payment_updated_at = ?, payment_last_checked_at = ?
                WHERE id = ?""",
             (changed_at, updated_at, checked_at, customer_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def save_ctexcel_order_info(
+    customer_id: int,
+    *,
+    phone_number: Optional[str],
+    order_number: Optional[str],
+    transaction_amount: Optional[str],
+    referral_code: Optional[str],
+    referral_link: Optional[str],
+    checked_at: str,
+) -> bool:
+    """保存 CTExcel 订单邮件中解析出的资料；空字段保留现有值。"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            """UPDATE customers
+               SET phone_number = COALESCE(?, phone_number),
+                   ctexcel_order_number = COALESCE(?, ctexcel_order_number),
+                   ctexcel_transaction_amount = COALESCE(?, ctexcel_transaction_amount),
+                   ctexcel_referral_code = COALESCE(?, ctexcel_referral_code),
+                   ctexcel_referral_link = COALESCE(?, ctexcel_referral_link),
+                   ctexcel_last_checked_at = ?
+               WHERE id = ? AND product_type = 'ctexcel'""",
+            (
+                normalize_optional_text(phone_number),
+                normalize_optional_text(order_number),
+                normalize_optional_text(transaction_amount),
+                normalize_optional_text(referral_code),
+                normalize_optional_text(referral_link),
+                checked_at,
+                customer_id,
+            ),
         )
         await db.commit()
         return cursor.rowcount > 0
