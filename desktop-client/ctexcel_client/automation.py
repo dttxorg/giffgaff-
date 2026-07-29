@@ -64,6 +64,25 @@ def price_is_expected(page_text: str, expected: str) -> bool:
     return any(normalize_money(candidate) == target for candidate in candidates)
 
 
+def coupon_rejection_message(page_text: str) -> str:
+    """提取结算页对优惠码的明确拒绝提示。"""
+    text = re.sub(r"\s+", "", page_text or "")
+    patterns = (
+        r"(优惠券不存在或已过期)",
+        r"(优惠码不存在或已过期)",
+        r"(优惠券已过期)",
+        r"(优惠码已过期)",
+        r"(优惠券无效)",
+        r"(优惠码无效)",
+        r"(优惠码不可用)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            return match.group(1)
+    return ""
+
+
 def parse_success_text(page_text: str) -> dict[str, str]:
     text = page_text or ""
     order = ORDER_PATTERN.search(text)
@@ -608,7 +627,7 @@ class CTExcelAutomation:
         placeholder: str,
         value: str,
         label: str,
-    ) -> None:
+    ) -> Locator:
         """网页会把 placeholder 同时放在表单外层和 input，只选择真实输入框。"""
         escaped = placeholder.replace("\\", "\\\\").replace('"', '\\"')
         field = self._visible_locator(
@@ -616,6 +635,7 @@ class CTExcelAutomation:
             f"{label}输入框",
         )
         field.fill(value)
+        return field
 
     def _poll_verification_code(
         self,
@@ -743,24 +763,42 @@ class CTExcelAutomation:
     def _confirm_order(self, page: Page) -> None:
         self.stage("应用半价优惠")
         defaults = self.config.registration
-        coupon = page.get_by_role("textbox", name="请输入", exact=True)
-        if coupon.count() != 1:
-            raise AutomationError("优惠码输入框数量异常")
-        coupon.fill(defaults.coupon_code.strip())
+        coupon_code = defaults.coupon_code.strip()
+        if not coupon_code:
+            raise AutomationError("客户端设置中的优惠码为空")
+        coupon = self._fill_placeholder_input(
+            page,
+            "请输入",
+            coupon_code,
+            "优惠码",
+        )
+        if coupon.input_value().strip() != coupon_code:
+            raise AutomationError("优惠码没有完整写入结算页输入框")
+        self.log(f"优惠码已填入并核对：{coupon_code}")
+        self._wait_interruptibly(2)
         self._click_button(page, "使用优惠码")
         expected = defaults.expected_price_gbp.strip()
-        try:
-            page.wait_for_function(
-                """expected => {
-                  const text = (document.body?.innerText || '').replace(/\\s+/g, '');
-                  return text.includes(`订单金额：£${expected}`);
-                }""",
-                arg=expected,
-                timeout=self.config.step_timeout_ms,
+        deadline = time.monotonic() + max(
+            5,
+            int(self.config.step_timeout_ms) / 1000,
+        )
+        body_text = ""
+        while time.monotonic() < deadline:
+            self._check_stop()
+            body_text = page.locator("body").inner_text()
+            if price_is_expected(body_text, expected):
+                break
+            rejection = coupon_rejection_message(body_text)
+            if rejection:
+                raise AutomationError(
+                    f"网站拒绝优惠码 {coupon_code}：{rejection}；"
+                    "请在客户端设置中更换当前有效的优惠码"
+                )
+            self._wait_interruptibly(0.25)
+        else:
+            raise AutomationError(
+                f"优惠码 {coupon_code} 已提交，但订单金额没有变为 £{expected}"
             )
-        except PlaywrightTimeoutError as exc:
-            raise AutomationError("优惠码应用后没有出现预期半价") from exc
-        body_text = page.locator("body").inner_text()
         if not price_is_expected(body_text, expected):
             raise AutomationError(
                 f"订单价格校验失败，预期 £{expected}"

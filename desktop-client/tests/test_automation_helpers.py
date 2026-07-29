@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ctexcel_client.automation import (
     assess_verification_freshness,
+    coupon_rejection_message,
     normalize_money,
     parse_message_timestamp,
     parse_success_text,
@@ -137,3 +138,10 @@ def test_verification_freshness_accepts_new_message_after_request():
 
     assert fresh[0] is True
     assert fresh[1] == "验证码邮件属于本次请求"
+
+
+def test_coupon_rejection_is_reported_instead_of_looking_like_missing_input():
+    assert coupon_rejection_message(
+        "提示：优惠券不存在或已过期"
+    ) == "优惠券不存在或已过期"
+    assert coupon_rejection_message("订单金额：£5.95") == ""
