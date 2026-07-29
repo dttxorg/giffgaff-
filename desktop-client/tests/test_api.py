@@ -7,62 +7,27 @@ import httpx
 from ctexcel_client.api import AdminApi, ApiError
 
 
-SECRET_PATH = "/" + ("a" * 40)
-
-
-def test_hidden_entry_login_and_customer_creation_flow():
-    state = {"authenticated": False}
+def test_scoped_api_connection_customer_creation_and_verification_flow():
     requests: list[tuple[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append((request.method, request.url.path))
+        assert request.headers["authorization"] == "Bearer app-secret"
         path = request.url.path
-        cookie = request.headers.get("cookie", "")
-        if path == SECRET_PATH:
-            return httpx.Response(
-                302,
-                headers={
-                    "location": "/index.html",
-                    "set-cookie": (
-                        "__Host-giffgaff_admin_entry=entry-cookie;"
-                        " Path=/; Secure; HttpOnly; SameSite=Lax"
-                    ),
-                },
-            )
-        if path == "/index.html":
-            assert "__Host-giffgaff_admin_entry=entry-cookie" in cookie
-            return httpx.Response(200, text="<html>login</html>")
-        if path == "/api/auth/status":
+        if path == "/api/ctexcel-client/status":
             return httpx.Response(
                 200,
                 json={
-                    "auth_required": True,
-                    "authenticated": state["authenticated"],
+                    "ok": True,
+                    "api_version": 1,
+                    "ctexcel_customer_count": 3,
                 },
             )
-        if path == "/api/auth/login":
-            assert "__Host-giffgaff_admin_entry=entry-cookie" in cookie
-            assert json.loads(request.content) == {"password": "app-secret"}
-            state["authenticated"] = True
-            return httpx.Response(
-                200,
-                json={"ok": True},
-                headers={
-                    "set-cookie": (
-                        "__Host-giffgaff_label_auth=auth-cookie;"
-                        " Path=/; Secure; HttpOnly; SameSite=Lax"
-                    )
-                },
-            )
-        if path == "/api/customers":
+        if path == "/api/ctexcel-client/customers":
             assert request.method == "POST"
-            assert "__Host-giffgaff_admin_entry=entry-cookie" in cookie
-            assert "__Host-giffgaff_label_auth=auth-cookie" in cookie
-            body = json.loads(request.content)
-            assert body["product_type"] == "ctexcel"
-            assert body["email"] == ""
-            assert body["use_sim_code"] is False
-            assert body["shipping_address"] == "fixed shipping address"
+            assert json.loads(request.content) == {
+                "shipping_address": "fixed shipping address"
+            }
             return httpx.Response(
                 201,
                 json={
@@ -71,41 +36,68 @@ def test_hidden_entry_login_and_customer_creation_flow():
                     "email": "customer@example.test",
                 },
             )
+        if path == "/api/ctexcel-client/customers/321/verification-code":
+            return httpx.Response(
+                200,
+                json={
+                    "found": True,
+                    "code": "123456",
+                    "email": "customer@example.test",
+                    "checked_count": 1,
+                    "detail": "已提取最新验证码",
+                },
+            )
         raise AssertionError(f"unexpected request: {request.method} {path}")
 
     with AdminApi(
         "https://manager.example.test",
-        SECRET_PATH,
         "app-secret",
         transport=httpx.MockTransport(handler),
     ) as api:
         status = api.connect()
         created = api.create_ctexcel_customer("fixed shipping address")
+        verification = api.verification_code(created["customer_id"])
 
-    assert status["authenticated"] is True
-    assert created == {
-        "customer_id": 321,
-        "product_type": "ctexcel",
-        "email": "customer@example.test",
-    }
-    assert requests[:5] == [
-        ("GET", SECRET_PATH),
-        ("GET", "/index.html"),
-        ("GET", "/api/auth/status"),
-        ("POST", "/api/auth/login"),
-        ("GET", "/api/auth/status"),
+    assert status["ctexcel_customer_count"] == 3
+    assert created["email"] == "customer@example.test"
+    assert verification["code"] == "123456"
+    assert requests == [
+        ("GET", "/api/ctexcel-client/status"),
+        ("POST", "/api/ctexcel-client/customers"),
+        ("GET", "/api/ctexcel-client/customers/321/verification-code"),
     ]
-    assert requests[-1] == ("POST", "/api/customers")
 
 
-def test_hidden_entry_404_has_actionable_message():
+def test_client_api_reports_wrong_password_clearly():
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            401,
+            json={"detail": "客户端连接口令错误"},
+        )
+    )
+
+    with AdminApi(
+        "https://manager.example.test",
+        "wrong",
+        transport=transport,
+    ) as api:
+        try:
+            api.connect()
+        except ApiError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("expected ApiError")
+
+    assert message == "客户端连接口令错误"
+
+
+def test_client_api_reports_missing_server_endpoint():
     transport = httpx.MockTransport(
         lambda _request: httpx.Response(404, text="Not found")
     )
 
     with AdminApi(
         "https://manager.example.test",
-        SECRET_PATH,
         "app-secret",
         transport=transport,
     ) as api:
@@ -116,4 +108,4 @@ def test_hidden_entry_404_has_actionable_message():
         else:
             raise AssertionError("expected ApiError")
 
-    assert "隐藏入口返回 404" in message
+    assert message == "服务器尚未启用 CTExcel 客户端 API"

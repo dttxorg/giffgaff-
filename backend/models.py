@@ -146,6 +146,10 @@ class AuthLoginRequest(BaseModel):
     password: str
 
 
+class CTExcelClientCustomerCreate(BaseModel):
+    shipping_address: Optional[str] = None
+
+
 class MoEmailCreateRequest(BaseModel):
     domain: Optional[str] = None
 

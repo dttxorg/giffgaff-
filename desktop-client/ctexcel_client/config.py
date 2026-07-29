@@ -51,7 +51,7 @@ def _blob_from_bytes(value: bytes) -> tuple[_DataBlob, Any]:
 
 
 def protect_secret(value: str) -> str:
-    """使用 Windows DPAPI 保存后台入口和口令。
+    """使用 Windows DPAPI 保存客户端连接口令。
 
     非 Windows 开发环境不持久化秘密值，避免明文写入配置文件。
     """
@@ -151,7 +151,6 @@ class RegistrationDefaults:
 @dataclass
 class AppConfig:
     server_url: str = "https://gg.6667766.xyz"
-    admin_entry_path: str = ""
     app_password: str = ""
     remember_credentials: bool = True
     application_url: str = DEFAULT_APPLICATION_URL
@@ -192,11 +191,8 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
         key: value
         for key, value in raw.items()
         if key in AppConfig.__dataclass_fields__
-        and key not in {"proxy", "registration", "admin_entry_path", "app_password"}
+        and key not in {"proxy", "registration", "app_password"}
     }
-    values["admin_entry_path"] = unprotect_secret(
-        str(raw.get("admin_entry_path_protected") or "")
-    )
     values["app_password"] = unprotect_secret(
         str(raw.get("app_password_protected") or "")
     )
@@ -224,13 +220,10 @@ def save_config(config: AppConfig, path: Optional[Path] = None) -> None:
     target = path or config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     raw = asdict(config)
-    raw.pop("admin_entry_path", None)
     raw.pop("app_password", None)
     if config.remember_credentials:
-        raw["admin_entry_path_protected"] = protect_secret(config.admin_entry_path)
         raw["app_password_protected"] = protect_secret(config.app_password)
     else:
-        raw["admin_entry_path_protected"] = ""
         raw["app_password_protected"] = ""
     target.write_text(
         json.dumps(raw, ensure_ascii=False, indent=2),

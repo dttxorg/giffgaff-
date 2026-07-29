@@ -89,7 +89,7 @@ https://你的后台域名/<ADMIN_ENTRY_PATH 的随机路径>
 
 由于入口 Cookie 强制使用 `Secure`，生产后台必须使用 HTTPS。`ADMIN_ENTRY_PATH` 必须是以 `/` 开头、至少 32 位的单段 URL-safe 随机路径；配置弱路径或只配置入口但不配置 `APP_PASSWORD` 时，服务会拒绝启动。本地 HTTP 开发可以同时不设置这两个变量，沿用原来的开发模式。
 
-公开号码资料/激活教程页面 `/p/*`、Worker 回调 `/api/public/*` 不受隐藏入口影响。其余管理接口都需要先通过隐藏入口与后台口令。
+公开号码资料/激活教程页面 `/p/*`、Worker 回调 `/api/public/*` 不受隐藏入口影响。桌面申请只开放 `/api/ctexcel-client/*` 的建档与接码能力，并单独校验 Bearer 口令；其余管理接口都需要先通过隐藏入口与后台口令。
 
 ### 4. 配置 MoEmail
 
@@ -138,11 +138,11 @@ export CTEXCEL_AUTO_SYNC_BATCH_SIZE=6
 每位客户保存自己的 `product_type`，因此切换到另一模式不会改变历史客户的业务类型。CTExcel 号码资料二维码继续复用现有公开 Token 和 Worker 地址，但后端会根据客户类型渲染独立 CTExcel 扫码页；页面不包含 giffgaff 教程、eSIM、支付检查或语音信箱内容。
 
 Windows 自动申请客户端位于
-[`desktop-client`](desktop-client/README.md)。它使用隐藏入口 Cookie 与
-`APP_PASSWORD` 登录现有管理 API，先调用 `POST /api/customers` 创建
-`product_type=ctexcel` 的客户，再使用返回的 `customer_id + email` 完成
-购买。支付成功页只作为流程完成信号，订单号和手机号仍由后台从该邮箱自动
-提取并写入同一客户。
+[`desktop-client`](desktop-client/README.md)。它通过受限的
+`/api/ctexcel-client/*` 接口和现有 `APP_PASSWORD` 连接，不访问隐藏管理
+入口，也不取得普通客户管理权限。客户端先创建 `product_type=ctexcel`
+的客户，再使用返回的 `customer_id + email` 完成购买。支付成功页只作为
+流程完成信号，订单号和手机号仍由后台从该邮箱自动提取并写入同一客户。
 
 ### 6. SIM 激活码与人工激活
 

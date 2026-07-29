@@ -2,7 +2,7 @@
 
 该客户端只负责 CTExcel 新客户的申请购买流程：
 
-1. 使用客户管理系统的隐藏入口和 `APP_PASSWORD` 建立管理会话。
+1. 使用独立的 CTExcel 限权 API 和 `APP_PASSWORD` 建立连接。
 2. 在客户管理列表中新建一个 `ctexcel` 客户。
 3. 客户管理系统通过 MoEmail / CloudMail 自动生成专属邮箱，并返回
    `customer_id + email`。
@@ -11,7 +11,7 @@
 6. 客户管理系统后台继续扫描该专属邮箱，把订单号、手机号码、交易金额、
    推荐码和推荐链接写入同一客户记录。
 
-客户端不使用旧的 Agent Token，也不直接回写订单字段。客户和订单通过
+客户端不访问隐藏管理入口、不使用旧的 Agent Token，也不直接回写订单字段。客户和订单通过
 **同一个专属邮箱**自然关联。
 
 ## 固定流程
@@ -65,13 +65,12 @@ GitHub Actions 的 `windows-client.yml` 也会生成同名构建产物。
 填写：
 
 - 客户管理后台地址
-- 随机隐藏入口路径
-- `APP_PASSWORD`
+- 客户端连接口令（与后台 `APP_PASSWORD` 相同）
 - 固定姓、名
 - 固定联系电话
 - 固定中国收货地址
 
-勾选保存入口和口令时，Windows 版本使用当前 Windows 用户的 DPAPI
+勾选保存连接口令时，Windows 版本使用当前 Windows 用户的 DPAPI
 加密后保存到：
 
 ```text
@@ -82,14 +81,17 @@ GitHub Actions 的 `windows-client.yml` 也会生成同名构建产物。
 
 ## 通信方式
 
-客户端沿用后台现有的双 Cookie 管理会话：
+客户端使用独立的限权接口，不依赖浏览器 Cookie：
 
-1. 访问 `ADMIN_ENTRY_PATH` 获取 `__Host-giffgaff_admin_entry`
-2. 调用 `/api/auth/login` 获取 `__Host-giffgaff_label_auth`
-3. `POST /api/customers` 创建 CTExcel 客户
-4. `GET /api/customers/{id}/verification-code` 查询注册验证码
+1. `GET /api/ctexcel-client/status` 测试连接
+2. `POST /api/ctexcel-client/customers` 创建 CTExcel 客户
+3. `GET /api/ctexcel-client/customers/{id}/verification-code` 查询注册验证码
 
-支付后，后台自动邮件同步使用：
+请求使用 HTTPS `Authorization: Bearer` 传递现有 `APP_PASSWORD`。这组接口只
+开放连接检查、CTExcel 建档和对应邮箱接码；普通客户管理 API 仍受隐藏入口
+与后台 Cookie 双重保护。错误连接口令同样执行 10 分钟 5 次的限速。
+
+支付后，后台自动邮件同步内部复用：
 
 ```text
 GET /api/customers/{id}/ctexcel-order-info

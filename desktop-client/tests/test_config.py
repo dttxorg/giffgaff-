@@ -9,10 +9,22 @@ from ctexcel_client.config import (
 )
 
 
+def test_client_ui_uses_scoped_api_without_hidden_entry_field():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ctexcel_client"
+        / "main_window.py"
+    ).read_text(encoding="utf-8")
+
+    assert "独立的 CTExcel 限权 API" in source
+    assert "隐藏管理入口" in source
+    assert "entry_path" not in source
+    assert "自动申请工作台" in source
+
+
 def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
     target = tmp_path / "config.json"
     config = AppConfig(
-        admin_entry_path="/" + ("x" * 40),
         app_password="super-secret-password",
         remember_credentials=True,
         registration=RegistrationDefaults(
@@ -27,12 +39,10 @@ def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
 
     raw = target.read_text(encoding="utf-8")
     assert "super-secret-password" not in raw
-    assert "/" + ("x" * 40) not in raw
     assert "fixed shipping address" in raw
     if os.name == "nt":
         loaded = load_config(target)
         assert loaded.app_password == "super-secret-password"
-        assert loaded.admin_entry_path == "/" + ("x" * 40)
 
 
 def test_non_secret_registration_defaults_round_trip(tmp_path: Path):
@@ -54,5 +64,4 @@ def test_non_secret_registration_defaults_round_trip(tmp_path: Path):
     loaded = load_config(target)
 
     assert loaded.registration == config.registration
-    assert loaded.admin_entry_path == ""
     assert loaded.app_password == ""

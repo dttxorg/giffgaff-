@@ -29,6 +29,7 @@ from models import (
     SystemSettings, AuthLoginRequest, MoEmailCreateRequest,
     SimCodeImport, SimCodeUpdate, SimCodeOut, ActivationStatusUpdate,
     VerificationCodeOut, PaymentInfoEmailOut, CTExcelOrderInfoOut,
+    CTExcelClientCustomerCreate,
     InboxMessageSummaryOut, InboxMessageListOut, InboxMessageDetailOut,
     DomainInfo, LabelConfig, EsimCodeUpdate,
     EmailProviderCreate, EmailProviderOut, EmailProviderUpdate,
@@ -328,6 +329,25 @@ def _reset_login_failure_state() -> None:
     """测试和进程维护使用；不暴露为 HTTP 接口。"""
     with _LOGIN_FAILURES_LOCK:
         _LOGIN_FAILURES.clear()
+
+
+def _require_ctexcel_client(request: Request) -> None:
+    """验证仅供 CTExcel 桌面申请流程使用的限权 API。"""
+    if not _auth_enabled():
+        return
+    authorization = (request.headers.get("Authorization") or "").strip()
+    expected = f"Bearer {APP_PASSWORD}"
+    failure_key = f"ctexcel-client:{_login_client_ip(request)}"
+    if not hmac.compare_digest(authorization, expected):
+        allowed, retry_after = _register_login_failure(failure_key)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="客户端连接失败次数过多，请稍后再试",
+                headers={"Retry-After": str(retry_after)},
+            )
+        raise HTTPException(status_code=401, detail="客户端连接口令错误")
+    _clear_login_failures(failure_key)
 
 
 def _hidden_admin_not_found() -> Response:
@@ -771,6 +791,7 @@ async def require_app_password(request, call_next):
     entry_gate_exempt = (
         path.startswith("/p/")
         or path.startswith("/api/public/")
+        or path.startswith("/api/ctexcel-client/")
     )
     if not entry_gate_exempt:
         try:
@@ -804,6 +825,9 @@ async def require_app_password(request, call_next):
     protected_prefixes = ("/api", "/docs", "/redoc", "/openapi.json")
     # /api/public/* 是 Cloudflare Worker 在边缘节点回调的，绕过后台口令鉴权
     if path.startswith("/api/public/"):
+        return await call_next(request)
+    # CTExcel 桌面客户端使用独立的 Bearer 口令鉴权，不依赖浏览器 Cookie。
+    if path.startswith("/api/ctexcel-client/"):
         return await call_next(request)
     if _auth_enabled() and path not in public_paths and path.startswith(protected_prefixes):
         if not _is_authenticated(request):
@@ -1798,6 +1822,84 @@ async def get_customer_verification_code(customer_id: int):
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"邮箱接码失败：{e}") from e
+
+
+@app.get("/api/ctexcel-client/status")
+async def get_ctexcel_client_status(request: Request, response: Response):
+    """桌面客户端连通性检查；只返回 CTExcel 范围内的非敏感状态。"""
+    _require_ctexcel_client(request)
+    response.headers["Cache-Control"] = "no-store"
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        row = await db.execute_fetchall(
+            "SELECT COUNT(*) FROM customers WHERE product_type = 'ctexcel'"
+        )
+    return {
+        "ok": True,
+        "api_version": 1,
+        "ctexcel_customer_count": int(row[0][0]) if row else 0,
+    }
+
+
+@app.post("/api/ctexcel-client/customers", status_code=201)
+async def create_ctexcel_client_customer(
+    data: CTExcelClientCustomerCreate,
+    request: Request,
+):
+    """为一次桌面申请创建 CTExcel 客户和专属托管邮箱。"""
+    _require_ctexcel_client(request)
+    try:
+        return await add_customer(
+            CustomerCreate(
+                product_type="ctexcel",
+                email="",
+                shipping_address=normalize_optional_text(data.shipping_address),
+                phone_status="激活",
+                activation_date=datetime.date.today(),
+                use_sim_code=False,
+            )
+        )
+    except HTTPException as exc:
+        if exc.status_code < 500:
+            raise
+        logging.getLogger(__name__).warning(
+            "CTExcel client customer creation failed: %s",
+            exc.detail,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="服务器创建 CTExcel 客户或专属邮箱失败",
+        ) from exc
+
+
+@app.get(
+    "/api/ctexcel-client/customers/{customer_id}/verification-code",
+    response_model=VerificationCodeOut,
+)
+async def get_ctexcel_client_verification_code(
+    customer_id: int,
+    request: Request,
+):
+    """读取本次 CTExcel 申请专属邮箱中的注册验证码。"""
+    _require_ctexcel_client(request)
+    customer = await get_customer(customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="客户不存在")
+    if _normalize_product_type(customer.get("product_type")) != "ctexcel":
+        raise HTTPException(status_code=400, detail="该客户不是 CTExcel 模式")
+    try:
+        return await get_customer_verification_code(customer_id)
+    except HTTPException as exc:
+        if exc.status_code < 500:
+            raise
+        logging.getLogger(__name__).warning(
+            "CTExcel client verification lookup failed for customer %s: %s",
+            customer_id,
+            exc.detail,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="服务器读取注册验证码失败",
+        ) from exc
 
 
 async def _sync_ctexcel_order_info(

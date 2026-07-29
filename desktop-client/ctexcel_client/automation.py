@@ -114,7 +114,6 @@ class CTExcelAutomation:
         self.stage("连接客户管理")
         with AdminApi(
             self.config.server_url,
-            self.config.admin_entry_path,
             self.config.app_password,
         ) as api:
             api.connect()
