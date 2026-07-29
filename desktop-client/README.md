@@ -84,8 +84,10 @@ GitHub Actions 的 `windows-client.yml` 也会生成同名构建产物。
 客户端使用独立的限权接口，不依赖浏览器 Cookie：
 
 1. `GET /api/ctexcel-client/status` 测试连接
-2. `POST /api/ctexcel-client/customers` 创建 CTExcel 客户
-3. `GET /api/ctexcel-client/customers/{id}/verification-code` 查询注册验证码
+2. `GET /api/ctexcel-client/customers/pending` 查询无手机号客户
+3. `POST /api/ctexcel-client/customers` 复用待完成客户或创建新客户
+4. `GET /api/ctexcel-client/customers/{id}/verification-code` 查询注册验证码
+5. `POST /api/ctexcel-client/customers/{id}/order-info` 同步订单号和手机号
 
 请求使用 HTTPS `Authorization: Bearer` 传递现有 `APP_PASSWORD`。这组接口只
 开放连接检查、CTExcel 建档和对应邮箱接码；普通客户管理 API 仍受隐藏入口
@@ -102,7 +104,12 @@ GET /api/customers/{id}/ctexcel-order-info
 ## 中断恢复
 
 后台创建客户成功后，即使网页流程中断，该客户和专属邮箱也已经保留。
-在客户管理详情页可以查看邮箱、完整收件箱并手动触发「扫描订单邮件」。
+再次点击“重试当前客户”时，客户端会先扫描全部无手机号客户的订单邮件，
+再复用仍未产生订单的最新客户，不会因网页步骤失败重复建立空客户。
+
+固定中国地址只用于 CTExcel 官网的智能地址填写，不写入客户管理的
+“收货地址”字段。支付成功后客户端会立即轮询订单邮件同步手机号；在客户
+管理详情页仍可查看邮箱、完整收件箱并手动触发“扫描订单邮件”。
 
 网页流程发生错误时，客户端会：
 

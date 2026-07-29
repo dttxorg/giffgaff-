@@ -23,7 +23,7 @@ class AdminApi:
         self.server_url = server_url.strip().rstrip("/")
         self.app_password = app_password.strip()
         headers = {
-            "User-Agent": "CTExcelApplyClient/2.0",
+            "User-Agent": "CTExcelApplyClient/2.0.1",
             "Accept": "application/json",
         }
         if self.app_password:
@@ -98,20 +98,31 @@ class AdminApi:
             raise ApiError("CTExcel 客户端 API 状态异常")
         return status
 
-    def create_ctexcel_customer(self, shipping_address: str) -> dict[str, Any]:
+    def pending_customers(self) -> list[dict[str, Any]]:
+        data = self._request(
+            "GET",
+            "/api/ctexcel-client/customers/pending",
+        )
+        if not isinstance(data, dict) or not isinstance(data.get("customers"), list):
+            raise ApiError("待完成 CTExcel 客户列表格式错误")
+        return [
+            customer
+            for customer in data["customers"]
+            if isinstance(customer, dict)
+        ]
+
+    def create_ctexcel_customer(self) -> dict[str, Any]:
         data = self._request(
             "POST",
             "/api/ctexcel-client/customers",
-            json_body={
-                "shipping_address": shipping_address.strip() or None,
-            },
+            json_body={"reuse_pending": True},
         )
         if not isinstance(data, dict):
-            raise ApiError("新建 CTExcel 客户返回格式错误")
+            raise ApiError("准备 CTExcel 客户返回格式错误")
         customer_id = data.get("customer_id")
         email = str(data.get("email") or "").strip()
         if not customer_id or not email:
-            raise ApiError("客户已创建，但没有取得专属邮箱")
+            raise ApiError("客户已准备，但没有取得专属邮箱")
         return data
 
     def verification_code(self, customer_id: int) -> dict[str, Any]:
@@ -124,4 +135,13 @@ class AdminApi:
         )
         if not isinstance(data, dict):
             raise ApiError("验证码接口返回格式错误")
+        return data
+
+    def sync_order_info(self, customer_id: int) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            f"/api/ctexcel-client/customers/{int(customer_id)}/order-info",
+        )
+        if not isinstance(data, dict):
+            raise ApiError("CTExcel 订单资料接口返回格式错误")
         return data

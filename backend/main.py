@@ -1824,19 +1824,71 @@ async def get_customer_verification_code(customer_id: int):
         raise HTTPException(status_code=502, detail=f"邮箱接码失败：{e}") from e
 
 
+async def _list_pending_ctexcel_client_customers(limit: int = 100) -> list[dict]:
+    """列出尚未同步手机号的 CTExcel 客户，供桌面客户端恢复流程。"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await db.execute_fetchall(
+            """SELECT id, email, phone_number, ctexcel_order_number,
+                      ctexcel_last_checked_at, created_at
+               FROM customers
+               WHERE product_type = 'ctexcel'
+                 AND NULLIF(TRIM(phone_number), '') IS NULL
+               ORDER BY id DESC
+               LIMIT ?""",
+            (min(max(1, int(limit)), 100),),
+        )
+    return [
+        {
+            "customer_id": int(row["id"]),
+            "email": row["email"],
+            "phone_number": row["phone_number"],
+            "order_number": row["ctexcel_order_number"],
+            "last_checked_at": row["ctexcel_last_checked_at"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
 @app.get("/api/ctexcel-client/status")
 async def get_ctexcel_client_status(request: Request, response: Response):
     """桌面客户端连通性检查；只返回 CTExcel 范围内的非敏感状态。"""
     _require_ctexcel_client(request)
     response.headers["Cache-Control"] = "no-store"
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        row = await db.execute_fetchall(
-            "SELECT COUNT(*) FROM customers WHERE product_type = 'ctexcel'"
+        rows = await db.execute_fetchall(
+            """SELECT COUNT(*) AS total,
+                      SUM(
+                        CASE WHEN NULLIF(TRIM(phone_number), '') IS NULL
+                             THEN 1 ELSE 0 END
+                      ) AS pending
+               FROM customers
+               WHERE product_type = 'ctexcel'"""
         )
+    total = int(rows[0][0] or 0) if rows else 0
+    pending = int(rows[0][1] or 0) if rows else 0
     return {
         "ok": True,
-        "api_version": 1,
-        "ctexcel_customer_count": int(row[0][0]) if row else 0,
+        "api_version": 2,
+        "ctexcel_customer_count": total,
+        "pending_customer_count": pending,
+    }
+
+
+@app.get("/api/ctexcel-client/customers/pending")
+async def get_ctexcel_client_pending_customers(
+    request: Request,
+    response: Response,
+    limit: int = Query(50, ge=1, le=100),
+):
+    """返回无手机号客户列表；不暴露普通客户管理接口。"""
+    _require_ctexcel_client(request)
+    response.headers["Cache-Control"] = "no-store"
+    customers = await _list_pending_ctexcel_client_customers(limit)
+    return {
+        "count": len(customers),
+        "customers": customers,
     }
 
 
@@ -1845,19 +1897,49 @@ async def create_ctexcel_client_customer(
     data: CTExcelClientCustomerCreate,
     request: Request,
 ):
-    """为一次桌面申请创建 CTExcel 客户和专属托管邮箱。"""
+    """优先复用中断客户，否则创建 CTExcel 客户和专属托管邮箱。"""
     _require_ctexcel_client(request)
+    pending = await _list_pending_ctexcel_client_customers()
+    resumable = next(
+        (
+            customer
+            for customer in pending
+            if not normalize_optional_text(customer.get("order_number"))
+        ),
+        None,
+    )
+    if data.reuse_pending and resumable:
+        return {
+            **resumable,
+            "product_type": "ctexcel",
+            "sim_activation_code": None,
+            "reused": True,
+            "pending_customer_count": len(pending),
+        }
+    if data.reuse_pending and pending:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "存在已产生订单但尚未抓取手机号的 CTExcel 客户；"
+                "请先同步手机号后再开始下一单"
+            ),
+        )
     try:
-        return await add_customer(
+        created = await add_customer(
             CustomerCreate(
                 product_type="ctexcel",
                 email="",
-                shipping_address=normalize_optional_text(data.shipping_address),
+                shipping_address=None,
                 phone_status="激活",
                 activation_date=datetime.date.today(),
                 use_sim_code=False,
             )
         )
+        return {
+            **created,
+            "reused": False,
+            "pending_customer_count": len(pending) + 1,
+        }
     except HTTPException as exc:
         if exc.status_code < 500:
             raise
@@ -2009,6 +2091,37 @@ async def _sync_ctexcel_order_info(
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"CTExcel 订单邮件检查失败：{exc}") from exc
+
+
+@app.post(
+    "/api/ctexcel-client/customers/{customer_id}/order-info",
+    response_model=CTExcelOrderInfoOut,
+)
+async def sync_ctexcel_client_order_info(
+    customer_id: int,
+    request: Request,
+):
+    """供桌面客户端在恢复流程和支付完成后立即同步订单邮件。"""
+    _require_ctexcel_client(request)
+    customer = await get_customer(customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="客户不存在")
+    if _normalize_product_type(customer.get("product_type")) != "ctexcel":
+        raise HTTPException(status_code=400, detail="该客户不是 CTExcel 模式")
+    try:
+        return await _sync_ctexcel_order_info(customer, limit=50)
+    except HTTPException as exc:
+        if exc.status_code < 500:
+            raise
+        logging.getLogger(__name__).warning(
+            "CTExcel client order sync failed for customer %s: %s",
+            customer_id,
+            exc.detail,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="服务器读取 CTExcel 订单邮件失败",
+        ) from exc
 
 
 @app.get(

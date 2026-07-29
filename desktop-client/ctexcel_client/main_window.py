@@ -78,7 +78,7 @@ class AutomationWorker(QThread):
 class MainWindow(QMainWindow):
     STAGES = [
         "连接客户管理",
-        "新建 CTExcel 客户",
+        "准备 CTExcel 客户",
         "启动浏览器",
         "选择 50GB 套餐",
         "配置实体卡",
@@ -87,6 +87,7 @@ class MainWindow(QMainWindow):
         "确认支付条款",
         "等待人工微信支付",
         "支付成功",
+        "同步号码资料",
     ]
 
     def __init__(self):
@@ -305,7 +306,7 @@ class MainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
-        self.start_btn = QPushButton("新建客户并开始申请")
+        self.start_btn = QPushButton("开始 / 继续申请")
         self.start_btn.setObjectName("primaryButton")
         self.start_btn.clicked.connect(self.start_automation)
         self.stop_btn = QPushButton("停止")
@@ -452,12 +453,16 @@ class MainWindow(QMainWindow):
     def _connection_ok(self, result: object) -> None:
         data = result if isinstance(result, dict) else {}
         count = int(data.get("ctexcel_customer_count") or 0)
+        pending_count = int(data.get("pending_customer_count") or 0)
         self._set_connection_state("ok", "●  已连接")
         self.connection_detail.setText(
             f"服务器连接正常 · API v{data.get('api_version', 1)} · "
-            f"现有 CTExcel 客户 {count} 位"
+            f"现有 CTExcel 客户 {count} 位 · 无手机号 {pending_count} 位"
         )
-        self.log(f"服务器连接成功，当前 CTExcel 客户 {count} 位")
+        self.log(
+            f"服务器连接成功，当前 CTExcel 客户 {count} 位，"
+            f"其中无手机号 {pending_count} 位"
+        )
 
     def _connection_failed(self, message: str) -> None:
         self._set_connection_state("error", "●  连接失败")
@@ -471,12 +476,12 @@ class MainWindow(QMainWindow):
         self.config = self.collect_config()
         save_config(self.config)
         self.current_customer = None
-        self.customer_label.setText("正在创建客户与专属邮箱……")
+        self.customer_label.setText("正在检查待完成客户与专属邮箱……")
         self.copy_email_btn.setEnabled(False)
         self.progress.setValue(0)
         self.stage_counter.setText(f"0 / {len(self.STAGES)}")
         self.log_box.clear()
-        self.log("开始新的 CTExcel 申请流程")
+        self.log("开始 CTExcel 申请流程；优先检查并继续无手机号客户")
         self.automation_worker = AutomationWorker(self.config)
         self.automation_worker.log_message.connect(self.log)
         self.automation_worker.stage_changed.connect(self.on_stage)
@@ -516,6 +521,7 @@ class MainWindow(QMainWindow):
     def on_success(self, payload: object) -> None:
         if not isinstance(payload, AutomationResult):
             return
+        self.start_btn.setText("开始下一位客户")
         summary = (
             f"客户 #{payload.customer_id}\n"
             f"邮箱：{payload.email}\n"
@@ -528,6 +534,7 @@ class MainWindow(QMainWindow):
 
     def on_failure(self, message: str) -> None:
         self.log(f"流程停止：{message}")
+        self.start_btn.setText("重试当前客户")
         QMessageBox.warning(self, "流程未完成", message)
 
     def on_finished(self) -> None:

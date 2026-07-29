@@ -162,6 +162,7 @@ class AppConfig:
     step_timeout_ms: int = 20000
     verification_timeout_seconds: int = 180
     payment_timeout_seconds: int = 1800
+    order_sync_timeout_seconds: int = 180
     error_browser_hold_seconds: int = 180
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     registration: RegistrationDefaults = field(default_factory=RegistrationDefaults)

@@ -70,8 +70,9 @@ def test_client_status_uses_bearer_password_without_hidden_entry_cookie(client_a
     assert response.status_code == 200
     assert response.json() == {
         "ok": True,
-        "api_version": 1,
+        "api_version": 2,
         "ctexcel_customer_count": 0,
+        "pending_customer_count": 0,
     }
     assert response.headers["Cache-Control"] == "no-store"
     assert client.get("/api/customers", headers=AUTH_HEADERS).status_code == 404
@@ -107,15 +108,21 @@ def test_client_api_creates_ctexcel_customer_and_dedicated_email(client_api):
     }
     identity_mock = AsyncMock()
 
+    email_mock = AsyncMock(return_value=email_bundle)
     with patch.object(
         main,
         "_generate_email_account",
-        new=AsyncMock(return_value=email_bundle),
+        new=email_mock,
     ), patch.object(main, "regenerate_identity", new=identity_mock):
         response = client.post(
             "/api/ctexcel-client/customers",
             headers=AUTH_HEADERS,
             json={"shipping_address": "fixed shipping address"},
+        )
+        reused_response = client.post(
+            "/api/ctexcel-client/customers",
+            headers=AUTH_HEADERS,
+            json={"shipping_address": "another fixed address"},
         )
 
     assert response.status_code == 201, response.text
@@ -123,6 +130,11 @@ def test_client_api_creates_ctexcel_customer_and_dedicated_email(client_api):
     assert data["product_type"] == "ctexcel"
     assert data["email"] == "new-client@example.test"
     assert data["sim_activation_code"] is None
+    assert data["reused"] is False
+    assert reused_response.status_code == 201
+    assert reused_response.json()["customer_id"] == data["customer_id"]
+    assert reused_response.json()["reused"] is True
+    email_mock.assert_awaited_once()
     identity_mock.assert_not_awaited()
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
@@ -134,12 +146,20 @@ def test_client_api_creates_ctexcel_customer_and_dedicated_email(client_api):
     assert row == (
         "ctexcel",
         "new-client@example.test",
-        "fixed shipping address",
+        None,
         "client-mail-account",
         None,
         None,
         None,
     )
+
+    pending = client.get(
+        "/api/ctexcel-client/customers/pending",
+        headers=AUTH_HEADERS,
+    )
+    assert pending.status_code == 200
+    assert pending.json()["count"] == 1
+    assert pending.json()["customers"][0]["customer_id"] == data["customer_id"]
 
 
 def test_client_verification_endpoint_is_scoped_to_ctexcel(client_api):
@@ -178,5 +198,43 @@ def test_client_verification_endpoint_is_scoped_to_ctexcel(client_api):
     assert response.json()["code"] == "123456"
     assert client.get(
         f"/api/ctexcel-client/customers/{giffgaff_id}/verification-code",
+        headers=AUTH_HEADERS,
+    ).status_code == 400
+
+
+def test_client_order_sync_endpoint_is_scoped_and_returns_phone(client_api):
+    client, db_path = client_api
+    with sqlite3.connect(db_path) as connection:
+        ctexcel_id = connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date, email_account_id)
+               VALUES ('ctexcel', 'order@example.test', '2026-07-29', 'mail-1')"""
+        ).lastrowid
+        giffgaff_id = connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date, email_account_id)
+               VALUES ('giffgaff', 'other@example.test', '2026-07-29', 'mail-2')"""
+        ).lastrowid
+        connection.commit()
+
+    order_info = main.CTExcelOrderInfoOut(
+        found=True,
+        phone_number="07900000009",
+        order_number="ORDER2026072912345678901",
+        checked_count=1,
+        detail="已同步",
+    )
+    sync_mock = AsyncMock(return_value=order_info)
+    with patch.object(main, "_sync_ctexcel_order_info", new=sync_mock):
+        response = client.post(
+            f"/api/ctexcel-client/customers/{ctexcel_id}/order-info",
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["phone_number"] == "07900000009"
+    sync_mock.assert_awaited_once()
+    assert client.post(
+        f"/api/ctexcel-client/customers/{giffgaff_id}/order-info",
         headers=AUTH_HEADERS,
     ).status_code == 400

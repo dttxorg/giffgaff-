@@ -147,7 +147,9 @@ class AuthLoginRequest(BaseModel):
 
 
 class CTExcelClientCustomerCreate(BaseModel):
+    # shipping_address 仅保留用于兼容 2.0.0 客户端；服务端不再写入客户资料。
     shipping_address: Optional[str] = None
+    reuse_pending: bool = True
 
 
 class MoEmailCreateRequest(BaseModel):

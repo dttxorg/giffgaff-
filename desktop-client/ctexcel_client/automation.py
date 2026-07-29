@@ -120,8 +120,9 @@ class CTExcelAutomation:
         ) as api:
             api.connect()
             self.log("客户管理连接成功")
-            self.stage("新建 CTExcel 客户")
-            created = api.create_ctexcel_customer(registration.chinese_address)
+            self.stage("准备 CTExcel 客户")
+            self._refresh_pending_customers(api)
+            created = api.create_ctexcel_customer()
             customer_id = int(created["customer_id"])
             email = str(created["email"])
             task = {
@@ -130,9 +131,40 @@ class CTExcelAutomation:
                 "product_type": "ctexcel",
             }
             self.customer_created(task)
-            self.log(f"已新建 CTExcel 客户 #{customer_id}，专属邮箱：{email}")
+            if created.get("reused"):
+                self.log(
+                    f"已复用无手机号的待完成客户 #{customer_id}，专属邮箱：{email}"
+                )
+            else:
+                self.log(
+                    f"已新建 CTExcel 客户 #{customer_id}，专属邮箱：{email}"
+                )
             self._check_stop()
             return self._run_browser(api, customer_id, email)
+
+    def _refresh_pending_customers(self, api: AdminApi) -> None:
+        """开始新流程前先扫描无手机号客户，避免重复建立空记录。"""
+        pending = api.pending_customers()
+        if not pending:
+            self.log("没有无手机号的待完成客户，将新建客户")
+            return
+        self.log(f"检测到 {len(pending)} 个无手机号 CTExcel 客户，先扫描订单邮件")
+        synced_count = 0
+        for customer in pending[:20]:
+            self._check_stop()
+            customer_id = int(customer.get("customer_id") or 0)
+            if not customer_id:
+                continue
+            try:
+                result = api.sync_order_info(customer_id)
+            except ApiError as exc:
+                self.log(f"客户 #{customer_id} 邮件扫描暂未完成：{exc}")
+                continue
+            if str(result.get("phone_number") or "").strip():
+                synced_count += 1
+                self.log(f"客户 #{customer_id} 已从订单邮件同步手机号")
+        if synced_count:
+            self.log(f"本轮已补全 {synced_count} 个客户的手机号")
 
     def _validate_registration_defaults(self) -> None:
         defaults = self.config.registration
@@ -193,6 +225,21 @@ class CTExcelAutomation:
                     pending_order=pending,
                 )
                 self.stage("支付成功")
+                self.stage("同步号码资料")
+                synced = self._poll_order_info(api, customer_id)
+                if synced:
+                    result.phone_number = (
+                        str(synced.get("phone_number") or "").strip()
+                        or result.phone_number
+                    )
+                    result.order_number = (
+                        str(synced.get("order_number") or "").strip()
+                        or result.order_number
+                    )
+                    result.transaction_amount = (
+                        str(synced.get("transaction_amount") or "").strip()
+                        or result.transaction_amount
+                    )
                 self.log(
                     "支付成功；客户管理后台将根据专属邮箱自动同步订单号和手机号码"
                 )
@@ -236,6 +283,39 @@ class CTExcelAutomation:
             except Exception:
                 break
             time.sleep(0.5)
+
+    def _poll_order_info(
+        self,
+        api: AdminApi,
+        customer_id: int,
+    ) -> dict[str, Any]:
+        """支付完成后等待订单邮件，并立即把手机号写入客户记录。"""
+        timeout_seconds = max(
+            15,
+            int(self.config.order_sync_timeout_seconds),
+        )
+        deadline = time.monotonic() + timeout_seconds
+        last_result: dict[str, Any] = {}
+        last_error = ""
+        while time.monotonic() < deadline:
+            self._check_stop()
+            try:
+                result = api.sync_order_info(customer_id)
+            except ApiError as exc:
+                last_error = str(exc)
+            else:
+                last_result = result
+                phone_number = str(result.get("phone_number") or "").strip()
+                if phone_number:
+                    self.log(f"手机号已从订单邮件同步：{phone_number}")
+                    return result
+            time.sleep(5)
+        detail = str(last_result.get("detail") or last_error).strip()
+        self.log(
+            "订单邮件暂未出现手机号，服务器后台会继续自动扫描"
+            + (f"：{detail}" if detail else "")
+        )
+        return last_result
 
     def _select_plan(self, page: Page) -> None:
         self.stage("选择 50GB 套餐")

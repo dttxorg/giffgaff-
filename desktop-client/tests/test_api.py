@@ -19,21 +19,36 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
                 200,
                 json={
                     "ok": True,
-                    "api_version": 1,
+                    "api_version": 2,
                     "ctexcel_customer_count": 3,
+                    "pending_customer_count": 1,
+                },
+            )
+        if path == "/api/ctexcel-client/customers/pending":
+            return httpx.Response(
+                200,
+                json={
+                    "count": 1,
+                    "customers": [
+                        {
+                            "customer_id": 321,
+                            "email": "customer@example.test",
+                            "phone_number": None,
+                            "order_number": None,
+                        }
+                    ],
                 },
             )
         if path == "/api/ctexcel-client/customers":
             assert request.method == "POST"
-            assert json.loads(request.content) == {
-                "shipping_address": "fixed shipping address"
-            }
+            assert json.loads(request.content) == {"reuse_pending": True}
             return httpx.Response(
                 201,
                 json={
                     "customer_id": 321,
                     "product_type": "ctexcel",
                     "email": "customer@example.test",
+                    "reused": True,
                 },
             )
         if path == "/api/ctexcel-client/customers/321/verification-code":
@@ -47,6 +62,18 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
                     "detail": "已提取最新验证码",
                 },
             )
+        if path == "/api/ctexcel-client/customers/321/order-info":
+            assert request.method == "POST"
+            return httpx.Response(
+                200,
+                json={
+                    "found": True,
+                    "phone_number": "07900000009",
+                    "order_number": "ORDER2026072912345678901",
+                    "checked_count": 1,
+                    "detail": "已同步",
+                },
+            )
         raise AssertionError(f"unexpected request: {request.method} {path}")
 
     with AdminApi(
@@ -55,16 +82,23 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
         transport=httpx.MockTransport(handler),
     ) as api:
         status = api.connect()
-        created = api.create_ctexcel_customer("fixed shipping address")
+        pending = api.pending_customers()
+        created = api.create_ctexcel_customer()
         verification = api.verification_code(created["customer_id"])
+        order_info = api.sync_order_info(created["customer_id"])
 
     assert status["ctexcel_customer_count"] == 3
+    assert status["pending_customer_count"] == 1
+    assert pending[0]["customer_id"] == 321
     assert created["email"] == "customer@example.test"
     assert verification["code"] == "123456"
+    assert order_info["phone_number"] == "07900000009"
     assert requests == [
         ("GET", "/api/ctexcel-client/status"),
+        ("GET", "/api/ctexcel-client/customers/pending"),
         ("POST", "/api/ctexcel-client/customers"),
         ("GET", "/api/ctexcel-client/customers/321/verification-code"),
+        ("POST", "/api/ctexcel-client/customers/321/order-info"),
     ]
 
 
