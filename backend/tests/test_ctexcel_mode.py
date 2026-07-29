@@ -327,7 +327,7 @@ def test_legacy_label_config_is_merged_with_ctexcel_template(ctexcel_client):
     assert "号码资料二维码" in sources
 
 
-def test_pending_ctexcel_auto_sync_only_selects_recent_incomplete_mailboxes(
+def test_ctexcel_auto_sync_claims_recent_incomplete_mailbox_once(
     ctexcel_client,
 ):
     _, db_path = ctexcel_client
@@ -363,9 +363,22 @@ def test_pending_ctexcel_auto_sync_only_selects_recent_incomplete_mailboxes(
         )
         connection.commit()
 
-    rows = asyncio.run(main._pending_ctexcel_auto_sync_customers())
+    async def claim_from_two_workers():
+        return await asyncio.gather(
+            main._claim_pending_ctexcel_auto_sync_customers(),
+            main._claim_pending_ctexcel_auto_sync_customers(),
+        )
 
-    assert [row["id"] for row in rows] == [pending_id]
+    claims = asyncio.run(claim_from_two_workers())
+
+    assert sorted(len(batch) for batch in claims) == [0, 1]
+    assert [row["id"] for batch in claims for row in batch] == [pending_id]
+    with sqlite3.connect(db_path) as connection:
+        claimed_at = connection.execute(
+            "SELECT ctexcel_last_checked_at FROM customers WHERE id = ?",
+            (pending_id,),
+        ).fetchone()[0]
+    assert claimed_at
 
 
 def test_ctexcel_auto_sync_round_isolates_mailbox_failures():
@@ -377,7 +390,7 @@ def test_ctexcel_auto_sync_round_isolates_mailbox_failures():
 
     with patch.object(
         main,
-        "_pending_ctexcel_auto_sync_customers",
+        "_claim_pending_ctexcel_auto_sync_customers",
         new=AsyncMock(return_value=pending),
     ), patch.object(main, "_sync_ctexcel_order_info", new=sync_mock):
         result = asyncio.run(main._ctexcel_auto_sync_once())

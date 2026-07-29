@@ -681,17 +681,25 @@ def _merge_default_label_templates(templates: list[dict]) -> list[dict]:
     return merged
 
 
-async def _pending_ctexcel_auto_sync_customers() -> list[dict]:
-    """轮转读取最近创建且仍缺少订单核心资料的 CTExcel 邮箱。"""
+async def _claim_pending_ctexcel_auto_sync_customers() -> list[dict]:
+    """跨 Uvicorn worker 抢占一批待扫描的 CTExcel 邮箱。"""
     retry_seconds = max(30, CTEXCEL_AUTO_SYNC_INTERVAL_SECONDS)
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
+        # BEGIN IMMEDIATE 让多个 worker 串行执行“选择 + 标记”，避免重复回源。
+        await db.execute("BEGIN IMMEDIATE")
         rows = await db.execute_fetchall(
             """SELECT *
                FROM customers
                WHERE product_type = 'ctexcel'
-                 AND (phone_number IS NULL OR ctexcel_order_number IS NULL)
-                 AND (email_account_id IS NOT NULL OR moemail_id IS NOT NULL)
+                 AND (
+                       NULLIF(TRIM(phone_number), '') IS NULL
+                       OR NULLIF(TRIM(ctexcel_order_number), '') IS NULL
+                     )
+                 AND (
+                       NULLIF(TRIM(email_account_id), '') IS NOT NULL
+                       OR NULLIF(TRIM(moemail_id), '') IS NOT NULL
+                     )
                  AND datetime(created_at) >= datetime('now', ?)
                  AND (
                        ctexcel_last_checked_at IS NULL
@@ -708,11 +716,22 @@ async def _pending_ctexcel_auto_sync_customers() -> list[dict]:
                 CTEXCEL_AUTO_SYNC_BATCH_SIZE,
             ),
         )
-        return [dict(row) for row in rows]
+        claimed = [dict(row) for row in rows]
+        if claimed:
+            customer_ids = [int(row["id"]) for row in claimed]
+            placeholders = ",".join("?" for _ in customer_ids)
+            await db.execute(
+                f"""UPDATE customers
+                    SET ctexcel_last_checked_at = ?
+                    WHERE id IN ({placeholders})""",
+                (_utc_now(), *customer_ids),
+            )
+        await db.commit()
+        return claimed
 
 
 async def _ctexcel_auto_sync_once() -> dict[str, int]:
-    rows = await _pending_ctexcel_auto_sync_customers()
+    rows = await _claim_pending_ctexcel_auto_sync_customers()
     result = {"checked": 0, "synced": 0, "failed": 0}
     for customer in rows:
         result["checked"] += 1
