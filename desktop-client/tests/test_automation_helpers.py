@@ -44,3 +44,15 @@ def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     assert 'page.locator(".el-switch")' in source
     assert "错误现场已保留" in source
     assert "error_browser_hold_seconds" in source
+
+
+def test_registration_fields_target_real_inputs_instead_of_placeholder_wrappers():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ctexcel_client"
+        / "automation.py"
+    ).read_text(encoding="utf-8")
+
+    assert "page.locator(f'input[placeholder=\"{escaped}\"]')" in source
+    assert 'page.get_by_placeholder("请填写姓").fill' not in source
+    assert 'page.get_by_placeholder("请填写验证码").fill' not in source

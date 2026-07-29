@@ -471,21 +471,46 @@ class CTExcelAutomation:
     ) -> None:
         self.stage("填写客户资料")
         defaults = self.config.registration
-        page.get_by_placeholder("请填写姓").fill(defaults.last_name.strip())
-        page.get_by_placeholder("请填写名").fill(defaults.first_name.strip())
-        page.get_by_placeholder("请填写邮箱").fill(email)
-        page.get_by_placeholder("请填写联系电话").fill(
-            defaults.contact_phone.strip()
+        self._fill_placeholder_input(
+            page,
+            "请填写姓",
+            defaults.last_name.strip(),
+            "姓",
         )
-        referral = page.get_by_placeholder(
-            "请填写推荐人电话/推荐号码（选填）"
+        self._fill_placeholder_input(
+            page,
+            "请填写名",
+            defaults.first_name.strip(),
+            "名",
         )
-        referral.fill(defaults.referral_code.strip())
+        self._fill_placeholder_input(
+            page,
+            "请填写邮箱",
+            email,
+            "邮箱",
+        )
+        self._fill_placeholder_input(
+            page,
+            "请填写联系电话",
+            defaults.contact_phone.strip(),
+            "联系电话",
+        )
+        self._fill_placeholder_input(
+            page,
+            "请填写推荐人电话/推荐号码（选填）",
+            defaults.referral_code.strip(),
+            "推荐码",
+        )
 
         self._click_visible_text(page, "获取验证码")
         self.log("验证码已请求，等待客户管理系统读取专属邮箱")
         code = self._poll_verification_code(api, customer_id)
-        page.get_by_placeholder("请填写验证码").fill(code)
+        self._fill_placeholder_input(
+            page,
+            "请填写验证码",
+            code,
+            "邮箱验证码",
+        )
         self.log("验证码已自动填入")
 
         self._select_china(page)
@@ -496,6 +521,21 @@ class CTExcelAutomation:
             "**/buycard/buycardlist",
             timeout=self.config.page_timeout_ms,
         )
+
+    def _fill_placeholder_input(
+        self,
+        page: Page,
+        placeholder: str,
+        value: str,
+        label: str,
+    ) -> None:
+        """网页会把 placeholder 同时放在表单外层和 input，只选择真实输入框。"""
+        escaped = placeholder.replace("\\", "\\\\").replace('"', '\\"')
+        field = self._visible_locator(
+            page.locator(f'input[placeholder="{escaped}"]'),
+            f"{label}输入框",
+        )
+        field.fill(value)
 
     def _poll_verification_code(self, api: AdminApi, customer_id: int) -> str:
         deadline = time.monotonic() + max(
