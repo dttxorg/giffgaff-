@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import contextlib
+from pathlib import Path
 import re
 import threading
 import time
@@ -16,7 +18,7 @@ from playwright.sync_api import (
 )
 
 from .api import AdminApi, ApiError
-from .config import AppConfig
+from .config import AppConfig, app_config_dir
 
 
 LogCallback = Callable[[str], None]
@@ -172,6 +174,7 @@ class CTExcelAutomation:
                 self.config.user_data_dir,
                 **launch_options,
             )
+            page: Optional[Page] = None
             try:
                 page = self.context.pages[0] if self.context.pages else self.context.new_page()
                 page.set_default_timeout(max(1000, int(self.config.step_timeout_ms)))
@@ -195,9 +198,44 @@ class CTExcelAutomation:
                 )
                 page.wait_for_timeout(5000)
                 return result
+            except Exception as exc:
+                if page is not None:
+                    self._preserve_error_page(page, exc)
+                raise
             finally:
-                self.context.close()
+                with contextlib.suppress(Exception):
+                    self.context.close()
                 self.context = None
+
+    def _preserve_error_page(self, page: Page, exc: Exception) -> None:
+        """保存错误现场，并在可视模式下短暂保留浏览器供人工检查。"""
+        diagnostics = Path(app_config_dir()) / "diagnostics"
+        diagnostics.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        screenshot_path = diagnostics / f"error-{stamp}.png"
+        html_path = diagnostics / f"error-{stamp}.html"
+        with contextlib.suppress(Exception):
+            page.screenshot(path=str(screenshot_path), full_page=True)
+        with contextlib.suppress(Exception):
+            html_path.write_text(page.content(), encoding="utf-8")
+
+        self.stage("错误现场已保留")
+        self.log(f"流程错误：{exc}")
+        self.log(f"诊断文件：{diagnostics}")
+        hold_seconds = max(0, int(self.config.error_browser_hold_seconds))
+        if self.config.headless or hold_seconds == 0:
+            return
+        self.log(
+            f"浏览器将保留最多 {hold_seconds} 秒；检查页面后关闭浏览器或点击停止。"
+        )
+        deadline = time.monotonic() + hold_seconds
+        while time.monotonic() < deadline and not self.stop_event.is_set():
+            try:
+                if page.is_closed():
+                    break
+            except Exception:
+                break
+            time.sleep(0.5)
 
     def _select_plan(self, page: Page) -> None:
         self.stage("选择 50GB 套餐")
@@ -206,6 +244,7 @@ class CTExcelAutomation:
             wait_until="domcontentloaded",
             timeout=self.config.page_timeout_ms,
         )
+        self._dismiss_cookie_consent(page)
         page.wait_for_function(
             "() => document.body && document.body.innerText.includes('50GB')",
             timeout=self.config.page_timeout_ms,
@@ -244,38 +283,104 @@ class CTExcelAutomation:
 
     def _configure_sim(self, page: Page) -> None:
         self.stage("配置实体卡")
-        self._click_visible_text(page, "实体SIM卡")
-        self._click_visible_text(page, "免费随机号码")
-        self._click_visible_text(page, "1 个月")
-        state = page.evaluate(
+        self._dismiss_cookie_consent(page)
+        page.wait_for_function(
             """() => {
-              const input = document.querySelector('input[role="switch"]');
-              if (!input) return {found: false, checked: null};
-              const checked = Boolean(input.checked)
-                || input.getAttribute('aria-checked') === 'true';
-              if (checked) {
-                const root = input.closest('.el-switch') || input.parentElement;
-                if (root) root.click();
-              }
-              return {found: true};
-            }"""
+              const text = document.body?.innerText || '';
+              return text.includes('SIM卡类型') && text.includes('自动续订');
+            }""",
+            timeout=self.config.page_timeout_ms,
         )
-        if not state.get("found"):
-            raise AutomationError("没有找到自动续订开关")
-        page.wait_for_timeout(300)
-        auto_renew = page.evaluate(
-            """() => {
-              const input = document.querySelector('input[role="switch"]');
-              return Boolean(input && (
-                input.checked || input.getAttribute('aria-checked') === 'true'
-              ));
-            }"""
+        # “实体SIM卡”与说明文字在同一个 div 中，exact=True 会得到 0 个匹配。
+        self._ensure_selected_option(
+            page,
+            "实体SIM卡",
+            exact=False,
+            label="实体 SIM 卡",
         )
-        if auto_renew:
+        self._ensure_selected_option(
+            page,
+            "免费随机号码",
+            exact=True,
+            label="免费随机号码",
+        )
+        self._ensure_selected_option(
+            page,
+            "1 个月",
+            exact=True,
+            label="订购周期 1 个月",
+        )
+
+        switch = self._visible_locator(
+            page.locator(".el-switch"),
+            "自动续订开关",
+        )
+        switch_class = switch.get_attribute("class") or ""
+        if "is-checked" in switch_class:
+            switch.click()
+            page.wait_for_function(
+                """() => {
+                  const root = document.querySelector('.el-switch');
+                  return root && !root.classList.contains('is-checked');
+                }""",
+                timeout=self.config.step_timeout_ms,
+            )
+        switch_class = switch.get_attribute("class") or ""
+        if "is-checked" in switch_class:
             raise AutomationError("自动续订仍处于开启状态")
         self.log("实体 SIM、免费随机号码、1个月、1张，自动续订已关闭")
         self._click_button(page, "下一步")
         page.wait_for_url("**/buycard/fillinfos", timeout=self.config.page_timeout_ms)
+
+    def _dismiss_cookie_consent(self, page: Page) -> None:
+        """拒绝非必要 Cookie，并移除会拦截页面点击的 Usercentrics 遮罩。"""
+        host = page.locator("#usercentrics-cmp-ui")
+        try:
+            host.wait_for(state="attached", timeout=5000)
+        except PlaywrightTimeoutError:
+            return
+        deny = page.locator(
+            "#usercentrics-cmp-ui button.uc-deny-button"
+        )
+        try:
+            if deny.count() and deny.first.is_visible():
+                deny.first.click(timeout=self.config.step_timeout_ms)
+                page.wait_for_function(
+                    """() => {
+                      const host = document.querySelector('#usercentrics-cmp-ui');
+                      const overlay = host?.shadowRoot?.querySelector('.overlay');
+                      return !overlay || !(overlay.offsetWidth || overlay.offsetHeight);
+                    }""",
+                    timeout=self.config.step_timeout_ms,
+                )
+                self.log("已关闭隐私设置遮罩")
+        except PlaywrightTimeoutError as exc:
+            raise AutomationError("隐私设置遮罩仍在阻挡页面操作") from exc
+
+    def _ensure_selected_option(
+        self,
+        page: Page,
+        text: str,
+        *,
+        exact: bool,
+        label: str,
+    ) -> None:
+        option = self._visible_locator(
+            page.get_by_text(text, exact=exact),
+            label,
+        )
+        selected = option.evaluate(
+            "element => Boolean(element.closest('.actived'))"
+        )
+        if not selected:
+            option.click()
+            page.wait_for_timeout(250)
+            selected = option.evaluate(
+                "element => Boolean(element.closest('.actived'))"
+            )
+        if not selected:
+            raise AutomationError(f"选项没有进入选中状态：{label}")
+        self.log(f"已确认：{label}")
 
     def _fill_customer_info(
         self,
@@ -411,7 +516,10 @@ class CTExcelAutomation:
         )
         if not other_payment.is_checked():
             other_payment.check()
-        wechat = self._visible_locator(page.get_by_text("微信", exact=True))
+        wechat = self._visible_locator(
+            page.get_by_text("微信", exact=True),
+            "微信支付方式",
+        )
         wechat.click()
         selected = wechat.evaluate(
             """el => Boolean(
@@ -431,7 +539,7 @@ class CTExcelAutomation:
             state="visible",
             timeout=self.config.step_timeout_ms,
         )
-        dialog = self._visible_locator(dialogs)
+        dialog = self._visible_locator(dialogs, "支付条款弹窗")
         checkbox = dialog.get_by_role("checkbox")
         if checkbox.count() != 1:
             raise AutomationError("支付条款复选框数量异常")
@@ -501,21 +609,34 @@ class CTExcelAutomation:
             page.wait_for_timeout(1000)
         raise AutomationError("等待人工支付完成超时，可在客户端重新载入该客户继续")
 
-    @staticmethod
-    def _visible_locator(locator: Locator) -> Locator:
-        count = locator.count()
-        for index in range(count):
-            candidate = locator.nth(index)
-            if candidate.is_visible():
-                return candidate
-        raise AutomationError("没有找到可见的目标控件")
+    def _visible_locator(self, locator: Locator, label: str) -> Locator:
+        deadline = time.monotonic() + max(
+            1,
+            int(self.config.step_timeout_ms) / 1000,
+        )
+        last_count = 0
+        while time.monotonic() < deadline:
+            self._check_stop()
+            last_count = locator.count()
+            for index in range(last_count):
+                candidate = locator.nth(index)
+                if candidate.is_visible():
+                    return candidate
+            time.sleep(0.15)
+        raise AutomationError(
+            f"没有找到可见控件：{label}（页面匹配 {last_count} 个）"
+        )
 
     def _click_visible_text(self, page: Page, text: str) -> None:
-        locator = self._visible_locator(page.get_by_text(text, exact=True))
+        locator = self._visible_locator(
+            page.get_by_text(text, exact=True),
+            text,
+        )
         locator.click()
 
     def _click_button(self, page: Page, name: str) -> None:
         locator = self._visible_locator(
-            page.get_by_role("button", name=name, exact=True)
+            page.get_by_role("button", name=name, exact=True),
+            f"按钮“{name}”",
         )
         locator.click()

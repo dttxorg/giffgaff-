@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 
 from ctexcel_client.automation import (
     normalize_money,
@@ -29,3 +30,17 @@ def test_success_page_fields_are_read_for_operator_summary_only():
         "phone_number": "07900000009",
         "transaction_amount": "5.95",
     }
+
+
+def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ctexcel_client"
+        / "automation.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"实体SIM卡",\n            exact=False' in source
+    assert "button.uc-deny-button" in source
+    assert 'page.locator(".el-switch")' in source
+    assert "错误现场已保留" in source
+    assert "error_browser_hold_seconds" in source
