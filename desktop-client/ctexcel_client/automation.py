@@ -33,6 +33,27 @@ CustomerCallback = Callable[[dict[str, Any]], None]
 
 ORDER_PATTERN = re.compile(r"\bORDER\d{12,}\b", re.I)
 PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?44|0)7\d{9}(?!\d)")
+LOADING_OVERLAY_SCRIPT = """() => {
+  const visible = element => {
+    if (!element || element.hidden) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && Number(style.opacity || 1) > 0
+      && rect.width > 0
+      && rect.height > 0;
+  };
+  const selectors = [
+    '.el-loading-mask',
+    '.el-loading-spinner',
+    '[class*="loading-mask"]',
+    '[class*="loadingMask"]'
+  ];
+  return selectors.some(selector =>
+    Array.from(document.querySelectorAll(selector)).some(visible)
+  );
+}"""
 
 
 class AutomationError(RuntimeError):
@@ -303,7 +324,7 @@ class CTExcelAutomation:
             launch_options: dict[str, Any] = {
                 "headless": bool(self.config.headless),
                 # 该流程用于逐单人工支付；保留可观察的操作节奏，避免连续快速点击。
-                "slow_mo": max(350, int(self.config.slow_mo_ms)),
+                "slow_mo": max(800, int(self.config.slow_mo_ms)),
             }
             channel = (self.config.browser_channel or "").strip().lower()
             if channel and channel != "chromium":
@@ -433,6 +454,7 @@ class CTExcelAutomation:
             timeout=self.config.page_timeout_ms,
         )
         self._dismiss_cookie_consent(page)
+        self._wait_for_page_ready(page, "套餐列表")
         page.wait_for_function(
             "() => document.body && document.body.innerText.includes('50GB')",
             timeout=self.config.page_timeout_ms,
@@ -467,11 +489,13 @@ class CTExcelAutomation:
             "**/buycard/simcarddetails/**",
             timeout=self.config.page_timeout_ms,
         )
+        self._wait_for_page_ready(page, "套餐详情")
         self.log("已选择 50GB、£11.9/30天套餐")
 
     def _configure_sim(self, page: Page) -> None:
         self.stage("配置实体卡")
         self._dismiss_cookie_consent(page)
+        self._wait_for_page_ready(page, "SIM 卡配置页")
         page.wait_for_function(
             """() => {
               const text = document.body?.innerText || '';
@@ -499,6 +523,7 @@ class CTExcelAutomation:
             label="订购周期 1 个月",
         )
 
+        self._wait_for_page_ready(page, "自动续订开关")
         switch = self._visible_locator(
             page.locator(".el-switch"),
             "自动续订开关",
@@ -506,6 +531,7 @@ class CTExcelAutomation:
         switch_class = switch.get_attribute("class") or ""
         if "is-checked" in switch_class:
             switch.click()
+            self._wait_for_page_ready(page, "关闭自动续订")
             page.wait_for_function(
                 """() => {
                   const root = document.querySelector('.el-switch');
@@ -519,6 +545,7 @@ class CTExcelAutomation:
         self.log("实体 SIM、免费随机号码、1个月、1张，自动续订已关闭")
         self._click_button(page, "下一步")
         page.wait_for_url("**/buycard/fillinfos", timeout=self.config.page_timeout_ms)
+        self._wait_for_page_ready(page, "客户资料页")
 
     def _dismiss_cookie_consent(self, page: Page) -> None:
         """拒绝非必要 Cookie，并移除会拦截页面点击的 Usercentrics 遮罩。"""
@@ -553,6 +580,7 @@ class CTExcelAutomation:
         exact: bool,
         label: str,
     ) -> None:
+        self._wait_for_page_ready(page, f"选择{label}前")
         option = self._visible_locator(
             page.get_by_text(text, exact=exact),
             label,
@@ -562,7 +590,7 @@ class CTExcelAutomation:
         )
         if not selected:
             option.click()
-            page.wait_for_timeout(250)
+            self._wait_for_page_ready(page, f"更新{label}")
             selected = option.evaluate(
                 "element => Boolean(element.closest('.actived'))"
             )
@@ -579,6 +607,7 @@ class CTExcelAutomation:
     ) -> None:
         self.stage("填写客户资料")
         defaults = self.config.registration
+        self._wait_for_page_ready(page, "客户资料表单")
         # 先选择寄送国家，官网才会按中国地址流程初始化后续表单。
         self._select_china(page)
         self._fill_placeholder_input(
@@ -655,6 +684,7 @@ class CTExcelAutomation:
             "**/buycard/buycardlist",
             timeout=self.config.page_timeout_ms,
         )
+        self._wait_for_page_ready(page, "订单确认页")
 
     def _fill_placeholder_input(
         self,
@@ -733,6 +763,62 @@ class CTExcelAutomation:
             self._check_stop()
             time.sleep(min(0.25, max(0, deadline - time.monotonic())))
 
+    def _wait_for_page_ready(
+        self,
+        page: Page,
+        label: str,
+        *,
+        stable_seconds: float = 1.2,
+    ) -> None:
+        """等待全屏 Loading 消失并保持稳定，避免请求刚结束就继续点击。"""
+        configured_timeout = max(
+            90_000,
+            int(self.config.step_timeout_ms) * 3,
+        )
+        timeout_ms = min(
+            max(5_000, int(self.config.page_timeout_ms)),
+            configured_timeout,
+        )
+        deadline = time.monotonic() + timeout_ms / 1000
+        stable_since: Optional[float] = None
+        saw_loading = False
+        while time.monotonic() < deadline:
+            self._check_stop()
+            try:
+                loading = bool(page.evaluate(LOADING_OVERLAY_SCRIPT))
+            except Exception:
+                if page.is_closed():
+                    raise AutomationError(
+                        f"页面已关闭，等待加载中止：{label}"
+                    )
+                stable_since = None
+                self._wait_interruptibly(0.25)
+                continue
+            if loading:
+                if not saw_loading:
+                    self.log(f"等待页面加载完成：{label}")
+                    saw_loading = True
+                stable_since = None
+            else:
+                if stable_since is None:
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= max(
+                    0.5,
+                    stable_seconds,
+                ):
+                    if saw_loading:
+                        with contextlib.suppress(PlaywrightTimeoutError):
+                            page.wait_for_load_state(
+                                "networkidle",
+                                timeout=3000,
+                            )
+                        self.log(f"页面加载完成：{label}")
+                    return
+            self._wait_interruptibly(0.2)
+        raise AutomationError(
+            f"页面加载超时：{label}；Loading 遮罩持续未消失"
+        )
+
     @staticmethod
     def _format_mail_time(value: datetime) -> str:
         utc_value = value.astimezone(timezone.utc)
@@ -743,6 +829,7 @@ class CTExcelAutomation:
         )
 
     def _select_china(self, page: Page) -> None:
+        self._wait_for_page_ready(page, "选择寄送国家前")
         country = page.get_by_role("combobox", name=re.compile("寄送国家"))
         if country.count() != 1:
             raise AutomationError("寄送国家下拉框数量异常")
@@ -758,7 +845,7 @@ class CTExcelAutomation:
         option = page.get_by_role("option", name="中国", exact=True)
         option.wait_for(state="visible")
         option.click()
-        page.wait_for_timeout(500)
+        self._wait_for_page_ready(page, "切换寄送国家")
         if "中国" not in select.inner_text():
             raise AutomationError("寄送国家没有成功切换为中国")
         self.log("寄送国家已选择中国")
@@ -772,6 +859,7 @@ class CTExcelAutomation:
             raise AutomationError("智能填写弹窗的地址输入框数量异常")
         textboxes.fill(address)
         dialog.get_by_role("button", name="开始识别", exact=True).click()
+        self._wait_for_page_ready(page, "智能识别地址")
         dialog.wait_for(state="hidden", timeout=self.config.step_timeout_ms)
 
         region = page.get_by_role("textbox", name="*省市区", exact=True)
@@ -794,9 +882,11 @@ class CTExcelAutomation:
                       if (root) root.click();
                     }"""
                 )
+                self._wait_for_page_ready(page, "关闭营销订阅")
 
     def _confirm_order(self, page: Page) -> None:
         self.stage("应用半价优惠")
+        self._wait_for_page_ready(page, "订单确认页")
         defaults = self.config.registration
         coupon_code = defaults.coupon_code.strip()
         if not coupon_code:
@@ -847,11 +937,13 @@ class CTExcelAutomation:
         )
         if not other_payment.is_checked():
             other_payment.check()
+            self._wait_for_page_ready(page, "切换其他支付方式")
         wechat = self._visible_locator(
             page.get_by_text("微信", exact=True),
             "微信支付方式",
         )
         wechat.click()
+        self._wait_for_page_ready(page, "切换微信支付")
         selected = wechat.evaluate(
             """el => Boolean(
               el.closest('.actived')
@@ -885,6 +977,7 @@ class CTExcelAutomation:
         if not checkbox.is_checked():
             raise AutomationError("支付条款没有成功勾选")
         dialog.get_by_role("button", name="下一步", exact=True).click()
+        self._wait_for_page_ready(page, "生成微信支付订单")
         page.wait_for_url(
             "**/buycard/buycardWX",
             timeout=self.config.page_timeout_ms,
@@ -893,6 +986,7 @@ class CTExcelAutomation:
             "() => document.body && document.body.innerText.includes('订单号码')",
             timeout=self.config.page_timeout_ms,
         )
+        self._wait_for_page_ready(page, "微信支付页")
         page_text = page.locator("body").inner_text()
         order = ORDER_PATTERN.search(page_text)
         expected = self.config.registration.expected_price_gbp.strip()
@@ -921,6 +1015,7 @@ class CTExcelAutomation:
         while time.monotonic() < deadline:
             self._check_stop()
             if "/buycard/buycardsucceed" in page.url:
+                self._wait_for_page_ready(page, "支付成功页")
                 page.wait_for_function(
                     "() => document.body && document.body.innerText.includes('订购成功')",
                     timeout=self.config.page_timeout_ms,
@@ -959,15 +1054,19 @@ class CTExcelAutomation:
         )
 
     def _click_visible_text(self, page: Page, text: str) -> None:
+        self._wait_for_page_ready(page, f"操作“{text}”前")
         locator = self._visible_locator(
             page.get_by_text(text, exact=True),
             text,
         )
         locator.click()
+        self._wait_for_page_ready(page, f"操作“{text}”")
 
     def _click_button(self, page: Page, name: str) -> None:
+        self._wait_for_page_ready(page, f"点击“{name}”前")
         locator = self._visible_locator(
             page.get_by_role("button", name=name, exact=True),
             f"按钮“{name}”",
         )
         locator.click()
+        self._wait_for_page_ready(page, f"点击“{name}”")

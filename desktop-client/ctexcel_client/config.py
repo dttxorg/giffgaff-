@@ -186,7 +186,7 @@ class AppConfig:
     browser_channel: str = "msedge"
     user_data_dir: str = field(default_factory=default_user_data_dir)
     headless: bool = False
-    slow_mo_ms: int = 350
+    slow_mo_ms: int = 800
     page_timeout_ms: int = 120000
     step_timeout_ms: int = 20000
     verification_min_wait_seconds: int = 8

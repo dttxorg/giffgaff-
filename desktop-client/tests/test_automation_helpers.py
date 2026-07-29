@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ctexcel_client.automation import (
+    CTExcelAutomation,
     assess_verification_freshness,
     coupon_rejection_message,
     normalize_money,
@@ -10,6 +11,7 @@ from ctexcel_client.automation import (
     parse_success_text,
     price_is_expected,
 )
+from ctexcel_client.config import AppConfig
 
 
 def test_money_and_discount_price_parsing():
@@ -46,8 +48,57 @@ def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     assert '"实体SIM卡",\n            exact=False' in source
     assert "button.uc-deny-button" in source
     assert 'page.locator(".el-switch")' in source
+    assert "'.el-loading-mask'" in source
+    assert "Loading 遮罩持续未消失" in source
+    assert '"networkidle"' in source
+    configure_start = source.index("def _configure_sim")
+    switch_click = source.index("switch.click()", configure_start)
+    wait_before_switch = source.index(
+        'self._wait_for_page_ready(page, "自动续订开关")',
+        configure_start,
+    )
+    assert wait_before_switch < switch_click
+    assert (
+        'self._wait_for_page_ready(page, "关闭自动续订")'
+        in source[switch_click:]
+    )
     assert "错误现场已保留" in source
     assert "error_browser_hold_seconds" in source
+
+
+def test_loading_overlay_waits_until_the_page_is_stably_ready():
+    class FakePage:
+        def __init__(self):
+            self.values = [True, True, False, False, False, False]
+
+        def evaluate(self, _script):
+            return self.values.pop(0) if self.values else False
+
+        def is_closed(self):
+            return False
+
+        def wait_for_load_state(self, state, timeout):
+            assert state == "networkidle"
+            assert timeout == 3000
+
+    messages = []
+    automation = CTExcelAutomation(
+        AppConfig(page_timeout_ms=5000, step_timeout_ms=2000),
+        log=messages.append,
+        stage=lambda _message: None,
+        customer_created=lambda _payload: None,
+    )
+
+    automation._wait_for_page_ready(
+        FakePage(),
+        "自动续订开关",
+        stable_seconds=0.5,
+    )
+
+    assert messages == [
+        "等待页面加载完成：自动续订开关",
+        "页面加载完成：自动续订开关",
+    ]
 
 
 def test_registration_fields_target_real_inputs_instead_of_placeholder_wrappers():
@@ -75,7 +126,8 @@ def test_country_is_selected_before_registration_fields_at_human_paced_speed():
     assert form_source.index("self._select_china(page)") < form_source.index(
         '"请填写姓"'
     )
-    assert '"slow_mo": max(350, int(self.config.slow_mo_ms))' in source
+    assert '"slow_mo": max(800, int(self.config.slow_mo_ms))' in source
+    assert "stable_seconds: float = 1.2" in source
     assert "' el-select '" in source
 
 
