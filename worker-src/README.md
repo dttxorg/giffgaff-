@@ -43,15 +43,18 @@ wrangler deploy
 
 你的 admin → **Worker 部署** 标签页 → 顶部「Worker 域名」输入框 → 填 `https://card.example.com` → 保存
 
-之后客户扫码会走 `card.example.com`，所有公共流量不打到你的服务器。
+之后客户扫码会走 `card.example.com`。版本信息在边缘缓存 60 秒，窗口内的页面
+缓存命中不会逐次回源；源站短暂故障时，已缓存页面可使用 24 小时内的旧版本
+元数据继续提供服务。明确的版本 `404` 仍立即撤销旧 Token。
 
 ## 验证
 
 F12 → Network → 扫码访问 `/p/{token}`：
 
 - 正常响应应为 `200`
-- 应包含 `X-Public-Card-Worker: 6`
+- 应包含 `X-Public-Card-Worker: 7`
 - 第一次访问应为 `X-Cache: MISS`，再次访问应为 `X-Cache: HIT`
+- `X-Version-Cache` 会显示 `FRESH`、`REFRESHED` 或故障回退时的 `STALE`
 - 如果看到 `X-Worker-Error: api-base`，检查 Production 运行时的 `API_BASE`
 - 如果看到 `X-Origin-Stage` / `X-Origin-Status`，按版本接口或页面接口的源站状态排查
 

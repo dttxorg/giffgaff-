@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -215,6 +217,235 @@ def test_client_customer_request_key_is_idempotent(client_api):
             "batch_parallel_1234567890",
         )
     ]
+
+
+def test_concurrent_same_request_key_creates_one_customer(client_api):
+    client, db_path = client_api
+    calls = []
+
+    async def generate_email(**_kwargs):
+        calls.append("generate")
+        await asyncio.sleep(0.15)
+        return {
+            "email": "concurrent-same-key@example.test",
+            "email_account_id": "concurrent-same-key-mail",
+            "email_provider_id": None,
+            "email_provider_domain": None,
+            "share_link": "",
+            "is_email_auto": True,
+        }
+
+    payload = {
+        "reuse_pending": False,
+        "request_key": "same_key_parallel_1234567890",
+    }
+    with patch.object(
+        main,
+        "_generate_email_account",
+        new=generate_email,
+    ), patch.object(main, "regenerate_identity", new=AsyncMock()):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(
+                executor.map(
+                    lambda _index: client.post(
+                        "/api/ctexcel-client/customers",
+                        headers=AUTH_HEADERS,
+                        json=payload,
+                    ),
+                    range(2),
+                )
+            )
+
+    assert [response.status_code for response in responses] == [201, 201]
+    bodies = [response.json() for response in responses]
+    assert len({body["customer_id"] for body in bodies}) == 1
+    assert sum(bool(body.get("idempotent_replay")) for body in bodies) == 1
+    assert calls == ["generate"]
+    with sqlite3.connect(db_path) as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM customers WHERE product_type = 'ctexcel'"
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_concurrent_request_keys_cannot_claim_same_pending_customer(client_api):
+    client, db_path = client_api
+    with sqlite3.connect(db_path) as connection:
+        customer_id = connection.execute(
+            """INSERT INTO customers (product_type, email, activation_date)
+               VALUES ('ctexcel', 'claim-once@example.test', '2026-08-01')"""
+        ).lastrowid
+        connection.commit()
+
+    def claim(key):
+        return client.post(
+            "/api/ctexcel-client/customers",
+            headers=AUTH_HEADERS,
+            json={
+                "reuse_pending": True,
+                "resume_customer_id": customer_id,
+                "request_key": key,
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(
+            executor.map(
+                claim,
+                (
+                    "claim_key_alpha_1234567890",
+                    "claim_key_bravo_1234567890",
+                ),
+            )
+        )
+
+    assert sorted(response.status_code for response in responses) == [201, 409]
+    winner = next(response for response in responses if response.status_code == 201)
+    assert winner.json()["customer_id"] == customer_id
+    with sqlite3.connect(db_path) as connection:
+        owner, locked_at = connection.execute(
+            """SELECT automation_lock_owner, automation_locked_at
+               FROM customers WHERE id = ?""",
+            (customer_id,),
+        ).fetchone()
+    assert owner in {
+        "claim_key_alpha_1234567890",
+        "claim_key_bravo_1234567890",
+    }
+    assert locked_at
+
+
+def test_only_claim_owner_can_release_an_unfinished_customer(client_api):
+    client, db_path = client_api
+    request_key = "release_owner_key_1234567890"
+    with sqlite3.connect(db_path) as connection:
+        customer_id = connection.execute(
+            """INSERT INTO customers (product_type, email, activation_date)
+               VALUES ('ctexcel', 'release@example.test', '2026-08-01')"""
+        ).lastrowid
+        connection.commit()
+
+    claimed = client.post(
+        "/api/ctexcel-client/customers",
+        headers=AUTH_HEADERS,
+        json={
+            "reuse_pending": True,
+            "resume_customer_id": customer_id,
+            "request_key": request_key,
+        },
+    )
+    assert claimed.status_code == 201, claimed.text
+
+    wrong_owner = client.post(
+        f"/api/ctexcel-client/customers/{customer_id}/release",
+        headers=AUTH_HEADERS,
+        json={"request_key": "release_wrong_key_1234567890"},
+    )
+    assert wrong_owner.status_code == 200
+    assert wrong_owner.json()["released"] is False
+
+    released = client.post(
+        f"/api/ctexcel-client/customers/{customer_id}/release",
+        headers=AUTH_HEADERS,
+        json={"request_key": request_key},
+    )
+    assert released.status_code == 200
+    assert released.json()["released"] is True
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            """SELECT automation_lock_owner, automation_locked_at
+               FROM customers WHERE id = ?""",
+            (customer_id,),
+        ).fetchone() == (None, None)
+
+    pending = client.get(
+        "/api/ctexcel-client/customers/pending",
+        headers=AUTH_HEADERS,
+    )
+    assert [item["customer_id"] for item in pending.json()["customers"]] == [
+        customer_id
+    ]
+
+
+def test_verification_provider_http_does_not_block_event_loop(client_api):
+    _client, _db_path = client_api
+
+    class SlowProvider:
+        def get_email_messages(self, _account_id):
+            time.sleep(0.2)
+            return {
+                "messages": [
+                    {
+                        "id": "message-1",
+                        "subject": "Confirm it's you: 123456",
+                        "text": "Your code is 123456",
+                        "receivedAt": "2026-08-01T00:00:00Z",
+                    }
+                ]
+            }
+
+    async def scenario():
+        with patch.object(
+            main,
+            "get_customer",
+            new=AsyncMock(
+                return_value={
+                    "id": 1,
+                    "email": "async@example.test",
+                    "moemail_address": "async@example.test",
+                }
+            ),
+        ), patch.object(
+            main,
+            "_resolve_inbox_provider",
+            new=AsyncMock(return_value=("mailbox-1", SlowProvider())),
+        ):
+            started = time.monotonic()
+            task = asyncio.create_task(main.get_customer_verification_code(1))
+            await asyncio.sleep(0.02)
+            responsive_after = time.monotonic() - started
+            result = await task
+        return responsive_after, result
+
+    responsive_after, result = asyncio.run(scenario())
+    assert responsive_after < 0.1
+    assert result.code == "123456"
+
+
+def test_backup_roundtrip_preserves_ctexcel_completion_state(client_api):
+    client, db_path = client_api
+    with sqlite3.connect(db_path) as connection:
+        customer_id = connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date,
+                ctexcel_registration_confirmed_at,
+                ctexcel_payment_succeeded_at)
+               VALUES ('ctexcel', 'completed@example.test', '2026-08-01',
+                       '2026-08-01T01:00:00Z', '2026-08-01T01:05:00Z')"""
+        ).lastrowid
+        connection.commit()
+
+    payload = asyncio.run(main._export_backup_payload())
+    restored = asyncio.run(main._restore_backup_payload(payload))
+
+    assert restored["customers_restored"] == 1
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """SELECT ctexcel_registration_confirmed_at,
+                      ctexcel_payment_succeeded_at
+               FROM customers WHERE id = ?""",
+            (customer_id,),
+        ).fetchone()
+    assert row == (
+        "2026-08-01T01:00:00Z",
+        "2026-08-01T01:05:00Z",
+    )
+    pending = client.get(
+        "/api/ctexcel-client/customers/pending",
+        headers=AUTH_HEADERS,
+    )
+    assert pending.status_code == 200
+    assert pending.json()["customers"] == []
 
 
 def test_client_reuses_order_checkpoint_without_payment_success(client_api):
@@ -452,6 +683,39 @@ def test_client_payment_checkpoint_persists_success_page_fields(client_api):
             "phone_number": "invalid-phone",
         },
     ).status_code == 400
+
+
+def test_payment_checkpoint_refreshes_active_customer_lease(client_api):
+    client, db_path = client_api
+    with sqlite3.connect(db_path) as connection:
+        customer_id = connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date,
+                automation_lock_owner, automation_locked_at)
+               VALUES ('ctexcel', 'lease-refresh@example.test', '2026-08-01',
+                       'lease_refresh_key_1234567890',
+                       '2026-08-01T00:00:00Z')"""
+        ).lastrowid
+        connection.commit()
+
+    response = client.post(
+        f"/api/ctexcel-client/customers/{customer_id}/payment-checkpoint",
+        headers=AUTH_HEADERS,
+        json={
+            "order_number": "ORDER202608010000000001",
+            "transaction_amount": "1.00",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    with sqlite3.connect(db_path) as connection:
+        owner, locked_at = connection.execute(
+            """SELECT automation_lock_owner, automation_locked_at
+               FROM customers WHERE id = ?""",
+            (customer_id,),
+        ).fetchone()
+    assert owner == "lease_refresh_key_1234567890"
+    assert locked_at != "2026-08-01T00:00:00Z"
 
 
 def test_client_order_sync_endpoint_is_scoped_and_returns_phone(client_api):

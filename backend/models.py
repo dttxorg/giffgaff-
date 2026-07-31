@@ -167,6 +167,15 @@ class CTExcelClientCustomerCreate(BaseModel):
     )
 
 
+class CTExcelClientClaimReleaseRequest(BaseModel):
+    # 只有领取客户时使用的同一请求键才可以主动释放租约。
+    request_key: str = Field(
+        min_length=16,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+
+
 class CTExcelPaymentCheckpointRequest(BaseModel):
     order_number: Optional[str] = Field(default=None, max_length=80)
     transaction_amount: str = Field(min_length=1, max_length=20)

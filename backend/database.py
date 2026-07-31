@@ -110,6 +110,20 @@ async def init_db():
             "ON customers(ctexcel_client_request_key) "
             "WHERE ctexcel_client_request_key IS NOT NULL"
         )
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS ctexcel_client_requests (
+                   request_key TEXT PRIMARY KEY,
+                   state TEXT NOT NULL DEFAULT 'pending',
+                   customer_id INTEGER,
+                   owner_token TEXT NOT NULL,
+                   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+               )"""
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS ix_ctexcel_client_requests_customer "
+            "ON ctexcel_client_requests(customer_id)"
+        )
         await _ensure_column(
             db, "customers", "public_version", "INTEGER NOT NULL DEFAULT 1"
         )

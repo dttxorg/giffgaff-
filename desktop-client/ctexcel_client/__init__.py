@@ -1,3 +1,3 @@
 """CTExcel Windows 申请客户端。"""
 
-__version__ = "2.5.7"
+__version__ = "2.5.8"
