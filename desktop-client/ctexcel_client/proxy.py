@@ -107,7 +107,7 @@ def detect_public_ip(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.5.0",
+                "User-Agent": "CTExcelApplyClient/2.5.1",
             },
         ) as client:
             for endpoint in PUBLIC_IP_ENDPOINTS:
@@ -345,7 +345,7 @@ def fetch_proxy_from_api(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.5.0",
+                "User-Agent": "CTExcelApplyClient/2.5.1",
             },
         ) as client:
             response = client.get(url)
@@ -415,6 +415,14 @@ def resolve_proxy(
             raise ProxyError("请填写青果隧道地址、端口、AuthKey 和 AuthPwd")
         if not config.username.strip() or not config.password:
             raise ProxyError("请填写青果隧道 AuthKey 和 AuthPwd")
+        tunnel_host = urlsplit(result["server"]).hostname or ""
+        if not (
+            tunnel_host.lower().startswith("tun-")
+            and tunnel_host.lower().endswith(".qg.net")
+        ):
+            raise ProxyError(
+                "青果隧道地址应为 tun-*.qg.net；当前地址不是青果隧道入口"
+            )
         return result
     if mode != "custom":
         raise ProxyError(f"未知代理模式：{config.mode}")
@@ -513,7 +521,7 @@ def _probe_http_connect(
         headers.append(f"Proxy-Authorization: Basic {token}")
     sock.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("ascii"))
     response = bytearray()
-    while b"\r\n\r\n" not in response and len(response) < 16384:
+    while b"\r\n" not in response and len(response) < 16384:
         chunk = sock.recv(512)
         if not chunk:
             break
@@ -523,20 +531,24 @@ def _probe_http_connect(
         "latin-1",
         "replace",
     )
-    if not re.match(r"HTTP/\d(?:\.\d)?\s+200\b", first_line):
-        while len(response) < 16384:
+    if re.match(r"HTTP/\d(?:\.\d)?\s+200\b", first_line):
+        return
+    while len(response) < 16384:
+        try:
             chunk = sock.recv(512)
-            if not chunk:
-                break
-            response.extend(chunk)
-        body = bytes(response).partition(b"\r\n\r\n")[2]
-        detail = " ".join(
-            body.decode("utf-8", "replace").split()
-        )[:500]
-        message = f"HTTP 代理 CONNECT 返回 {first_line}"
-        if detail:
-            message += f"：{detail}"
-        raise ProxyError(message)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        response.extend(chunk)
+    body = bytes(response).partition(b"\r\n\r\n")[2]
+    detail = " ".join(
+        body.decode("utf-8", "replace").split()
+    )[:500]
+    message = f"HTTP 代理 CONNECT 返回 {first_line}"
+    if detail:
+        message += f"：{detail}"
+    raise ProxyError(message)
 
 
 def probe_proxy_endpoint(
@@ -781,6 +793,7 @@ def prepare_proxy(
     config: ProxyConfig,
     *,
     resolved_proxy: Optional[dict[str, str]] = None,
+    probe_tunnel: bool = False,
 ) -> PreparedProxy:
     """提取、检测公网 IP，并在创建客户前验证代理。"""
     api_mode = config.mode.strip().lower() == "api"
@@ -799,7 +812,8 @@ def prepare_proxy(
             if resolved_proxy is not None
             else resolve_proxy(config)
         )
-        if playwright_proxy and config.mode.strip().lower() != "tunnel":
+        tunnel_mode = config.mode.strip().lower() == "tunnel"
+        if playwright_proxy and (not tunnel_mode or probe_tunnel):
             probe_proxy_endpoint(playwright_proxy)
     except ProxyError as exc:
         details = [str(exc)]

@@ -1152,14 +1152,18 @@ class MainWindow(QMainWindow):
             return
 
         def action() -> dict[str, str]:
-            prepared = prepare_proxy(config.proxy)
+            prepared = prepare_proxy(config.proxy, probe_tunnel=True)
             return {
                 "label": masked_proxy_label(prepared.playwright_proxy),
                 "public_ip": prepared.public_ip,
                 "public_ip_error": prepared.public_ip_error,
             }
 
-        self.proxy_status.setText("正在提取并验证代理连接……")
+        self.proxy_status.setText(
+            "正在验证青果隧道到 CTExcel 的真实 CONNECT……"
+            if config.proxy.mode == "tunnel"
+            else "正在提取并验证代理连接……"
+        )
         if config.proxy.mode == "api":
             self._set_public_ip(error="检测中……")
         self.proxy_test_btn.setEnabled(False)

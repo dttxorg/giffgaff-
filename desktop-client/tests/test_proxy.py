@@ -348,6 +348,19 @@ def test_qg_tunnel_requires_connection_credentials():
         resolve_proxy(config)
 
 
+def test_qg_tunnel_rejects_old_non_qg_proxy_host():
+    config = ProxyConfig(
+        mode="tunnel",
+        host="us.old-proxy.example",
+        port="3010",
+        username="auth-key",
+        password="auth-password",
+    )
+
+    with pytest.raises(ProxyError, match=r"tun-\*\.qg\.net"):
+        resolve_proxy(config)
+
+
 def test_qg_tunnel_prepare_skips_separate_connect_probe(monkeypatch):
     config = ProxyConfig(
         mode="tunnel",
@@ -372,6 +385,25 @@ def test_qg_tunnel_prepare_skips_separate_connect_probe(monkeypatch):
         "username": "auth-key",
         "password": "auth-password",
     }
+
+
+def test_qg_tunnel_test_button_can_request_real_connect_probe(monkeypatch):
+    config = ProxyConfig(
+        mode="tunnel",
+        host="tun-example.qg.net",
+        port="14600",
+        username="auth-key",
+        password="auth-password",
+    )
+    probes = []
+    monkeypatch.setattr(
+        "ctexcel_client.proxy.probe_proxy_endpoint",
+        lambda proxy: probes.append(proxy),
+    )
+
+    prepared = prepare_proxy(config, probe_tunnel=True)
+
+    assert probes == [prepared.playwright_proxy]
 
 
 class FakeSocket:
@@ -484,6 +516,26 @@ def test_http_proxy_probe_uses_connect_and_optional_auth(monkeypatch):
     )
     assert "Proxy-Authorization: Basic " in request
     assert "proxy-pass" not in request
+
+
+def test_http_proxy_probe_accepts_qg_single_line_connect_response(monkeypatch):
+    fake_socket = FakeSocket(
+        [b"HTTP/1.1 200 Connection established\r\n"]
+    )
+    monkeypatch.setattr(
+        "ctexcel_client.proxy.socket.create_connection",
+        lambda *_args, **_kwargs: fake_socket,
+    )
+
+    probe_proxy_endpoint(
+        {
+            "server": "http://tun-example.qg.net:14600",
+            "username": "auth-key",
+            "password": "auth-password",
+        }
+    )
+
+    assert fake_socket.sent
 
 
 def test_http_proxy_probe_surfaces_actual_407_detail(monkeypatch):
