@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 APP_NAME = "CTExcelApplyClient"
@@ -25,9 +25,38 @@ DEFAULT_APPLICATION_URL = (
 )
 FREECARD_APPLICATION_URL = "https://www.ctexcel.com/freecard/home"
 DEFAULT_PROXY_API_URL = (
-    "https://api.cliproxy.io/white/api"
-    "?region=Rand&num=1&time=10&format=n&type=txt"
+    "https://share.proxy.qg.net/get?num=1&distinct=true"
 )
+
+
+def is_qg_proxy_api_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(str(value or "").strip())
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and (parsed.hostname or "").lower() == "share.proxy.qg.net"
+        and parsed.path.rstrip("/").lower() == "/get"
+    )
+
+
+def split_qg_proxy_api_key(value: str) -> tuple[str, str]:
+    """Remove an embedded QG key so it can be stored as a protected secret."""
+    raw = str(value or "").strip()
+    if not is_qg_proxy_api_url(raw):
+        return raw, ""
+    parsed = urlsplit(raw)
+    query_items = parse_qsl(parsed.query, keep_blank_values=True)
+    api_key = ""
+    filtered: list[tuple[str, str]] = []
+    for name, item_value in query_items:
+        if name == "key":
+            api_key = item_value.strip()
+        else:
+            filtered.append((name, item_value))
+    sanitized = urlunsplit(parsed._replace(query=urlencode(filtered)))
+    return sanitized, api_key
 
 
 def is_cliproxy_whitelist_url(value: str) -> bool:
@@ -149,6 +178,7 @@ class ProxyConfig:
     username: str = ""
     password: str = ""
     api_url: str = DEFAULT_PROXY_API_URL
+    api_key: str = ""
     api_timeout_seconds: int = 20
 
     def effective_proxy_type(self) -> str:
@@ -228,7 +258,7 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
         key: value
         for key, value in proxy_raw.items()
         if key in ProxyConfig.__dataclass_fields__
-        and key not in {"password", "pool"}
+        and key not in {"password", "pool", "api_key"}
     }
     proxy_values["password"] = unprotect_secret(
         str(proxy_raw.get("password_protected") or "")
@@ -241,6 +271,12 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
     )
     if not proxy_values["pool"]:
         proxy_values["pool"] = str(proxy_raw.get("pool") or "")
+    proxy_values["api_key"] = unprotect_secret(
+        str(proxy_raw.get("api_key_protected") or "")
+    )
+    # 兼容内部开发配置；下一次保存时迁移为 DPAPI 密文。
+    if not proxy_values["api_key"]:
+        proxy_values["api_key"] = str(proxy_raw.get("api_key") or "")
     for key, default in (("pool_uses_min", 5), ("pool_uses_max", 8)):
         try:
             proxy_values[key] = min(
@@ -255,6 +291,9 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
             proxy_values["pool_uses_min"],
         )
     proxy = ProxyConfig(**proxy_values)
+    proxy.api_url, embedded_api_key = split_qg_proxy_api_key(proxy.api_url)
+    if not proxy.api_key:
+        proxy.api_key = embedded_api_key
     # 2.0.6 以前保存过 HTTP 时，Cliproxy 白名单接口会被错误地按 HTTP 使用。
     if proxy.mode == "api" and is_cliproxy_whitelist_url(proxy.api_url):
         proxy.proxy_type = "socks5"
@@ -351,6 +390,12 @@ def save_config(config: AppConfig, path: Optional[Path] = None) -> None:
     proxy_raw = raw.get("proxy") if isinstance(raw.get("proxy"), dict) else {}
     proxy_raw.pop("password", None)
     proxy_raw.pop("pool", None)
+    proxy_raw.pop("api_key", None)
+    sanitized_api_url, embedded_api_key = split_qg_proxy_api_key(
+        config.proxy.api_url
+    )
+    proxy_raw["api_url"] = sanitized_api_url
+    api_key = config.proxy.api_key or embedded_api_key
     telegram_raw = (
         raw.get("telegram")
         if isinstance(raw.get("telegram"), dict)
@@ -361,6 +406,7 @@ def save_config(config: AppConfig, path: Optional[Path] = None) -> None:
         raw["app_password_protected"] = protect_secret(config.app_password)
         proxy_raw["password_protected"] = protect_secret(config.proxy.password)
         proxy_raw["pool_protected"] = protect_secret(config.proxy.pool)
+        proxy_raw["api_key_protected"] = protect_secret(api_key)
         telegram_raw["bot_token_protected"] = protect_secret(
             config.telegram.bot_token
         )
@@ -368,6 +414,7 @@ def save_config(config: AppConfig, path: Optional[Path] = None) -> None:
         raw["app_password_protected"] = ""
         proxy_raw["password_protected"] = ""
         proxy_raw["pool_protected"] = ""
+        proxy_raw["api_key_protected"] = ""
         telegram_raw["bot_token_protected"] = ""
     target.write_text(
         json.dumps(raw, ensure_ascii=False, indent=2),

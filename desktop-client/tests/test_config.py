@@ -9,8 +9,15 @@ from ctexcel_client.config import (
     PURCHASE_ROUTE_FREECARD,
     RegistrationDefaults,
     TelegramConfig,
+    is_qg_proxy_api_url,
     load_config,
     save_config,
+)
+
+
+LEGACY_CLIPROXY_API_URL = (
+    "https://api.cliproxy.io/white/api"
+    "?region=Rand&num=1&time=10&format=n&type=txt"
 )
 
 
@@ -43,6 +50,7 @@ def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
         remember_credentials=True,
         proxy=ProxyConfig(
             password="super-secret-proxy-password",
+            api_key="super-secret-qg-key",
             pool=(
                 "proxy.example.test:3010:"
                 "super-secret-pool-user:super-secret-pool-password"
@@ -61,6 +69,7 @@ def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
     raw = target.read_text(encoding="utf-8")
     assert "super-secret-password" not in raw
     assert "super-secret-proxy-password" not in raw
+    assert "super-secret-qg-key" not in raw
     assert "super-secret-pool-user" not in raw
     assert "super-secret-pool-password" not in raw
     assert "fixed shipping address" in raw
@@ -68,7 +77,30 @@ def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
         loaded = load_config(target)
         assert loaded.app_password == "super-secret-password"
         assert loaded.proxy.password == "super-secret-proxy-password"
+        assert loaded.proxy.api_key == "super-secret-qg-key"
         assert "super-secret-pool-user" in loaded.proxy.pool
+
+
+def test_qg_key_embedded_in_url_is_removed_before_config_write(tmp_path: Path):
+    target = tmp_path / "config.json"
+    secret = "embedded-secret-qg-key"
+    config = AppConfig(
+        remember_credentials=True,
+        proxy=ProxyConfig(
+            mode="api",
+            api_url=(
+                "https://share.proxy.qg.net/get"
+                f"?key={secret}&area=350500&num=1&distinct=true"
+            ),
+        ),
+    )
+
+    save_config(config, target)
+
+    raw = target.read_text(encoding="utf-8")
+    assert secret not in raw
+    assert "key=" not in raw
+    assert "area=350500" in raw
 
 
 def test_proxy_ui_exposes_fixed_and_dynamic_socks5_modes():
@@ -91,6 +123,8 @@ def test_proxy_ui_exposes_fixed_and_dynamic_socks5_modes():
     assert "当前出口公网 IP" in source
     assert "background-color: #ffffff" in source
     assert "Qt.TextSelectableByMouse" in source
+    assert "青果代理 API Key" in source
+    assert is_qg_proxy_api_url(DEFAULT_PROXY_API_URL)
 
 
 def test_old_cliproxy_http_setting_migrates_to_socks5(tmp_path: Path):
@@ -105,7 +139,7 @@ def test_old_cliproxy_http_setting_migrates_to_socks5(tmp_path: Path):
           }
         }
         """
-        % DEFAULT_PROXY_API_URL,
+        % LEGACY_CLIPROXY_API_URL,
         encoding="utf-8",
     )
 

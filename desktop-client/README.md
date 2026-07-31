@@ -51,7 +51,11 @@
 - 浏览器操作最低间隔 800ms，加载遮罩最长等待 90 秒
 - 自动识别并点击新版及旧版 Usercentrics 隐私弹窗中的“拒绝”
 
-姓名、联系电话和中国收货地址在客户端设置里配置一次。客户邮箱始终由
+姓名、联系电话区间和中国收货地址在客户端设置里配置一次。联系电话填写起始
+号码和结束号码后，会按第 1 单、第 2 单依次递增；结束号码留空时继续复用起始
+号码。地址由“固定中国收货地址 + 地址尾号”组成，尾号默认从 1 递增到 1000。
+例如固定地址以 `1111` 结尾时，第 1 单到第 3 单会依次使用 `11111`、`11112`、
+`11113`。客户邮箱始终由
 客户管理系统新建客户时生成。
 
 ### 浏览器兼容模式
@@ -148,11 +152,32 @@ GitHub Actions 的 `windows-client.yml` 也会生成同名构建产物。
 次数可在界面调整。多线程会共用同一个线程安全的轮换计数器，每单日志都会显示
 节点序号和当前使用次数。
 
-默认动态提取接口示例：
+默认动态提取接口已切换为青果短效代理弹性提取：
 
 ```text
-https://api.cliproxy.io/white/api?region=Rand&num=1&time=10&format=n&type=txt
+https://share.proxy.qg.net/get?num=1&distinct=true
 ```
+
+在界面中单独填写产品 `key`；Windows 会用 DPAPI 加密保存，日志与接口错误中
+均不会输出该值。地区、排除地区和运营商筛选可继续追加到提取接口 URL，例如：
+
+```text
+https://share.proxy.qg.net/get?area=350500,330700&area_ex=440100&isp=1&num=1&distinct=true
+```
+
+也兼容服务商控制台生成的 TXT 链接，例如：
+
+```text
+https://share.proxy.qg.net/get?num=1&area=360000&isp=0&format=txt&seq=\r\n&distinct=false
+```
+
+`format=txt` 响应按首行 `HOST:PORT` 解析；默认 JSON 响应仍按
+`data[0].server` 解析。链接中的 `key` 会在保存配置时自动拆出并加密，URL
+本身不会保留 Key 明文。
+
+客户端从响应 `data[0].server` 读取实际代理入口，不会把 `proxy_ip` 当作连接
+地址。`code` 非 `SUCCESS` 时会显示对应错误说明和 `request_id`，便于定位
+鉴权、60 次/分钟频控、资源不足及每日提取配额问题。
 
 接口可以返回以下任一种格式，客户端会自动拆分地址、端口、账号和密码：
 
@@ -163,8 +188,9 @@ USERNAME:PASSWORD@HOST:PORT
 socks5://USERNAME:PASSWORD@HOST:PORT
 ```
 
-Cliproxy 白名单接口会自动锁定为 SOCKS5，旧版本保存的 HTTP 选项也会迁移，
-无需逐项填写代理账号和密码。固定代理可以粘贴整行，或点击“从剪贴板导入”。
+历史 Cliproxy 白名单接口仍会自动锁定为 SOCKS5，旧版本保存的 HTTP 选项也会
+迁移。青果节点协议以所购产品为准，在界面选择 HTTP、HTTPS 或 SOCKS5。
+固定代理可以粘贴整行，或点击“从剪贴板导入”。
 带账号密码的 SOCKS5 会自动启用仅监听 `127.0.0.1` 的本地认证桥接，解决
 Chrome / Edge 不接受 Playwright SOCKS5 认证参数的问题；上游账号密码不会
 传给网页。

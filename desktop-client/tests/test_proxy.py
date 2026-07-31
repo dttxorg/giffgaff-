@@ -18,6 +18,12 @@ from ctexcel_client.proxy import (
 )
 
 
+LEGACY_CLIPROXY_API_URL = (
+    "https://api.cliproxy.io/white/api"
+    "?region=Rand&num=1&time=10&format=n&type=txt"
+)
+
+
 def test_plain_text_proxy_api_defaults_to_socks5():
     proxy = parse_proxy_payload("203.0.113.10:1080\n")
 
@@ -152,7 +158,7 @@ def test_cliproxy_whitelist_api_is_always_treated_as_socks5():
     config = ProxyConfig(
         mode="api",
         proxy_type="http",
-        api_url=DEFAULT_PROXY_API_URL,
+        api_url=LEGACY_CLIPROXY_API_URL,
     )
 
     assert resolve_proxy(
@@ -163,6 +169,116 @@ def test_cliproxy_whitelist_api_is_always_treated_as_socks5():
         "username": "proxy-user",
         "password": "proxy-password",
     }
+
+
+def test_qg_proxy_api_injects_key_and_uses_data_server():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "code": "SUCCESS",
+                "data": [
+                    {
+                        "proxy_ip": "198.51.100.24",
+                        "server": "proxy-node.example.test:59419",
+                        "area": "测试省测试市",
+                        "isp": "电信",
+                        "deadline": "2026-07-31 15:38:36",
+                    }
+                ],
+                "request_id": "request-success-1",
+            },
+        )
+
+    config = ProxyConfig(
+        mode="api",
+        proxy_type="http",
+        api_url=(
+            "https://share.proxy.qg.net/get"
+            "?area=350500%2C330700&isp=1&distinct=true"
+        ),
+        api_key="secret-qg-key",
+    )
+
+    proxy = resolve_proxy(config, transport=httpx.MockTransport(handler))
+
+    assert proxy == {"server": "http://proxy-node.example.test:59419"}
+    assert len(calls) == 1
+    assert calls[0].url.params["key"] == "secret-qg-key"
+    assert calls[0].url.params["num"] == "1"
+    assert calls[0].url.params["area"] == "350500,330700"
+
+
+def test_qg_proxy_api_accepts_txt_format_and_preserves_parameters():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, text="proxy-txt.example.test:59419\r\n")
+
+    config = ProxyConfig(
+        mode="api",
+        proxy_type="http",
+        api_url=(
+            "https://share.proxy.qg.net/get"
+            "?num=1&area=360000&isp=0&format=txt"
+            "&seq=%5Cr%5Cn&distinct=false"
+        ),
+        api_key="sample-qg-key",
+    )
+
+    proxy = resolve_proxy(config, transport=httpx.MockTransport(handler))
+
+    assert proxy == {"server": "http://proxy-txt.example.test:59419"}
+    assert len(calls) == 1
+    assert calls[0].url.params["key"] == "sample-qg-key"
+    assert calls[0].url.params["num"] == "1"
+    assert calls[0].url.params["area"] == "360000"
+    assert calls[0].url.params["isp"] == "0"
+    assert calls[0].url.params["format"] == "txt"
+    assert calls[0].url.params["seq"] == r"\r\n"
+    assert calls[0].url.params["distinct"] == "false"
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("REQUEST_LIMIT_EXCEEDED", "60 次/分钟"),
+        ("EXTRACT_LIMIT_EXCEEDED", "今日 IP 提取配额已用完"),
+        ("INVALID_KEY", "API Key 不存在或已过期"),
+    ],
+)
+def test_qg_proxy_api_maps_error_code_and_request_id(code, expected):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": code, "data": [], "request_id": "request-error-1"},
+        )
+
+    config = ProxyConfig(
+        mode="api",
+        api_url=DEFAULT_PROXY_API_URL,
+        api_key="secret-qg-key",
+    )
+
+    with pytest.raises(ProxyError) as exc_info:
+        resolve_proxy(config, transport=httpx.MockTransport(handler))
+
+    message = str(exc_info.value)
+    assert expected in message
+    assert code in message
+    assert "request-error-1" in message
+    assert "secret-qg-key" not in message
+
+
+def test_qg_proxy_api_requires_key_before_request():
+    config = ProxyConfig(mode="api", api_url=DEFAULT_PROXY_API_URL)
+
+    with pytest.raises(ProxyError, match="请填写青果代理 API Key"):
+        resolve_proxy(config)
 
 
 def test_public_ip_detection_accepts_json_response():
@@ -333,7 +449,7 @@ def test_proxy_api_http_error_does_not_echo_secret_url():
 def test_prepare_proxy_adds_detected_public_ip_to_whitelist_error(
     monkeypatch,
 ):
-    config = ProxyConfig(mode="api", api_url=DEFAULT_PROXY_API_URL)
+    config = ProxyConfig(mode="api", api_url=LEGACY_CLIPROXY_API_URL)
     monkeypatch.setattr(
         "ctexcel_client.proxy.detect_public_ip",
         lambda: "8.8.8.8",

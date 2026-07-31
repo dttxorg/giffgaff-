@@ -14,11 +14,11 @@ import ssl
 import struct
 import threading
 from typing import Any, Optional
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
-from .config import ProxyConfig
+from .config import ProxyConfig, is_qg_proxy_api_url
 
 
 class ProxyError(RuntimeError):
@@ -46,6 +46,20 @@ PUBLIC_IP_ENDPOINTS = (
     "https://checkip.amazonaws.com",
     "https://1.1.1.1/cdn-cgi/trace",
 )
+
+QG_PROXY_ERROR_MESSAGES = {
+    "INTERNAL_ERROR": "代理平台内部异常",
+    "INVALID_PARAMETER": "提取参数格式或类型错误",
+    "INVALID_KEY": "API Key 不存在或已过期",
+    "UNAVAILABLE_KEY": "API Key 已过期或被封禁",
+    "ACCESS_DENY": "API Key 没有提取接口权限",
+    "API_AUTH_DENY": "API 鉴权配置未通过",
+    "KEY_BLOCK": "API Key 已被封禁",
+    "REQUEST_LIMIT_EXCEEDED": "请求频率超过 60 次/分钟",
+    "NO_RESOURCE_FOUND": "当前筛选条件下代理资源不足",
+    "FAILED_OPERATION": "代理提取操作失败",
+    "EXTRACT_LIMIT_EXCEEDED": "今日 IP 提取配额已用完",
+}
 
 
 def _valid_public_ip(value: str) -> str:
@@ -310,6 +324,16 @@ def fetch_proxy_from_api(
     url = config.api_url.strip()
     if not url.startswith(("https://", "http://")):
         raise ProxyError("代理提取接口需要以 https:// 或 http:// 开头")
+    qg_api = is_qg_proxy_api_url(url)
+    if qg_api:
+        parsed = urlsplit(url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        api_key = config.api_key.strip() or str(query.get("key") or "").strip()
+        if not api_key:
+            raise ProxyError("请填写青果代理 API Key")
+        query["key"] = api_key
+        query.setdefault("num", "1")
+        url = urlunsplit(parsed._replace(query=urlencode(query)))
     try:
         with httpx.Client(
             timeout=max(3, int(config.api_timeout_seconds)),
@@ -331,6 +355,34 @@ def fetch_proxy_from_api(
         ) from exc
     except httpx.RequestError as exc:
         raise ProxyError("代理接口网络连接失败") from exc
+    if qg_api:
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, ValueError):
+            # format=txt 时成功响应就是 HOST:PORT；继续交给通用解析器。
+            payload = None
+        if payload is not None:
+            if not isinstance(payload, dict):
+                raise ProxyError("青果代理接口返回结构错误")
+            code = str(payload.get("code") or "").strip()
+            request_id = str(payload.get("request_id") or "").strip()
+            request_suffix = (
+                f"，request_id: {request_id}" if request_id else ""
+            )
+            if code != "SUCCESS":
+                detail = QG_PROXY_ERROR_MESSAGES.get(
+                    code,
+                    "代理提取失败",
+                )
+                raise ProxyError(
+                    f"{detail}（{code or 'UNKNOWN'}{request_suffix}）"
+                )
+            if not isinstance(payload.get("data"), list) or not payload["data"]:
+                raise ProxyError(
+                    "青果代理接口未返回 IP 资源"
+                    f"（SUCCESS{request_suffix}）"
+                )
+
     return parse_proxy_payload(
         response.text,
         default_scheme=config.effective_proxy_type(),
