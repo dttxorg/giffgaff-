@@ -198,16 +198,18 @@ class ProxyConfig:
             return "socks5"
         if self.mode == "api" and is_qg_proxy_api_url(self.api_url):
             return "http"
+        if self.mode == "tunnel":
+            return "http"
         return self.proxy_type.strip().lower() or "socks5"
 
     def playwright_proxy(self) -> Optional[dict[str, str]]:
-        if self.mode != "custom":
+        if self.mode not in {"custom", "tunnel"}:
             return None
         host = self.host.strip()
         port = self.port.strip()
         if not host or not port:
             return None
-        proxy_type = self.proxy_type.strip().lower()
+        proxy_type = self.effective_proxy_type()
         if proxy_type not in {"http", "https", "socks5"}:
             return None
         if not port.isdigit() or not (1 <= int(port) <= 65535):

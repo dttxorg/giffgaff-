@@ -107,7 +107,7 @@ def detect_public_ip(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.4.4",
+                "User-Agent": "CTExcelApplyClient/2.4.5",
             },
         ) as client:
             for endpoint in PUBLIC_IP_ENDPOINTS:
@@ -345,7 +345,7 @@ def fetch_proxy_from_api(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.4.4",
+                "User-Agent": "CTExcelApplyClient/2.4.5",
             },
         ) as client:
             response = client.get(url)
@@ -409,6 +409,13 @@ def resolve_proxy(
             config.pool,
             default_scheme=config.effective_proxy_type(),
         )[0]
+    if mode == "tunnel":
+        result = config.playwright_proxy()
+        if not result:
+            raise ProxyError("请填写青果隧道地址、端口、AuthKey 和 AuthPwd")
+        if not config.username.strip() or not config.password:
+            raise ProxyError("请填写青果隧道 AuthKey 和 AuthPwd")
+        return result
     if mode != "custom":
         raise ProxyError(f"未知代理模式：{config.mode}")
     result = config.playwright_proxy()
@@ -792,7 +799,7 @@ def prepare_proxy(
             if resolved_proxy is not None
             else resolve_proxy(config)
         )
-        if playwright_proxy:
+        if playwright_proxy and config.mode.strip().lower() != "tunnel":
             probe_proxy_endpoint(playwright_proxy)
     except ProxyError as exc:
         details = [str(exc)]

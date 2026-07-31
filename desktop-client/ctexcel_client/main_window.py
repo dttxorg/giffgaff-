@@ -360,7 +360,9 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(8)
 
         self.proxy_mode = QComboBox()
-        self.proxy_mode.addItem("青果网络 · 每浏览器独立 IP", "api")
+        self.proxy_mode.addItem("直连（不使用代理）", "none")
+        self.proxy_mode.addItem("青果短效代理 · API 提取", "api")
+        self.proxy_mode.addItem("青果隧道代理 · 固定入口", "tunnel")
         self.proxy_mode.currentIndexChanged.connect(self._update_proxy_fields)
 
         self.proxy_type = QComboBox()
@@ -399,7 +401,7 @@ class MainWindow(QMainWindow):
         self.proxy_pool_uses_max.setValue(8)
 
         self.proxy_host = QLineEdit()
-        self.proxy_host.setPlaceholderText("代理主机或 IP")
+        self.proxy_host.setPlaceholderText("例如 tun-xxxxxx.qg.net")
         self.proxy_port = QLineEdit()
         self.proxy_port.setPlaceholderText("端口")
         self.proxy_username = QLineEdit()
@@ -423,8 +425,8 @@ class MainWindow(QMainWindow):
         )
         self.proxy_pool_uses_min_label = self._field_label("每个代理最少使用")
         self.proxy_pool_uses_max_label = self._field_label("每个代理最多使用")
-        self.proxy_host_label = self._field_label("已解析地址")
-        self.proxy_port_label = self._field_label("已解析端口")
+        self.proxy_host_label = self._field_label("隧道地址")
+        self.proxy_port_label = self._field_label("隧道端口")
         self.proxy_username_label = self._field_label("已解析账号")
         self.proxy_password_label = self._field_label("已解析密码")
         self.proxy_api_url_label = self._field_label("青果完整提取链接")
@@ -869,10 +871,11 @@ class MainWindow(QMainWindow):
         custom = mode == "custom"
         pool_mode = mode == "pool"
         api_mode = mode == "api"
+        tunnel_mode = mode == "tunnel"
         self._sync_proxy_protocol()
 
         for widget in (self.proxy_type_label, self.proxy_type):
-            widget.setVisible(custom or pool_mode or api_mode)
+            widget.setVisible(custom or pool_mode or api_mode or tunnel_mode)
         for widget in (
             self.proxy_import_label,
             self.proxy_import,
@@ -895,22 +898,30 @@ class MainWindow(QMainWindow):
             self.proxy_port_label,
             self.proxy_port,
         ):
-            widget.setVisible(custom)
+            widget.setVisible(custom or tunnel_mode)
         for widget in (
             self.proxy_username_label,
             self.proxy_username,
             self.proxy_password_label,
             self.proxy_password,
         ):
-            widget.setVisible(custom or api_mode)
+            widget.setVisible(custom or api_mode or tunnel_mode)
         for widget in (self.proxy_api_url_label, self.proxy_api_url):
             widget.setVisible(api_mode)
         qg_api = api_mode and is_qg_proxy_api_url(self.proxy_api_url.text())
         self.proxy_username_label.setText(
-            "Authkey（代理连接账号）" if qg_api else "代理账号（可选）"
+            "AuthKey（隧道认证账号）"
+            if tunnel_mode
+            else (
+                "Authkey（代理连接账号）" if qg_api else "代理账号（可选）"
+            )
         )
         self.proxy_password_label.setText(
-            "Authpwd（代理连接密码）" if qg_api else "代理密码（可选）"
+            "AuthPwd（隧道认证密码）"
+            if tunnel_mode
+            else (
+                "Authpwd（代理连接密码）" if qg_api else "代理密码（可选）"
+            )
         )
         for widget in (self.public_ip_status, self.copy_public_ip_btn):
             widget.setVisible(api_mode and not qg_api)
@@ -929,6 +940,12 @@ class MainWindow(QMainWindow):
                 "自动切换到下一个"
             )
             self.proxy_test_btn.setText("测试代理池")
+        elif tunnel_mode:
+            self.proxy_status.setText(
+                "固定隧道入口无需调用 /get；每个浏览器建立独立连接，"
+                "由青果自动分配出口 IP"
+            )
+            self.proxy_test_btn.setText("测试隧道")
         else:
             if qg_api:
                 self.proxy_status.setText(
@@ -948,11 +965,20 @@ class MainWindow(QMainWindow):
         qg_api = mode == "api" and is_qg_proxy_api_url(
             self.proxy_api_url.text()
         )
+        tunnel_mode = mode == "tunnel"
         self.proxy_username_label.setText(
-            "Authkey（代理连接账号）" if qg_api else "代理账号（可选）"
+            "AuthKey（隧道认证账号）"
+            if tunnel_mode
+            else (
+                "Authkey（代理连接账号）" if qg_api else "代理账号（可选）"
+            )
         )
         self.proxy_password_label.setText(
-            "Authpwd（代理连接密码）" if qg_api else "代理密码（可选）"
+            "AuthPwd（隧道认证密码）"
+            if tunnel_mode
+            else (
+                "Authpwd（代理连接密码）" if qg_api else "代理密码（可选）"
+            )
         )
         for widget in (self.public_ip_status, self.copy_public_ip_btn):
             widget.setVisible(mode == "api" and not qg_api)
@@ -1005,6 +1031,7 @@ class MainWindow(QMainWindow):
 
     def _sync_proxy_protocol(self) -> None:
         mode = str(self.proxy_mode.currentData() or "none")
+        qg_tunnel = mode == "tunnel"
         qg_api = (
             mode == "api"
             and is_qg_proxy_api_url(self.proxy_api_url.text())
@@ -1013,8 +1040,8 @@ class MainWindow(QMainWindow):
             mode == "api"
             and is_cliproxy_whitelist_url(self.proxy_api_url.text())
         )
-        if qg_api or cliproxy:
-            required_type = "http" if qg_api else "socks5"
+        if qg_api or qg_tunnel or cliproxy:
+            required_type = "http" if (qg_api or qg_tunnel) else "socks5"
             index = self.proxy_type.findData(required_type)
             if index >= 0 and self.proxy_type.currentIndex() != index:
                 self.proxy_type.blockSignals(True)
@@ -1023,7 +1050,7 @@ class MainWindow(QMainWindow):
             self.proxy_type.setEnabled(False)
             self.proxy_type.setToolTip(
                 "青果短效代理节点按 HTTP 使用"
-                if qg_api
+                if (qg_api or qg_tunnel)
                 else "该白名单提取接口会自动按 SOCKS5 使用"
             )
         else:

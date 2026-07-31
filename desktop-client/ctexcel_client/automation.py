@@ -405,15 +405,11 @@ class CTExcelAutomation:
             elif prepared_proxy.public_ip_error:
                 self.log(prepared_proxy.public_ip_error)
             if notification_proxy:
-                source = (
-                    "动态提取"
-                    if self.config.proxy.mode == "api"
-                    else (
-                        "代理池"
-                        if self.config.proxy.mode == "pool"
-                        else "固定配置"
-                    )
-                )
+                source = {
+                    "api": "动态提取",
+                    "tunnel": "青果隧道",
+                    "pool": "代理池",
+                }.get(self.config.proxy.mode, "固定配置")
                 self.log(
                     f"{source}代理已就绪："
                     f"{masked_proxy_label(notification_proxy)}"
@@ -656,10 +652,16 @@ class CTExcelAutomation:
                     max(5000, int(self.config.page_timeout_ms))
                 )
                 if browser_proxy:
-                    self.log(
-                        "青果代理已通过 CTExcel 端口预检；"
-                        "跳过第三方 IP 检测并直接进入注册"
-                    )
+                    if self.config.proxy.mode == "tunnel":
+                        self.log(
+                            "青果隧道已载入浏览器；跳过独立连通性和第三方 "
+                            "IP 检测，直接进入注册"
+                        )
+                    else:
+                        self.log(
+                            "青果代理已通过 CTExcel 端口预检；"
+                            "跳过第三方 IP 检测并直接进入注册"
+                        )
                 if self.browser_start_barrier is not None:
                     self.stage("等待并发窗口就绪")
                     self.log("浏览器已就绪，等待首批并发窗口")

@@ -319,6 +319,61 @@ def test_fixed_socks5_proxy_uses_optional_credentials():
     }
 
 
+def test_qg_tunnel_uses_fixed_http_gateway_and_credentials():
+    config = ProxyConfig(
+        mode="tunnel",
+        proxy_type="socks5",
+        host="tun-example.qg.net",
+        port="14600",
+        username="auth-key",
+        password="auth-password",
+    )
+
+    assert resolve_proxy(config) == {
+        "server": "http://tun-example.qg.net:14600",
+        "username": "auth-key",
+        "password": "auth-password",
+    }
+    assert config.effective_proxy_type() == "http"
+
+
+def test_qg_tunnel_requires_connection_credentials():
+    config = ProxyConfig(
+        mode="tunnel",
+        host="tun-example.qg.net",
+        port="14600",
+    )
+
+    with pytest.raises(ProxyError, match="AuthKey 和 AuthPwd"):
+        resolve_proxy(config)
+
+
+def test_qg_tunnel_prepare_skips_separate_connect_probe(monkeypatch):
+    config = ProxyConfig(
+        mode="tunnel",
+        host="tun-example.qg.net",
+        port="14600",
+        username="auth-key",
+        password="auth-password",
+    )
+
+    def unexpected_probe(_proxy):
+        raise AssertionError("tunnel should be loaded directly by browser")
+
+    monkeypatch.setattr(
+        "ctexcel_client.proxy.probe_proxy_endpoint",
+        unexpected_probe,
+    )
+
+    prepared = prepare_proxy(config)
+
+    assert prepared.playwright_proxy == {
+        "server": "http://tun-example.qg.net:14600",
+        "username": "auth-key",
+        "password": "auth-password",
+    }
+
+
 class FakeSocket:
     def __init__(self, responses: list[bytes]):
         self.responses = list(responses)
