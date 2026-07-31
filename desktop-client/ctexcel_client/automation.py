@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import contextlib
-import json
 from pathlib import Path
 import re
 import shutil
@@ -45,7 +44,6 @@ ORDER_PATTERN = re.compile(
     r"\b(?:ORDER\d{12,}|ORDERSUK\d{12,})\b",
     re.I,
 )
-PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?44|0)7\d{9}(?!\d)")
 LOADING_OVERLAY_SCRIPT = """() => {
   const visible = element => {
     if (!element || element.hidden) return false;
@@ -67,184 +65,6 @@ LOADING_OVERLAY_SCRIPT = """() => {
     Array.from(document.querySelectorAll(selector)).some(visible)
   );
 }"""
-RESTORE_SUCCESS_ORDER_CONTEXT_SCRIPT = """({orderNumber}) => {
-  const state = window.history.state || {};
-  const hidden = state.__hidden_query__ || {};
-  const previousOrderNumber = String(hidden.orderNo || '');
-  const restored = previousOrderNumber !== orderNumber;
-  window.history.replaceState(
-    {
-      ...state,
-      __hidden_query__: {
-        ...hidden,
-        orderNo: orderNumber,
-        payMethod: hidden.payMethod || '微信支付'
-      }
-    },
-    '',
-    window.location.href
-  );
-  return {restored, previousOrderNumber};
-}"""
-QUERY_FREECARD_ORDER_DETAIL_SCRIPT = """async ({orderNumber, timeoutMs}) => {
-  const source = Array.from(document.scripts)
-    .map(script => script.src || '')
-    .find(src => /\\/freecard\\/js\\/app\\.[^/]+\\.js(?:\\?|$)/.test(src));
-  if (!source) {
-    return {status: 'module-not-found'};
-  }
-  try {
-    const app = await import(source);
-    const values = Object.values(app);
-    const http = values.find(value =>
-      value
-      && typeof value.post === 'function'
-      && typeof value.postNoLoading === 'function'
-    );
-    const endpoints = values.find(value =>
-      value
-      && typeof value.getStuOrderCardDetail === 'string'
-    );
-    if (!http || !endpoints) {
-      return {status: 'api-not-found'};
-    }
-    return await new Promise(resolve => {
-      let settled = false;
-      const finish = result => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(result);
-      };
-      const timer = setTimeout(
-        () => finish({status: 'timeout'}),
-        timeoutMs
-      );
-      http.post(
-        endpoints.getStuOrderCardDetail,
-        {orderNo: orderNumber, language: 'zh'},
-        payload => finish({status: 'response', payload}),
-        error => finish({status: 'error', message: String(error)}),
-        true,
-        undefined,
-        true
-      );
-    });
-  } catch (error) {
-    return {status: 'exception', message: String(error)};
-  }
-}"""
-ORDER_CAPTURE_CONSOLE_PREFIX = "CTEXCEL_ORDER_CAPTURE:"
-CAPTURE_CTEXCEL_ORDER_RESPONSES_SCRIPT = """(() => {
-  const consolePrefix = 'CTEXCEL_ORDER_CAPTURE:';
-  const phonePattern = /(?:\\+?44|0)7\\d{9}/;
-  const orderPattern = /(?:ORDER\\d{12,}|ORDERSUK\\d{12,})/i;
-  const stringify = value => {
-    try {
-      return typeof value === 'string' ? value : JSON.stringify(value);
-    } catch (_error) {
-      return String(value || '');
-    }
-  };
-  const findPhone = value => {
-    const match = stringify(value).match(phonePattern);
-    return match ? match[0] : '';
-  };
-  const findOrder = value => {
-    const match = stringify(value).match(orderPattern);
-    return match ? match[0].toUpperCase() : '';
-  };
-  const inspect = (node, result) => {
-    if (!node || typeof node !== 'object') return;
-    if (Array.isArray(node)) {
-      node.forEach(item => inspect(item, result));
-      return;
-    }
-    Object.entries(node).forEach(([key, value]) => {
-      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (
-        !result.phoneNumber
-        && ['msisdn', 'msisdnlist', 'phonenumber'].includes(normalized)
-      ) {
-        result.phoneNumber = findPhone(value);
-      }
-      if (
-        !result.orderNumber
-        && ['orderno', 'ordernumber', 'outtradeno'].includes(normalized)
-      ) {
-        result.orderNumber = findOrder(value);
-      }
-      if (value && typeof value === 'object') inspect(value, result);
-    });
-  };
-  const capture = (payload, url) => {
-    const target = String(url || '');
-    if (![
-      'getOrderConfirmList',
-      'getStuOrderCardDetail',
-      'createStuBuyCardPreOrder'
-    ].some(marker => target.includes(marker))) return;
-    let value = payload;
-    if (typeof value === 'string') {
-      try {
-        value = JSON.parse(value);
-      } catch (_error) {
-        return;
-      }
-    }
-    const result = {phoneNumber: '', orderNumber: ''};
-    inspect(value, result);
-    if (!result.phoneNumber && !result.orderNumber) return;
-    console.info(consolePrefix + JSON.stringify({
-      phoneNumber: result.phoneNumber || '',
-      orderNumber: result.orderNumber || '',
-      source: target,
-      updatedAt: Date.now()
-    }));
-  };
-
-  const requestUrls = new WeakMap();
-  const originalOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url, ...args) {
-    requestUrls.set(this, String(url || ''));
-    this.addEventListener('load', () => {
-      let payload = null;
-      try {
-        payload = (
-          this.responseType === '' || this.responseType === 'text'
-            ? this.responseText
-            : this.response
-        );
-      } catch (_error) {
-        payload = null;
-      }
-      capture(payload, requestUrls.get(this));
-    }, {once: true});
-    return originalOpen.call(this, method, url, ...args);
-  };
-
-  const originalFetch = window.fetch;
-  if (typeof originalFetch === 'function') {
-    window.fetch = async (...args) => {
-      const response = await originalFetch(...args);
-      const url = String(
-        (args[0] && args[0].url) || args[0] || response.url || ''
-      );
-      if ([
-        'getOrderConfirmList',
-        'getStuOrderCardDetail',
-        'createStuBuyCardPreOrder'
-      ].some(marker => url.includes(marker))) {
-        response.clone().json()
-          .then(payload => capture(payload, url))
-          .catch(() => {});
-      }
-      return response;
-    };
-  }
-})();"""
-
-
 class AutomationError(RuntimeError):
     pass
 
@@ -344,106 +164,6 @@ def coupon_rejection_message(page_text: str) -> str:
     return ""
 
 
-def parse_success_text(page_text: str) -> dict[str, str]:
-    text = page_text or ""
-    order = ORDER_PATTERN.search(text)
-    phone_match = re.search(
-        r"手机号码\s*[:：]\s*((?:\+?44|0)7\d{9})",
-        text,
-    )
-    amount_match = re.search(
-        r"(?:交易金额|付款金额|支付金额|订单金额)"
-        r"\s*[:：]\s*£\s*([0-9]+(?:\.[0-9]{1,2})?)",
-        text,
-    )
-    return {
-        "order_number": order.group(0).upper() if order else "",
-        "phone_number": phone_match.group(1) if phone_match else "",
-        "transaction_amount": amount_match.group(1) if amount_match else "",
-    }
-
-
-def parse_order_detail_response(value: Any) -> dict[str, str]:
-    """从官网订单详情模块返回值中提取本单号码，避免误取推荐人号码。"""
-    empty = {
-        "order_number": "",
-        "phone_number": "",
-        "transaction_amount": "",
-    }
-    if not isinstance(value, dict):
-        return empty
-    payload = value.get("payload", value)
-    if not isinstance(payload, dict):
-        return empty
-    data = payload.get("data", payload)
-    if not isinstance(data, dict):
-        return empty
-
-    def keyed_values(node: Any, expected_keys: set[str]) -> list[str]:
-        found: list[str] = []
-        if isinstance(node, dict):
-            for key, item in node.items():
-                normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
-                if normalized in expected_keys:
-                    if isinstance(item, (dict, list, tuple)):
-                        found.append(
-                            json.dumps(
-                                item,
-                                ensure_ascii=False,
-                                default=str,
-                            )
-                        )
-                    else:
-                        found.append(str(item or ""))
-                if isinstance(item, (dict, list, tuple)):
-                    found.extend(keyed_values(item, expected_keys))
-        elif isinstance(node, (list, tuple)):
-            for item in node:
-                found.extend(keyed_values(item, expected_keys))
-        return found
-
-    order_number = ""
-    for candidate in keyed_values(
-        data,
-        {"orderno", "ordernumber", "outtradeno", "wxorderno"},
-    ):
-        match = ORDER_PATTERN.search(candidate)
-        if match:
-            order_number = match.group(0).upper()
-            break
-
-    phone_number = ""
-    for candidate in keyed_values(
-        data,
-        {"msisdn", "msisdnlist", "phonenumber", "mobilenumber"},
-    ):
-        match = PHONE_PATTERN.search(candidate)
-        if match:
-            phone_number = match.group(0)
-            break
-
-    transaction_amount = ""
-    for candidate in keyed_values(
-        data,
-        {
-            "totalprice",
-            "transactionamount",
-            "paymentamount",
-            "orderamount",
-        },
-    ):
-        normalized = normalize_money(candidate)
-        if normalized is not None:
-            transaction_amount = f"{normalized:.2f}"
-            break
-
-    return {
-        "order_number": order_number,
-        "phone_number": phone_number,
-        "transaction_amount": transaction_amount,
-    }
-
-
 def parse_message_timestamp(value: Any) -> Optional[datetime]:
     """兼容邮件供应商返回的秒、毫秒、微秒时间戳和 ISO 时间。"""
     text = str(value or "").strip()
@@ -519,9 +239,6 @@ class CTExcelAutomation:
         self.context: Optional[BrowserContext] = None
         self.profile_dir: Optional[Path] = None
         self.network_events: list[str] = []
-        self.captured_order_number = ""
-        self.captured_phone_number = ""
-        self.order_detail_status = ""
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -745,9 +462,6 @@ class CTExcelAutomation:
                 );
                 """
             )
-            self.context.add_init_script(
-                CAPTURE_CTEXCEL_ORDER_RESPONSES_SCRIPT
-            )
             self.log(
                 "已启用浏览器兼容模式：每单使用独立临时配置，"
                 "并移除 Chrome/Edge 的自动测试标记"
@@ -780,32 +494,14 @@ class CTExcelAutomation:
                     pending_order=pending,
                 )
                 self.stage("支付成功")
-                self.stage("同步号码资料")
                 if self.config.continuous_enabled:
                     self.log(
-                        "连续申请模式：订单邮件由服务器后台继续同步，"
+                        "连续申请模式：本单已完成，"
                         "当前浏览器将关闭并准备下一单"
                     )
-                else:
-                    synced = self._poll_order_info(api, customer_id)
-                    if synced:
-                        result.phone_number = (
-                            str(synced.get("phone_number") or "").strip()
-                            or result.phone_number
-                        )
-                        result.order_number = (
-                            str(synced.get("order_number") or "").strip()
-                            or result.order_number
-                        )
-                        result.transaction_amount = (
-                            str(
-                                synced.get("transaction_amount") or ""
-                            ).strip()
-                            or result.transaction_amount
-                        )
                 self.log(
-                    "支付成功；成功页手机号码已写入客户管理，"
-                    "服务器后台将继续同步邮件中的补充资料"
+                    "支付成功；客户端已保存订单号和付款金额，"
+                    "手机号不作为流程条件"
                 )
                 self._wait_interruptibly(2)
                 return result
@@ -829,9 +525,6 @@ class CTExcelAutomation:
 
     def _attach_page_diagnostics(self, page: Page) -> None:
         self.network_events = []
-        self.captured_order_number = ""
-        self.captured_phone_number = ""
-        self.order_detail_status = ""
 
         def on_request_failed(request: Any) -> None:
             parsed = urlsplit(str(getattr(request, "url", "") or ""))
@@ -856,76 +549,11 @@ class CTExcelAutomation:
                 if response is None:
                     return
                 status = int(response.status)
-                resource_type = str(
-                    getattr(request, "resource_type", "") or ""
-                )
                 if status >= 400:
                     self._record_network_event(
                         f"HTTP {status} "
                         f"{getattr(request, 'method', 'GET')} "
                         f"{parsed.path}"
-                    )
-                if resource_type not in {"xhr", "fetch"}:
-                    return
-                is_success_page = is_payment_success_url(page.url)
-                is_order_confirm_response = parsed.path.endswith(
-                    "/studentActivity/getOrderConfirmList"
-                )
-                is_order_detail_response = parsed.path.endswith(
-                    "/studentActivity/getStuOrderCardDetail"
-                )
-                if not (
-                    is_success_page
-                    or is_order_confirm_response
-                    or is_order_detail_response
-                ):
-                    return
-                content_type = str(
-                    response.headers.get("content-type", "")
-                ).lower()
-                if not any(
-                    marker in content_type
-                    for marker in ("json", "text", "javascript")
-                ):
-                    return
-                body = response.text()
-                structured = {
-                    "order_number": "",
-                    "phone_number": "",
-                    "transaction_amount": "",
-                }
-                with contextlib.suppress(ValueError, TypeError):
-                    structured = parse_order_detail_response(
-                        json.loads(body)
-                    )
-                order_number = structured["order_number"]
-                phone_number = structured["phone_number"]
-                if is_success_page:
-                    order = ORDER_PATTERN.search(body)
-                    phone = PHONE_PATTERN.search(body)
-                    order_number = (
-                        order_number
-                        or (order.group(0).upper() if order else "")
-                    )
-                    phone_number = (
-                        phone_number
-                        or (phone.group(0) if phone else "")
-                    )
-                if order_number:
-                    self.captured_order_number = order_number
-                if phone_number:
-                    self.captured_phone_number = phone_number
-                if order_number or phone_number:
-                    source = (
-                        "confirm"
-                        if is_order_confirm_response
-                        else "detail"
-                    )
-                    self._record_network_event(
-                        f"CAPTURED {status} {parsed.path} · "
-                        f"source={source} · "
-                        f"order={'yes' if order_number else 'no'} · "
-                        f"phone={'yes' if phone_number else 'no'}"
                     )
 
         def on_page_error(error: Any) -> None:
@@ -933,55 +561,9 @@ class CTExcelAutomation:
                 "PAGE_ERROR " + str(error).replace("\n", " ")[:500]
             )
 
-        def on_console(message: Any) -> None:
-            text = getattr(message, "text", "")
-            if callable(text):
-                text = text()
-            text = str(text or "")
-            if not text.startswith(ORDER_CAPTURE_CONSOLE_PREFIX):
-                return
-            try:
-                captured = json.loads(
-                    text[len(ORDER_CAPTURE_CONSOLE_PREFIX):]
-                )
-            except (TypeError, ValueError) as exc:
-                self._record_network_event(
-                    "ORDER_CAPTURE_CONSOLE_ERROR "
-                    + str(exc).replace("\n", " ")[:300]
-                )
-                return
-            if not isinstance(captured, dict):
-                return
-            phone = str(captured.get("phoneNumber") or "").strip()
-            order = str(
-                captured.get("orderNumber") or ""
-            ).strip().upper()
-            if phone and PHONE_PATTERN.fullmatch(phone):
-                self.captured_phone_number = phone
-            else:
-                phone = ""
-            if order and ORDER_PATTERN.fullmatch(order):
-                self.captured_order_number = order
-            else:
-                order = ""
-            if phone or order:
-                source = str(captured.get("source") or "")
-                marker = (
-                    "confirm"
-                    if "getOrderConfirmList" in source
-                    else "detail"
-                )
-                self._record_network_event(
-                    "ORDER_CAPTURE_CONSOLE "
-                    f"source={marker} · "
-                    f"order={'yes' if order else 'no'} · "
-                    f"phone={'yes' if phone else 'no'}"
-                )
-
         page.on("requestfailed", on_request_failed)
         page.on("requestfinished", on_request_finished)
         page.on("pageerror", on_page_error)
-        page.on("console", on_console)
 
     def _preserve_error_page(self, page: Page, exc: Exception) -> None:
         """保存错误现场，并在可视模式下短暂保留浏览器供人工检查。"""
@@ -1020,30 +602,6 @@ class CTExcelAutomation:
             except Exception:
                 break
             time.sleep(0.5)
-
-    def _poll_order_info(
-        self,
-        api: AdminApi,
-        customer_id: int,
-    ) -> dict[str, Any]:
-        """支付完成后触发一次邮箱同步；手机号缺失不阻塞本单完成。"""
-        self._check_stop()
-        try:
-            result = api.sync_order_info(customer_id)
-        except ApiError as exc:
-            self.log(f"订单邮件即时扫描暂未完成：{exc}")
-            return {}
-        phone_number = str(result.get("phone_number") or "").strip()
-        if phone_number:
-            self.log(f"手机号已从订单邮件同步：{phone_number}")
-            return result
-        detail = str(result.get("detail") or "").strip()
-        self.log(
-            "本单已完成；订单邮件暂未提供手机号，"
-            "服务器后台会继续自动扫描"
-            + (f"：{detail}" if detail else "")
-        )
-        return result
 
     def _start_freecard_application(self, page: Page) -> None:
         self.stage("选择申请路线")
@@ -1571,39 +1129,10 @@ class CTExcelAutomation:
                 )
                 self._wait_for_page_ready(page, "关闭营销订阅")
 
-    def _wait_for_confirmed_phone(
-        self,
-        *,
-        timeout_seconds: float,
-    ) -> bool:
-        deadline = time.monotonic() + max(0.5, timeout_seconds)
-        while time.monotonic() < deadline:
-            self._check_stop()
-            if self.captured_phone_number:
-                return True
-            self._wait_interruptibly(0.25)
-        return bool(self.captured_phone_number)
-
     def _confirm_order(self, page: Page) -> None:
         self.stage("确认订单")
         self._wait_for_page_ready(page, "订单确认页")
         defaults = self.config.registration
-        if self.config.purchase_route == PURCHASE_ROUTE_FREECARD:
-            if not self._wait_for_confirmed_phone(
-                timeout_seconds=6,
-            ):
-                self.log(
-                    "首次订单确认响应没有捕获到手机号，"
-                    "短暂等待接口补充返回"
-                )
-                if not self._wait_for_confirmed_phone(
-                    timeout_seconds=3,
-                ):
-                    self.log(
-                        "订单确认接口暂未返回手机号，继续进入支付；"
-                        "支付成功和订单确认邮件仍会完成本单，"
-                        "手机号由服务器后台继续同步"
-                    )
         if self.config.purchase_route == PURCHASE_ROUTE_50GB:
             coupon_code = defaults.coupon_code.strip()
             if not coupon_code:
@@ -1651,11 +1180,6 @@ class CTExcelAutomation:
             if not price_is_expected(body_text, "1.00"):
                 raise AutomationError("£1 预存领卡订单金额校验失败")
             self.log("£1 预存领卡订单金额已核对")
-            if self.captured_phone_number:
-                self.log(
-                    "订单确认接口已分配手机号；"
-                    "付款成功后将直接写入客户管理"
-                )
 
         other_payment = page.get_by_role(
             "radio",
@@ -1765,169 +1289,31 @@ class CTExcelAutomation:
         while time.monotonic() < deadline:
             self._check_stop()
             if is_payment_success_url(page.url):
-                known_order_number = str(
+                order_number = str(
                     pending_order.get("order_number") or ""
                 ).strip()
-                self.log(
-                    "已进入支付成功页，正在从页面正文和订单接口读取手机号；"
-                    "忽略该页面持续显示的 Loading 遮罩"
-                )
-                if (
-                    self.config.purchase_route == PURCHASE_ROUTE_FREECARD
-                    and known_order_number
-                ):
-                    self._restore_success_order_context(
-                        page,
-                        known_order_number,
-                    )
-                detail_deadline = min(deadline, time.monotonic() + 8)
-                parsed = {
-                    "order_number": "",
-                    "phone_number": "",
-                    "transaction_amount": "",
-                }
-                direct_detail = parsed.copy()
-                while time.monotonic() < detail_deadline:
-                    self._check_stop()
-                    if page.is_closed():
-                        break
-                    with contextlib.suppress(Exception):
-                        parsed = parse_success_text(
-                            page.locator("body").inner_text(timeout=3000)
-                        )
-                    if (
-                        parsed["phone_number"]
-                        or self.captured_phone_number
-                        or direct_detail["phone_number"]
-                    ):
-                        break
-                    self._wait_interruptibly(1)
-                order_number = (
-                    parsed["order_number"]
-                    or self.captured_order_number
-                    or direct_detail["order_number"]
-                    or pending_order.get("order_number", "")
-                )
-                phone_number = (
-                    parsed["phone_number"]
-                    or self.captured_phone_number
-                    or direct_detail["phone_number"]
-                )
-                if not phone_number:
-                    self.log(
-                        "支付成功已确认；本次没有读取到手机号，"
-                        "本单仍标记为完成并继续后续流程"
-                    )
-                transaction_amount = (
-                    parsed["transaction_amount"]
-                    or direct_detail["transaction_amount"]
-                    or pending_order.get("transaction_amount", "")
-                )
+                transaction_amount = str(
+                    pending_order.get("transaction_amount") or ""
+                ).strip()
                 api.save_payment_checkpoint(
                     customer_id,
                     order_number=order_number,
                     transaction_amount=transaction_amount,
-                    phone_number=phone_number,
                 )
-                if phone_number:
-                    self.log(
-                        "成功页资料已写入客户管理："
-                        f"{order_number} / {phone_number} / "
-                        f"£{transaction_amount}"
-                    )
-                else:
-                    self.log(
-                        "支付成功订单已保留："
-                        f"{order_number} / £{transaction_amount}；"
-                        "手机号保持为空并交由后台邮件同步"
-                    )
+                self.log(
+                    "支付成功已确认："
+                    f"{order_number} / £{transaction_amount}；"
+                    "客户端不再读取手机号，本单立即完成"
+                )
                 return AutomationResult(
                     customer_id=customer_id,
                     email=email,
                     order_number=order_number,
-                    phone_number=phone_number,
+                    phone_number="",
                     transaction_amount=transaction_amount,
                 )
             page.wait_for_timeout(1000)
         raise AutomationError("等待人工支付完成超时，可在客户端重新载入该客户继续")
-
-    def _restore_success_order_context(
-        self,
-        page: Page,
-        order_number: str,
-    ) -> None:
-        """修复官网把订单号仅保存在 history.state 导致的丢参问题。"""
-        try:
-            result = page.evaluate(
-                RESTORE_SUCCESS_ORDER_CONTEXT_SCRIPT,
-                {"orderNumber": order_number},
-            )
-        except Exception as exc:
-            self._record_network_event(
-                "ORDER_CONTEXT_ERROR "
-                + str(exc).replace("\n", " ")[:300]
-            )
-            return
-        if isinstance(result, dict) and result.get("restored"):
-            self.log(
-                "检测到官网成功页丢失隐藏订单参数，"
-                "已使用付款前保存的订单号恢复查询上下文"
-            )
-
-    def _query_freecard_order_detail(
-        self,
-        page: Page,
-        order_number: str,
-    ) -> dict[str, str]:
-        """调用官网当前页面已加载的请求模块，直接查询本订单资料。"""
-        empty = {
-            "order_number": "",
-            "phone_number": "",
-            "transaction_amount": "",
-        }
-        try:
-            response = page.evaluate(
-                QUERY_FREECARD_ORDER_DETAIL_SCRIPT,
-                {
-                    "orderNumber": order_number,
-                    "timeoutMs": 15000,
-                },
-            )
-        except Exception as exc:
-            self._record_network_event(
-                "ORDER_DETAIL_ERROR "
-                + str(exc).replace("\n", " ")[:300]
-            )
-            return empty
-        parsed = parse_order_detail_response(response)
-        if parsed["phone_number"]:
-            self.order_detail_status = "已返回手机号"
-            self._record_network_event(
-                "ORDER_DETAIL_DIRECT phone=yes order=yes"
-            )
-            return parsed
-        status = (
-            str(response.get("status") or "unknown")
-            if isinstance(response, dict)
-            else "invalid"
-        )
-        code = ""
-        message = ""
-        if isinstance(response, dict):
-            payload = response.get("payload")
-            if isinstance(payload, dict):
-                code = str(payload.get("code") or "")
-                message = str(payload.get("message") or "").strip()
-        self.order_detail_status = status
-        if code:
-            self.order_detail_status += f" / code {code}"
-        if message:
-            self.order_detail_status += f" / {message[:80]}"
-        self._record_network_event(
-            f"ORDER_DETAIL_DIRECT phone=no status={status}"
-            + (f" code={code}" if code else "")
-        )
-        return empty
 
     def _visible_locator(self, locator: Locator, label: str) -> Locator:
         deadline = time.monotonic() + max(

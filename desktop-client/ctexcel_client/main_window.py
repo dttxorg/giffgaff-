@@ -122,7 +122,6 @@ class MainWindow(QMainWindow):
         "确认支付条款",
         "等待人工微信支付",
         "支付成功",
-        "同步号码资料",
     ]
 
     def __init__(self):
@@ -477,7 +476,7 @@ class MainWindow(QMainWindow):
         steps.setSpacing(8)
         steps.addWidget(self._step("01", "服务器建档", "生成客户与专属邮箱"))
         steps.addWidget(self._step("02", "自动填写", "套餐、验证码与地址"))
-        steps.addWidget(self._step("03", "成功页回填", "保存订单号与手机号"))
+        steps.addWidget(self._step("03", "支付完成", "保存订单号与付款金额"))
         layout.addLayout(steps)
 
         batch_panel = QFrame()
@@ -568,8 +567,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(customer_panel)
 
         note = QLabel(
-            "支付成功页会直接回写订单号、手机号和金额；"
-            "推荐信息由服务器后台从专属邮箱继续补全。"
+            "支付成功页出现后立即完成本单；手机号不参与流程判定，"
+            "订单确认邮件由服务器后台继续识别。"
         )
         note.setObjectName("inlineNote")
         note.setWordWrap(True)
@@ -1143,7 +1142,6 @@ class MainWindow(QMainWindow):
                 f"客户 #{result.customer_id}\n"
                 f"邮箱：{result.email}\n"
                 f"订单号：{result.order_number or '等待邮件同步'}\n"
-                f"手机号：{result.phone_number or '等待邮件同步'}\n"
                 f"支付：£{result.transaction_amount or expected}"
             )
         self.log(

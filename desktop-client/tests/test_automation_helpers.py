@@ -10,9 +10,7 @@ from ctexcel_client.automation import (
     assess_verification_freshness,
     coupon_rejection_message,
     normalize_money,
-    parse_order_detail_response,
     parse_message_timestamp,
-    parse_success_text,
     is_payment_success_url,
     payment_page_has_expected_amount,
     price_is_expected,
@@ -34,118 +32,6 @@ def test_money_and_discount_price_parsing():
     )
 
 
-def test_success_page_fields_are_read_for_operator_summary_only():
-    parsed = parse_success_text(
-        """
-        订购成功
-        订单号：ORDER2026072912345678901
-        手机号码：07900000009
-        交易金额：£ 5.95
-        """
-    )
-
-    assert parsed == {
-        "order_number": "ORDER2026072912345678901",
-        "phone_number": "07900000009",
-        "transaction_amount": "5.95",
-    }
-    freecard = parse_success_text(
-        """
-        支付成功
-        订单号：ORDERSUK2026073104095817734376
-        手机号码：07900000009
-        付款金额：£ 1.00
-        """
-    )
-    assert freecard["order_number"] == "ORDERSUK2026073104095817734376"
-    assert freecard["transaction_amount"] == "1.00"
-
-
-def test_order_detail_response_prioritizes_msisdn_over_referrer():
-    parsed = parse_order_detail_response(
-        {
-            "status": "response",
-            "payload": {
-                "code": 200,
-                "data": {
-                    "orderNo": "ORDERSUK2026073107254362376356",
-                    "recommendPhone": "447942946765",
-                    "msisdn": "447434000172",
-                    "totalPrice": "1",
-                },
-            },
-        }
-    )
-
-    assert parsed == {
-        "order_number": "ORDERSUK2026073107254362376356",
-        "phone_number": "447434000172",
-        "transaction_amount": "1.00",
-    }
-
-
-def test_order_detail_response_supports_msisdn_list():
-    parsed = parse_order_detail_response(
-        {
-            "payload": {
-                "data": {
-                    "msisdnList": [{"msisdn": "07900000009"}],
-                }
-            }
-        }
-    )
-
-    assert parsed["phone_number"] == "07900000009"
-
-
-def test_success_order_context_is_restored_and_direct_detail_is_parsed():
-    calls = []
-
-    class FakePage:
-        def evaluate(self, script, arguments):
-            calls.append((script, arguments))
-            if "__hidden_query__" in script:
-                return {
-                    "restored": True,
-                    "previousOrderNumber": "",
-                }
-            return {
-                "status": "response",
-                "payload": {
-                    "code": 200,
-                    "data": {
-                        "orderNo": arguments["orderNumber"],
-                        "msisdn": "447434000172",
-                        "totalPrice": "1.00",
-                    },
-                },
-            }
-
-    messages = []
-    automation = CTExcelAutomation(
-        AppConfig(),
-        log=messages.append,
-        stage=lambda _message: None,
-        customer_created=lambda _payload: None,
-    )
-    order_number = "ORDERSUK2026073107254362376356"
-
-    automation._restore_success_order_context(FakePage(), order_number)
-    parsed = automation._query_freecard_order_detail(
-        FakePage(),
-        order_number,
-    )
-
-    assert calls[0][1] == {"orderNumber": order_number}
-    assert calls[1][1] == {
-        "orderNumber": order_number,
-        "timeoutMs": 15000,
-    }
-    assert any("恢复查询上下文" in message for message in messages)
-    assert parsed["phone_number"] == "447434000172"
-    assert parsed["order_number"] == order_number
-
-
 def test_both_purchase_routes_recognize_their_success_page():
     assert is_payment_success_url(
         "https://www.ctexcel.com/freecard/activityPageSuccess"
@@ -158,29 +44,12 @@ def test_both_purchase_routes_recognize_their_success_page():
     )
 
 
-def test_success_page_ignores_loading_overlay_and_saves_phone():
-    class FakeBody:
-        def inner_text(self, **_kwargs):
-            return """
-            订购成功
-            订单号码：ORDERSUK2026073106180627794025
-            手机号码：447434000172
-            手机号码金额：£ 0.00
-            """
-
+def test_success_page_completes_immediately_without_reading_phone():
     class FakePage:
         url = "https://www.ctexcel.com/freecard/activityPageSuccess"
 
-        def is_closed(self):
-            return False
-
-        def wait_for_function(self, script, timeout):
-            assert "phone" in script
-            assert timeout == 120000
-
-        def locator(self, selector):
-            assert selector == "body"
-            return FakeBody()
+        def __getattr__(self, name):
+            raise AssertionError(f"成功页不应读取页面内容：{name}")
 
     class FakeApi:
         def __init__(self):
@@ -210,70 +79,16 @@ def test_success_page_ignores_loading_overlay_and_saves_phone():
         },
     )
 
-    assert result.phone_number == "447434000172"
+    assert result.phone_number == ""
     assert result.transaction_amount == "1.00"
     assert api.saved == (
         480,
         {
             "order_number": "ORDERSUK2026073106180627794025",
             "transaction_amount": "1.00",
-            "phone_number": "447434000172",
         },
     )
-    assert any("忽略该页面持续显示的 Loading 遮罩" in item for item in messages)
-
-
-def test_success_page_without_phone_still_completes_order():
-    class FakePage:
-        url = "https://www.ctexcel.com/freecard/activityPageSuccess"
-
-        def is_closed(self):
-            return True
-
-        def evaluate(self, *_args, **_kwargs):
-            return {"restored": True}
-
-    class FakeApi:
-        def __init__(self):
-            self.saved = None
-
-        def save_payment_checkpoint(self, customer_id, **fields):
-            self.saved = (customer_id, fields)
-            return {"ok": True}
-
-    messages = []
-    api = FakeApi()
-    automation = CTExcelAutomation(
-        AppConfig(),
-        log=messages.append,
-        stage=lambda _message: None,
-        customer_created=lambda _payload: None,
-    )
-
-    result = automation._wait_for_payment_success(
-        FakePage(),
-        api=api,
-        customer_id=488,
-        email="confirmed@example.test",
-        pending_order={
-            "order_number": "ORDERSUK2026073108002196346332",
-            "transaction_amount": "1.00",
-        },
-    )
-
-    assert result.order_number == "ORDERSUK2026073108002196346332"
-    assert result.phone_number == ""
-    assert result.transaction_amount == "1.00"
-    assert api.saved == (
-        488,
-        {
-            "order_number": "ORDERSUK2026073108002196346332",
-            "transaction_amount": "1.00",
-            "phone_number": "",
-        },
-    )
-    assert any("本单仍标记为完成" in item for item in messages)
-    assert any("手机号保持为空" in item for item in messages)
+    assert any("客户端不再读取手机号" in item for item in messages)
 
 
 def test_browser_profile_is_isolated_and_automation_banner_is_removed():
@@ -292,147 +107,21 @@ def test_browser_profile_is_isolated_and_automation_banner_is_removed():
     assert "error-{stamp}-network.txt" in source
 
 
-def test_success_page_phone_can_be_captured_from_finished_api_response():
-    handlers = {}
-
-    class FakePage:
-        url = "https://www.ctexcel.com/freecard/activityPageSuccess"
-
-        def on(self, name, handler):
-            handlers[name] = handler
-
-    class FakeResponse:
-        status = 200
-        headers = {"content-type": "application/json"}
-
-        def text(self):
-            return (
-                '{"orderNo":"ORDERSUK2026073106180627794025",'
-                '"phoneNumber":"447434000172"}'
-            )
-
-    class FakeRequest:
-        url = "https://www.ctexcel.com/api/freecard/order/detail"
-        method = "POST"
-        resource_type = "xhr"
-
-        def response(self):
-            return FakeResponse()
-
-    automation = CTExcelAutomation(
-        AppConfig(),
-        log=lambda _message: None,
-        stage=lambda _message: None,
-        customer_created=lambda _payload: None,
-    )
-    automation._attach_page_diagnostics(FakePage())
-
-    handlers["requestfinished"](FakeRequest())
-
-    assert (
-        automation.captured_order_number
-        == "ORDERSUK2026073106180627794025"
-    )
-    assert automation.captured_phone_number == "447434000172"
-
-
-def test_phone_is_captured_from_order_confirmation_before_payment():
-    handlers = {}
-
-    class FakePage:
-        url = "https://www.ctexcel.com/freecard/activityPageconfirm"
-
-        def on(self, name, handler):
-            handlers[name] = handler
-
-    class FakeResponse:
-        status = 200
-        headers = {"content-type": "application/json;charset=UTF-8"}
-
-        def text(self):
-            return (
-                '{"code":0,"data":{'
-                '"recommendPhone":"447942946765",'
-                '"msisdn":"447434000172",'
-                '"orderTotalPrice":"1.00"}}'
-            )
-
-    class FakeRequest:
-        url = (
-            "https://www.ctexcel.com/newcteuk/studentActivity/"
-            "getOrderConfirmList"
-        )
-        method = "POST"
-        resource_type = "xhr"
-
-        def response(self):
-            return FakeResponse()
-
-    automation = CTExcelAutomation(
-        AppConfig(),
-        log=lambda _message: None,
-        stage=lambda _message: None,
-        customer_created=lambda _payload: None,
-    )
-    automation._attach_page_diagnostics(FakePage())
-
-    handlers["requestfinished"](FakeRequest())
-
-    assert automation.captured_phone_number == "447434000172"
-    assert any(
-        "source=confirm" in event
-        for event in automation.network_events
-    )
-
-
-def test_phone_is_read_from_page_level_console_capture():
-    handlers = {}
-
-    class FakePage:
-        def on(self, name, handler):
-            handlers[name] = handler
-
-    class FakeConsole:
-        text = (
-            'CTEXCEL_ORDER_CAPTURE:{"phoneNumber":"447434000172",'
-            '"orderNumber":"ORDERSUK2026073108002196346332",'
-            '"source":"getOrderConfirmList"}'
-        )
-
-    automation = CTExcelAutomation(
-        AppConfig(),
-        log=lambda _message: None,
-        stage=lambda _message: None,
-        customer_created=lambda _payload: None,
-    )
-    automation._attach_page_diagnostics(FakePage())
-
-    handlers["console"](FakeConsole())
-
-    assert automation.captured_phone_number == "447434000172"
-    assert (
-        automation.captured_order_number
-        == "ORDERSUK2026073108002196346332"
-    )
-    assert any(
-        "source=confirm" in event
-        for event in automation.network_events
-    )
-
-
-def test_freecard_payment_continues_when_preallocated_phone_is_missing():
+def test_application_flow_has_no_phone_capture_or_gate():
     source = (
         Path(__file__).resolve().parents[1]
         / "ctexcel_client"
         / "automation.py"
     ).read_text(encoding="utf-8")
 
-    assert "CAPTURE_CTEXCEL_ORDER_RESPONSES_SCRIPT" in source
-    assert "XMLHttpRequest.prototype.open" in source
-    assert "window.fetch = async" in source
-    assert "CTEXCEL_ORDER_CAPTURE:" in source
-    assert "window.__ctexcelOrderCapture" not in source
-    assert "订单确认接口暂未返回手机号，继续进入支付" in source
+    assert "CAPTURE_CTEXCEL_ORDER_RESPONSES_SCRIPT" not in source
+    assert "XMLHttpRequest.prototype.open" not in source
+    assert "window.fetch = async" not in source
+    assert "CTEXCEL_ORDER_CAPTURE:" not in source
+    assert "_wait_for_confirmed_phone" not in source
+    assert "captured_phone_number" not in source
+    assert "getStuOrderCardDetail" not in source
+    assert "客户端不再读取手机号，本单立即完成" in source
     assert "订单确认接口没有返回手机号，已停止进入支付" not in source
 
 
@@ -470,7 +159,7 @@ def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     assert "freecard/buycardWX" in source
     assert "save_payment_checkpoint" in source
     assert "allow_new_after_checkpoint" in source
-    assert "连续申请模式：订单邮件由服务器后台继续同步" in source
+    assert "连续申请模式：本单已完成" in source
 
 
 def test_freecard_route_is_the_new_default():
