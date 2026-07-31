@@ -44,7 +44,7 @@ def test_client_ui_uses_scoped_api_without_hidden_entry_field():
     assert "self.continuous_workers.setRange(1, 10)" in source
     assert '"Telegram 付款提醒"' in source
     assert '"测试推送"' in source
-    assert __version__ == "2.5.5"
+    assert __version__ == "2.5.6"
     assert 'f"CTExcel 申请工作台 v{__version__}"' in source
 
 

@@ -31,6 +31,8 @@ from ctexcel_client.automation import (
     is_payment_success_url,
     is_wechat_payment_url,
     payment_page_has_expected_amount,
+    page_progress_fingerprint,
+    page_url_matches_path,
     price_is_expected,
     proxy_browser_error_reason,
     browser_startup_snapshot_is_blank,
@@ -845,7 +847,8 @@ def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     assert "'全部接受'" in source
     assert 'page.locator(".el-switch")' in source
     assert "'.el-loading-mask'" in source
-    assert "Loading 遮罩持续未消失" in source
+    assert "连续 20 秒没有 URL、Loading 或 DOM 变化" in source
+    assert "def _click_button_and_wait_for_page" in source
     assert '"networkidle"' not in source
     configure_start = source.index("def _configure_sim")
     switch_click = source.index("switch.click()", configure_start)
@@ -1187,6 +1190,60 @@ def test_batch_assigns_distinct_unpaid_customers_before_creating_new(
     assert any("不同的未成功付款客户" in item for item in messages)
 
 
+def test_old_api_forces_serial_reuse_instead_of_parallel_empty_accounts(
+    monkeypatch,
+):
+    class FakeAdminApi:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def connect(self):
+            return {"ok": True, "api_version": 7}
+
+    monkeypatch.setattr(automation_module, "AdminApi", FakeAdminApi)
+    messages = []
+    runner = CTExcelBatchAutomation(
+        AppConfig(
+            continuous_enabled=True,
+            continuous_count=8,
+            continuous_workers=5,
+        ),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+        item_started=lambda *_args: None,
+        item_completed=lambda *_args: None,
+    )
+    serial_calls = []
+
+    def run_serial(**kwargs):
+        serial_calls.append(kwargs)
+        return "serial-result"
+
+    monkeypatch.setattr(runner, "_run_serial", run_serial)
+    monkeypatch.setattr(
+        runner,
+        "_run_parallel",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("旧 API 不应启动并发建档")
+        ),
+    )
+
+    result = runner.run()
+
+    assert result == "serial-result"
+    assert serial_calls == [{"total": 8, "completed": 0}]
+    assert runner.legacy_api_serial_required is True
+    assert any("自动改为单线程逐个复用" in item for item in messages)
+    assert any("已暂停配置的 5 线程并发" in item for item in messages)
+
+
 def test_qg_allocator_retries_duplicate_ip_and_assigns_unique_nodes(
     monkeypatch,
 ):
@@ -1225,13 +1282,24 @@ def test_qg_allocator_retries_duplicate_ip_and_assigns_unique_nodes(
     assert runner.qg_proxy_ips == {"198.51.100.1", "198.51.100.2"}
 
 
-def test_loading_overlay_waits_until_the_page_is_stably_ready():
+def test_loading_overlay_waits_until_the_page_is_stably_ready(monkeypatch):
     class FakePage:
         def __init__(self):
-            self.values = [True, True, False, False, False, False]
+            self.values = [True, True, False, False, False, False, False]
+            self.url = "https://example.test/form"
+            self.context = SimpleNamespace(pages=[self])
 
         def evaluate(self, _script):
-            return self.values.pop(0) if self.values else False
+            loading = self.values.pop(0) if self.values else False
+            return {
+                "url": self.url,
+                "ready_state": "complete",
+                "loading": loading,
+                "text_signature": "form",
+                "field_signature": "fields",
+                "visible_content": 5,
+                "field_count": 2,
+            }
 
         def is_closed(self):
             return False
@@ -1245,6 +1313,19 @@ def test_loading_overlay_waits_until_the_page_is_stably_ready():
         log=messages.append,
         stage=lambda _message: None,
         customer_created=lambda _payload: None,
+    )
+    clock = {"value": 0.0}
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    monkeypatch.setattr(
+        automation,
+        "_wait_interruptibly",
+        lambda seconds: clock.__setitem__(
+            "value", clock["value"] + seconds
+        ),
     )
 
     automation._wait_for_page_ready(
@@ -1261,29 +1342,347 @@ def test_loading_overlay_waits_until_the_page_is_stably_ready():
 
 def test_loading_overlay_stalled_for_twenty_seconds_restarts(monkeypatch):
     class FakePage:
+        url = "https://example.test/loading"
+        context = SimpleNamespace(pages=[])
+
         def evaluate(self, _script):
-            return True
+            return {
+                "url": self.url,
+                "ready_state": "interactive",
+                "loading": True,
+                "text_signature": "unchanged",
+                "field_signature": "none",
+                "visible_content": 1,
+                "field_count": 0,
+            }
 
         def is_closed(self):
             return False
 
-    clock = {"value": -5.0}
-
-    def monotonic():
-        clock["value"] += 5.0
-        return clock["value"]
-
-    monkeypatch.setattr(automation_module.time, "monotonic", monotonic)
+    clock = {"value": 0.0}
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
     runner = CTExcelAutomation(
         AppConfig(page_timeout_ms=120000),
         log=lambda _message: None,
         stage=lambda _stage: None,
         customer_created=lambda _payload: None,
     )
-    monkeypatch.setattr(runner, "_wait_interruptibly", lambda _seconds: None)
+    monkeypatch.setattr(
+        runner,
+        "_wait_interruptibly",
+        lambda seconds: clock.__setitem__(
+            "value", clock["value"] + seconds
+        ),
+    )
 
     with pytest.raises(RetryableStalledPageError, match="20 秒"):
         runner._wait_for_page_ready(FakePage(), "首页 Loading")
+
+
+def test_progress_fingerprint_and_url_match_ignore_query_noise():
+    first = {
+        "url": "https://example.test/freecard/activityPagefillInfos?a=1",
+        "ready_state": "complete",
+        "loading": False,
+        "text_signature": "10:20",
+        "field_signature": "5:6",
+        "visible_content": 8,
+        "field_count": 4,
+        "page_count": 1,
+    }
+    second = {**first, "irrelevant": "ignored"}
+
+    assert page_progress_fingerprint(first) == page_progress_fingerprint(second)
+    assert page_url_matches_path(
+        first["url"],
+        "/freecard/activityPagefillInfos",
+    )
+
+
+def test_next_click_timeout_continues_when_destination_url_already_loaded(
+    monkeypatch,
+):
+    class FakePage:
+        def __init__(self):
+            self.url = "https://example.test/freecard/config"
+            self.context = SimpleNamespace(pages=[self])
+
+        def get_by_role(self, *_args, **_kwargs):
+            return object()
+
+        def evaluate(self, _script):
+            return False
+
+        def is_closed(self):
+            return False
+
+    page = FakePage()
+
+    class FakeLocator:
+        retry_count = 0
+
+        def click(self, **_kwargs):
+            page.url = (
+                "https://example.test/freecard/activityPagefillInfos"
+            )
+            raise automation_module.PlaywrightTimeoutError("click timeout")
+
+        def evaluate(self, _script):
+            self.retry_count += 1
+
+    locator = FakeLocator()
+    messages = []
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(runner, "_wait_for_page_ready", lambda *_a, **_k: None)
+    monkeypatch.setattr(runner, "_visible_locator", lambda *_a, **_k: locator)
+
+    runner._click_button_and_wait_for_page(
+        page,
+        "下一步",
+        label="£1 领卡资料页",
+        expected_path="/freecard/activityPagefillInfos",
+        ready_script="FORM_READY",
+    )
+
+    assert locator.retry_count == 0
+    assert any("目标网址已出现" in item for item in messages)
+
+
+def test_transition_accepts_form_marker_when_url_has_not_updated(monkeypatch):
+    class FakePage:
+        url = "https://example.test/freecard/config"
+        context = SimpleNamespace(pages=[])
+
+        def get_by_role(self, *_args, **_kwargs):
+            return object()
+
+        def evaluate(self, script):
+            return script == "FORM_READY"
+
+        def is_closed(self):
+            return False
+
+    class FakeLocator:
+        def click(self, **_kwargs):
+            return None
+
+        def evaluate(self, _script):
+            raise AssertionError("表单已出现时不应重试点击")
+
+    messages = []
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(runner, "_wait_for_page_ready", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        runner,
+        "_visible_locator",
+        lambda *_a, **_k: FakeLocator(),
+    )
+
+    runner._click_button_and_wait_for_page(
+        FakePage(),
+        "下一步",
+        label="£1 领卡资料页",
+        expected_path="/freecard/activityPagefillInfos",
+        ready_script="FORM_READY",
+    )
+
+    assert any("目标表单已出现" in item for item in messages)
+
+
+def test_transition_retries_once_when_first_click_has_no_effect(monkeypatch):
+    clock = {"value": 0.0}
+
+    class FakePage:
+        url = "https://example.test/freecard/config"
+        context = SimpleNamespace(pages=[])
+        form_ready = False
+
+        def get_by_role(self, *_args, **_kwargs):
+            return object()
+
+        def evaluate(self, script):
+            if script == "FORM_READY":
+                return self.form_ready
+            return {
+                "url": self.url,
+                "ready_state": "complete",
+                "loading": False,
+                "text_signature": "same",
+                "field_signature": "same",
+                "visible_content": 3,
+                "field_count": 0,
+            }
+
+        def is_closed(self):
+            return False
+
+    page = FakePage()
+
+    class FakeLocator:
+        retry_count = 0
+
+        def click(self, **_kwargs):
+            return None
+
+        def evaluate(self, _script):
+            self.retry_count += 1
+            page.form_ready = True
+
+    locator = FakeLocator()
+    messages = []
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(runner, "_wait_for_page_ready", lambda *_a, **_k: None)
+    monkeypatch.setattr(runner, "_visible_locator", lambda *_a, **_k: locator)
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_interruptibly",
+        lambda seconds: clock.__setitem__(
+            "value", clock["value"] + seconds
+        ),
+    )
+
+    runner._click_button_and_wait_for_page(
+        page,
+        "下一步",
+        label="£1 领卡资料页",
+        expected_path="/freecard/activityPagefillInfos",
+        ready_script="FORM_READY",
+    )
+
+    assert locator.retry_count == 1
+    assert any("自动重试一次" in item for item in messages)
+
+
+def test_transition_can_exceed_twenty_seconds_while_dom_keeps_progressing(
+    monkeypatch,
+):
+    clock = {"value": 0.0}
+
+    class FakePage:
+        url = "https://example.test/freecard/config"
+        context = SimpleNamespace(pages=[])
+
+        def evaluate(self, script):
+            if script == "FORM_READY":
+                return clock["value"] >= 25.0
+            step = int(clock["value"] // 5)
+            return {
+                "url": self.url,
+                "ready_state": "interactive",
+                "loading": True,
+                "text_signature": f"step-{step}",
+                "field_signature": f"fields-{step}",
+                "visible_content": step,
+                "field_count": step,
+            }
+
+        def is_closed(self):
+            return False
+
+    runner = CTExcelAutomation(
+        AppConfig(page_timeout_ms=120000),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_interruptibly",
+        lambda seconds: clock.__setitem__(
+            "value", clock["value"] + seconds
+        ),
+    )
+
+    runner._wait_for_page_transition(
+        FakePage(),
+        label="客户资料页",
+        expected_path="/freecard/activityPagefillInfos",
+        ready_script="FORM_READY",
+    )
+
+    assert clock["value"] >= 25.0
+
+
+def test_transition_restarts_after_twenty_seconds_without_any_change(
+    monkeypatch,
+):
+    clock = {"value": 0.0}
+
+    class FakePage:
+        url = "https://example.test/freecard/config"
+        context = SimpleNamespace(pages=[])
+
+        def evaluate(self, script):
+            if script == "FORM_READY":
+                return False
+            return {
+                "url": self.url,
+                "ready_state": "complete",
+                "loading": False,
+                "text_signature": "same",
+                "field_signature": "same",
+                "visible_content": 3,
+                "field_count": 0,
+            }
+
+        def is_closed(self):
+            return False
+
+    runner = CTExcelAutomation(
+        AppConfig(page_timeout_ms=120000),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_interruptibly",
+        lambda seconds: clock.__setitem__(
+            "value", clock["value"] + seconds
+        ),
+    )
+
+    with pytest.raises(RetryableStalledPageError, match="连续 20 秒"):
+        runner._wait_for_page_transition(
+            FakePage(),
+            label="客户资料页",
+            expected_path="/freecard/activityPagefillInfos",
+            ready_script="FORM_READY",
+        )
 
 
 def test_registration_fields_target_real_inputs_instead_of_placeholder_wrappers():

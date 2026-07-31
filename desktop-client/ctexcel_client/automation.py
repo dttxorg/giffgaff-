@@ -60,6 +60,9 @@ AUTOMATION_STALL_TIMEOUT_MS = 20_000
 BROWSER_STARTUP_TIMEOUT_MS = AUTOMATION_STALL_TIMEOUT_MS
 BROWSER_SLOW_MO_MAX_MS = 250
 PAGE_READY_STABLE_SECONDS = 0.35
+PAGE_PROGRESS_POLL_SECONDS = 0.2
+PAGE_CLICK_RETRY_SECONDS = 2.0
+PAGE_CLICK_TIMEOUT_MS = 5_000
 TUNNEL_BROWSER_STAGGER_SECONDS = 5
 TUNNEL_BROWSER_STAGGER_MAX_SECONDS = 20
 PURCHASE_LIMIT_MARKERS = (
@@ -168,6 +171,30 @@ def browser_startup_snapshot_is_blank(snapshot: dict[str, Any]) -> bool:
     return loading_only and visible_content == 0
 
 
+def page_progress_fingerprint(snapshot: dict[str, Any]) -> tuple[Any, ...]:
+    """Return only meaningful page state used by the idle watchdog."""
+    return (
+        str(snapshot.get("url") or ""),
+        str(snapshot.get("ready_state") or ""),
+        bool(snapshot.get("loading")),
+        str(snapshot.get("text_signature") or ""),
+        str(snapshot.get("field_signature") or ""),
+        int(snapshot.get("visible_content") or 0),
+        int(snapshot.get("field_count") or 0),
+        int(snapshot.get("page_count") or 0),
+    )
+
+
+def page_url_matches_path(value: Any, expected_path: str) -> bool:
+    """Match a SPA destination without depending on query parameters."""
+    try:
+        actual = urlsplit(str(value or "")).path.rstrip("/").lower()
+    except ValueError:
+        return False
+    expected = str(expected_path or "").rstrip("/").lower()
+    return bool(expected) and actual.endswith(expected)
+
+
 def tunnel_browser_start_delay(worker_slot: int) -> int:
     """Stagger shared-tunnel browser starts to avoid one simultaneous burst."""
     position = max(1, int(worker_slot)) - 1
@@ -195,7 +222,7 @@ ORDER_PATTERN = re.compile(
     r"\b(?:ORDER\d{12,}|ORDERSUK\d{12,})\b",
     re.I,
 )
-LOADING_OVERLAY_SCRIPT = """() => {
+PAGE_PROGRESS_SNAPSHOT_SCRIPT = """() => {
   const visible = element => {
     if (!element || element.hidden) return false;
     const style = window.getComputedStyle(element);
@@ -206,15 +233,50 @@ LOADING_OVERLAY_SCRIPT = """() => {
       && rect.width > 0
       && rect.height > 0;
   };
-  const selectors = [
+  const signature = value => {
+    const text = String(value || '');
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `${text.length}:${hash >>> 0}`;
+  };
+  const body = document.body;
+  const loadingSelectors = [
     '.el-loading-mask',
     '.el-loading-spinner',
     '[class*="loading-mask"]',
     '[class*="loadingMask"]'
   ];
-  return selectors.some(selector =>
+  const loading = loadingSelectors.some(selector =>
     Array.from(document.querySelectorAll(selector)).some(visible)
   );
+  const fields = body
+    ? Array.from(body.querySelectorAll('input,select,textarea'))
+    : [];
+  const fieldState = fields.slice(0, 80).map(element => [
+    element.tagName,
+    element.getAttribute('placeholder') || '',
+    element.getAttribute('type') || '',
+    element.disabled ? 'disabled' : 'enabled',
+    String(element.value || '').length
+  ].join(':')).join('|');
+  const visibleContent = body
+    ? Array.from(body.querySelectorAll(
+        'a,button,input,select,textarea,img,svg,canvas,video,iframe,'
+        + '[role="button"],[role="dialog"]'
+      )).filter(visible).length
+    : 0;
+  return {
+    url: location.href,
+    ready_state: document.readyState,
+    loading,
+    text_signature: signature(body?.innerText || ''),
+    field_signature: signature(fieldState),
+    visible_content: visibleContent,
+    field_count: fields.length
+  };
 }"""
 COOKIE_CONSENT_WATCHER_SCRIPT = r"""(() => {
   if (window.__ctexcelConsentWatcherInstalled) return;
@@ -1144,6 +1206,117 @@ class CTExcelAutomation:
                 snapshot.update(value)
         return snapshot
 
+    def _page_progress_snapshot(self, page: Page) -> dict[str, Any]:
+        """Capture URL, Loading, form and visible-DOM progress in one call."""
+        snapshot: dict[str, Any] = {
+            "url": str(getattr(page, "url", "") or ""),
+            "ready_state": "unknown",
+            "loading": False,
+            "text_signature": "",
+            "field_signature": "",
+            "visible_content": 0,
+            "field_count": 0,
+            "page_count": 0,
+        }
+        with contextlib.suppress(Exception):
+            value = page.evaluate(PAGE_PROGRESS_SNAPSHOT_SCRIPT)
+            if isinstance(value, dict):
+                snapshot.update(value)
+        with contextlib.suppress(Exception):
+            snapshot["page_count"] = len(page.context.pages)
+        return snapshot
+
+    def _page_target_state(
+        self,
+        page: Page,
+        *,
+        expected_path: str,
+        ready_script: str,
+    ) -> tuple[bool, str]:
+        current_url = ""
+        with contextlib.suppress(Exception):
+            current_url = str(page.url or "")
+        if page_url_matches_path(current_url, expected_path):
+            return True, "目标网址已出现"
+        with contextlib.suppress(Exception):
+            if bool(page.evaluate(ready_script)):
+                return True, "目标表单已出现"
+        return False, ""
+
+    def _wait_for_page_transition(
+        self,
+        page: Page,
+        *,
+        label: str,
+        expected_path: str,
+        ready_script: str,
+        retry_action: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Wait until the target appears; only 20 seconds of true idleness fails."""
+        stall_seconds = AUTOMATION_STALL_TIMEOUT_MS / 1000
+        total_seconds = max(
+            stall_seconds,
+            max(1_000, int(self.config.page_timeout_ms)) / 1000,
+        )
+        started = time.monotonic()
+        last_progress_at = started
+        initial_fingerprint: Optional[tuple[Any, ...]] = None
+        last_fingerprint: Optional[tuple[Any, ...]] = None
+        retried = False
+        progress_logged = False
+        self.log(f"等待进入{label}")
+        while time.monotonic() - started < total_seconds:
+            self._check_stop()
+            reached, reason = self._page_target_state(
+                page,
+                expected_path=expected_path,
+                ready_script=ready_script,
+            )
+            if reached:
+                self.log(f"{label}已确认：{reason}")
+                return
+            try:
+                page_closed = page.is_closed()
+            except Exception:
+                page_closed = True
+            if page_closed:
+                raise RetryableStalledPageError(
+                    f"{label}出现前页面已关闭"
+                )
+            snapshot = self._page_progress_snapshot(page)
+            fingerprint = page_progress_fingerprint(snapshot)
+            now = time.monotonic()
+            if initial_fingerprint is None:
+                initial_fingerprint = fingerprint
+                last_fingerprint = fingerprint
+            elif fingerprint != last_fingerprint:
+                last_fingerprint = fingerprint
+                last_progress_at = now
+                if not progress_logged:
+                    self.log(f"{label}正在加载，已检测到页面进度")
+                    progress_logged = True
+            elif (
+                retry_action is not None
+                and not retried
+                and now - started >= PAGE_CLICK_RETRY_SECONDS
+                and fingerprint == initial_fingerprint
+            ):
+                retried = True
+                self.log("首次点击未产生页面变化，自动重试一次")
+                try:
+                    retry_action()
+                except Exception as exc:
+                    self.log(f"点击重试未返回：{type(exc).__name__}: {exc}")
+                last_progress_at = time.monotonic()
+            if now - last_progress_at >= stall_seconds:
+                raise RetryableStalledPageError(
+                    f"{label}连续 20 秒没有 URL、Loading 或表单变化"
+                )
+            self._wait_interruptibly(PAGE_PROGRESS_POLL_SECONDS)
+        raise RetryableStalledPageError(
+            f"{label}持续变化但超过 {int(total_seconds)} 秒仍未完成"
+        )
+
     def _open_registration_entry(
         self,
         page: Page,
@@ -1360,10 +1533,15 @@ class CTExcelAutomation:
         if not price_is_expected(page_text, "1.00"):
             raise AutomationError("£1 预存领卡页面的订单金额校验失败")
         self.log("已选择预存 £1 领卡、实体 SIM、免费随机号码")
-        self._click_button(page, "下一步")
-        page.wait_for_url(
-            "**/freecard/activityPagefillInfos",
-            timeout=self._automation_wait_timeout_ms(),
+        self._click_button_and_wait_for_page(
+            page,
+            "下一步",
+            label="£1 领卡资料页",
+            expected_path="/freecard/activityPagefillInfos",
+            ready_script="""() => Boolean(
+              document.querySelector('input[placeholder="请填写姓"]')
+              || document.querySelector('input[placeholder="请填写邮箱"]')
+            )""",
         )
         self._wait_for_page_ready(page, "£1 领卡资料页")
 
@@ -1464,8 +1642,16 @@ class CTExcelAutomation:
         if "is-checked" in switch_class:
             raise AutomationError("自动续订仍处于开启状态")
         self.log("实体 SIM、免费随机号码、1个月、1张，自动续订已关闭")
-        self._click_button(page, "下一步")
-        page.wait_for_url("**/buycard/fillinfos", timeout=self._automation_wait_timeout_ms())
+        self._click_button_and_wait_for_page(
+            page,
+            "下一步",
+            label="客户资料页",
+            expected_path="/buycard/fillinfos",
+            ready_script="""() => Boolean(
+              document.querySelector('input[placeholder="请填写姓"]')
+              || document.querySelector('input[placeholder="请填写邮箱"]')
+            )""",
+        )
         self._wait_for_page_ready(page, "客户资料页")
 
     def _dismiss_cookie_consent(self, page: Page) -> None:
@@ -1777,15 +1963,30 @@ class CTExcelAutomation:
         *,
         stable_seconds: float = PAGE_READY_STABLE_SECONDS,
     ) -> None:
-        """等待全屏 Loading 消失并保持稳定，避免请求刚结束就继续点击。"""
-        timeout_ms = self._automation_wait_timeout_ms()
-        deadline = time.monotonic() + timeout_ms / 1000
+        """等待 Loading 消失；DOM 有进度时重置 20 秒空闲计时。"""
+        stall_seconds = AUTOMATION_STALL_TIMEOUT_MS / 1000
+        total_seconds = max(
+            stall_seconds,
+            max(1_000, int(self.config.page_timeout_ms)) / 1000,
+        )
+        started = time.monotonic()
+        last_progress_at = started
+        last_fingerprint: Optional[tuple[Any, ...]] = None
         stable_since: Optional[float] = None
         saw_loading = False
-        while time.monotonic() < deadline:
+        while time.monotonic() - started < total_seconds:
             self._check_stop()
             try:
-                loading = bool(page.evaluate(LOADING_OVERLAY_SCRIPT))
+                page_closed = page.is_closed()
+            except Exception:
+                page_closed = True
+            if page_closed:
+                raise RetryableStalledPageError(
+                    f"页面已关闭，等待加载中止：{label}"
+                )
+            try:
+                snapshot = self._page_progress_snapshot(page)
+                loading = bool(snapshot.get("loading"))
             except Exception:
                 if page.is_closed():
                     raise RetryableStalledPageError(
@@ -1794,6 +1995,13 @@ class CTExcelAutomation:
                 stable_since = None
                 self._wait_interruptibly(0.25)
                 continue
+            now = time.monotonic()
+            fingerprint = page_progress_fingerprint(snapshot)
+            if last_fingerprint is None:
+                last_fingerprint = fingerprint
+            elif fingerprint != last_fingerprint:
+                last_fingerprint = fingerprint
+                last_progress_at = now
             if loading:
                 if not saw_loading:
                     self.log(f"等待页面加载完成：{label}")
@@ -1801,17 +2009,21 @@ class CTExcelAutomation:
                 stable_since = None
             else:
                 if stable_since is None:
-                    stable_since = time.monotonic()
-                elif time.monotonic() - stable_since >= max(
+                    stable_since = now
+                elif now - stable_since >= max(
                     0.25,
                     stable_seconds,
                 ):
                     if saw_loading:
                         self.log(f"页面加载完成：{label}")
                     return
+            if now - last_progress_at >= stall_seconds:
+                raise RetryableStalledPageError(
+                    f"{label} 连续 20 秒没有 URL、Loading 或 DOM 变化"
+                )
             self._wait_interruptibly(0.1)
         raise RetryableStalledPageError(
-            f"{label} 20 秒没有新动作；Loading 遮罩持续未消失"
+            f"{label} 持续变化但超过 {int(total_seconds)} 秒仍未就绪"
         )
 
     @staticmethod
@@ -2300,7 +2512,58 @@ class CTExcelAutomation:
             page.get_by_role("button", name=name, exact=True),
             f"按钮“{name}”",
         )
-        locator.click()
+        locator.click(no_wait_after=True)
+
+    def _click_button_and_wait_for_page(
+        self,
+        page: Page,
+        name: str,
+        *,
+        label: str,
+        expected_path: str,
+        ready_script: str,
+    ) -> None:
+        """Decouple a SPA click from Playwright's navigation auto-wait."""
+        self.log(f"准备点击“{name}”并进入{label}")
+        self._wait_for_page_ready(page, f"点击“{name}”前")
+        locator = self._visible_locator(
+            page.get_by_role("button", name=name, exact=True),
+            f"按钮“{name}”",
+        )
+        try:
+            locator.click(
+                no_wait_after=True,
+                timeout=min(
+                    PAGE_CLICK_TIMEOUT_MS,
+                    self._automation_step_timeout_ms(),
+                ),
+            )
+            self.log(f"“{name}”点击已提交")
+        except PlaywrightTimeoutError:
+            reached, reason = self._page_target_state(
+                page,
+                expected_path=expected_path,
+                ready_script=ready_script,
+            )
+            if reached:
+                self.log(
+                    f"“{name}”点击等待虽未返回，但{label}{reason}"
+                )
+            else:
+                self.log(
+                    f"“{name}”点击 5 秒未返回，已转入页面进度检测"
+                )
+
+        def retry_click() -> None:
+            locator.evaluate("element => element.click()")
+
+        self._wait_for_page_transition(
+            page,
+            label=label,
+            expected_path=expected_path,
+            ready_script=ready_script,
+            retry_action=retry_click,
+        )
 
 
 class CTExcelBatchAutomation:
@@ -2341,6 +2604,7 @@ class CTExcelBatchAutomation:
         self.qg_proxy_ips: set[str] = set()
         self.resume_customer_ids_by_ordinal: dict[int, int] = {}
         self.resume_assignment_supported = False
+        self.legacy_api_serial_required = False
 
     def _prepare_resume_customer_ids(
         self,
@@ -2351,6 +2615,7 @@ class CTExcelBatchAutomation:
         """Assign distinct unfinished customers before any proxy is acquired."""
         self.resume_customer_ids_by_ordinal = {}
         self.resume_assignment_supported = False
+        self.legacy_api_serial_required = False
         if self.automation_factory is not CTExcelAutomation:
             return
         self.stage("优先整理未完成客户")
@@ -2363,8 +2628,10 @@ class CTExcelBatchAutomation:
             status = api.connect()
             api_version = int(status.get("api_version") or 0)
             if api_version < 8:
+                self.legacy_api_serial_required = True
                 self.log(
-                    "客户管理 API 版本较旧，本轮保留单线程待完成客户复用策略"
+                    "客户管理 API 版本较旧；为防止并发线程"
+                    "重复复用或新建空邮箱，本轮自动改为单线程逐个复用"
                 )
                 return
             self.resume_assignment_supported = True
@@ -2712,6 +2979,12 @@ class CTExcelBatchAutomation:
             if self.config.continuous_enabled
             else 1
         )
+        if self.legacy_api_serial_required and workers > 1:
+            self.log(
+                f"已暂停配置的 {workers} 线程并发；"
+                "等服务端升级到 API v8 后会自动恢复并发"
+            )
+            workers = 1
         if workers <= 1:
             return self._run_serial(
                 total=total,
