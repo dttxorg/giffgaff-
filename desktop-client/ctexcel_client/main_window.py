@@ -42,10 +42,12 @@ from .config import (
     PURCHASE_ROUTE_FREECARD,
     RegistrationDefaults,
     TelegramConfig,
+    display_qg_proxy_api_url,
     is_cliproxy_whitelist_url,
     is_qg_proxy_api_url,
     load_config,
     save_config,
+    split_qg_proxy_api_key,
 )
 from .telegram import TelegramNotifier
 from .proxy import (
@@ -411,13 +413,9 @@ class MainWindow(QMainWindow):
         self.proxy_password.setEchoMode(QLineEdit.Password)
         self.proxy_api_url = QLineEdit()
         self.proxy_api_url.setPlaceholderText(
-            "https://share.proxy.qg.net/get?num=1&distinct=true"
+            "粘贴服务商生成的完整提取链接（包含 key 和全部参数）"
         )
         self.proxy_api_url.setClearButtonEnabled(True)
-        self.proxy_api_key = QLineEdit()
-        self.proxy_api_key.setPlaceholderText("产品唯一标识 key")
-        self.proxy_api_key.setEchoMode(QLineEdit.Password)
-        self.proxy_api_key.setClearButtonEnabled(True)
 
         self.proxy_mode_label = self._field_label("代理模式")
         self.proxy_type_label = self._field_label("代理协议")
@@ -433,8 +431,7 @@ class MainWindow(QMainWindow):
         self.proxy_port_label = self._field_label("已解析端口")
         self.proxy_username_label = self._field_label("已解析账号")
         self.proxy_password_label = self._field_label("已解析密码")
-        self.proxy_api_url_label = self._field_label("提取接口")
-        self.proxy_api_key_label = self._field_label("青果代理 API Key")
+        self.proxy_api_url_label = self._field_label("完整提取链接")
 
         grid.addWidget(self.proxy_mode_label, 0, 0)
         grid.addWidget(self.proxy_type_label, 0, 1)
@@ -463,8 +460,6 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.proxy_password, 12, 1)
         grid.addWidget(self.proxy_api_url_label, 13, 0, 1, 2)
         grid.addWidget(self.proxy_api_url, 14, 0, 1, 2)
-        grid.addWidget(self.proxy_api_key_label, 15, 0, 1, 2)
-        grid.addWidget(self.proxy_api_key, 16, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
@@ -500,7 +495,6 @@ class MainWindow(QMainWindow):
             self.proxy_username,
             self.proxy_password,
             self.proxy_api_url,
-            self.proxy_api_key,
         ):
             if isinstance(field, QLineEdit):
                 field.textChanged.connect(self._proxy_fields_changed)
@@ -753,10 +747,13 @@ class MainWindow(QMainWindow):
         self.proxy_port.setText(config.proxy.port)
         self.proxy_username.setText(config.proxy.username)
         self.proxy_password.setText(config.proxy.password)
-        self.proxy_api_url.setText(config.proxy.api_url)
-        self.proxy_api_key.setText(config.proxy.api_key)
+        proxy_api_url = display_qg_proxy_api_url(
+            config.proxy.api_url,
+            config.proxy.api_key,
+        )
+        self.proxy_api_url.setText(proxy_api_url)
         self.proxy_api_url.setCursorPosition(0)
-        self.proxy_api_url.setToolTip(config.proxy.api_url)
+        self.proxy_api_url.setToolTip(proxy_api_url)
         self.proxy_pool.setPlainText(config.proxy.pool)
         self.proxy_pool_uses_min.setValue(config.proxy.pool_uses_min)
         self.proxy_pool_uses_max.setValue(config.proxy.pool_uses_max)
@@ -784,6 +781,14 @@ class MainWindow(QMainWindow):
             coupon_code=self.coupon_code.text().strip() or "DEAL50OFF",
             expected_price_gbp=self.expected_price.text().strip() or "5.95",
         )
+        proxy_api_url, embedded_api_key = split_qg_proxy_api_key(
+            self.proxy_api_url.text().strip()
+        )
+        if (
+            not embedded_api_key
+            and is_qg_proxy_api_url(proxy_api_url)
+        ):
+            embedded_api_key = self.config.proxy.api_key
         proxy = ProxyConfig(
             mode=str(self.proxy_mode.currentData() or "none"),
             proxy_type=str(self.proxy_type.currentData() or "socks5"),
@@ -794,8 +799,8 @@ class MainWindow(QMainWindow):
             port=self.proxy_port.text().strip(),
             username=self.proxy_username.text().strip(),
             password=self.proxy_password.text(),
-            api_url=self.proxy_api_url.text().strip(),
-            api_key=self.proxy_api_key.text().strip(),
+            api_url=proxy_api_url,
+            api_key=embedded_api_key,
             api_timeout_seconds=self.config.proxy.api_timeout_seconds,
         )
         telegram = TelegramConfig(
@@ -905,8 +910,6 @@ class MainWindow(QMainWindow):
         for widget in (self.proxy_api_url_label, self.proxy_api_url):
             widget.setVisible(api_mode)
         qg_api = api_mode and is_qg_proxy_api_url(self.proxy_api_url.text())
-        for widget in (self.proxy_api_key_label, self.proxy_api_key):
-            widget.setVisible(qg_api)
         for widget in (self.public_ip_status, self.copy_public_ip_btn):
             widget.setVisible(api_mode)
         self.proxy_test_btn.setEnabled(mode != "none")
@@ -927,8 +930,8 @@ class MainWindow(QMainWindow):
         else:
             if qg_api:
                 self.proxy_status.setText(
-                    "青果 /get 每单提取 1 个节点；支持 area、area_ex、"
-                    "isp、distinct 查询参数"
+                    "直接粘贴服务商生成的完整 /get 链接；客户端从返回内容"
+                    "提取代理节点"
                 )
             else:
                 self.proxy_status.setText(
@@ -943,8 +946,6 @@ class MainWindow(QMainWindow):
         qg_api = mode == "api" and is_qg_proxy_api_url(
             self.proxy_api_url.text()
         )
-        for widget in (self.proxy_api_key_label, self.proxy_api_key):
-            widget.setVisible(qg_api)
         self.proxy_api_url.setToolTip(self.proxy_api_url.text().strip())
         if mode != "none":
             self.proxy_status.setText("代理配置已修改，请提取并测试")

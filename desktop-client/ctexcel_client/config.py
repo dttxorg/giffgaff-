@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote_plus, unquote_plus, urlsplit, urlunsplit
 
 
 APP_NAME = "CTExcelApplyClient"
@@ -47,16 +47,28 @@ def split_qg_proxy_api_key(value: str) -> tuple[str, str]:
     if not is_qg_proxy_api_url(raw):
         return raw, ""
     parsed = urlsplit(raw)
-    query_items = parse_qsl(parsed.query, keep_blank_values=True)
     api_key = ""
-    filtered: list[tuple[str, str]] = []
-    for name, item_value in query_items:
-        if name == "key":
-            api_key = item_value.strip()
+    filtered: list[str] = []
+    for item in parsed.query.split("&"):
+        name, separator, item_value = item.partition("=")
+        if unquote_plus(name) == "key":
+            api_key = unquote_plus(item_value).strip() if separator else ""
         else:
-            filtered.append((name, item_value))
-    sanitized = urlunsplit(parsed._replace(query=urlencode(filtered)))
+            filtered.append(item)
+    sanitized = urlunsplit(parsed._replace(query="&".join(filtered)))
     return sanitized, api_key
+
+
+def display_qg_proxy_api_url(value: str, api_key: str) -> str:
+    """Rebuild the full QG extraction link shown in the single URL field."""
+    raw, embedded_api_key = split_qg_proxy_api_key(value)
+    key = embedded_api_key or str(api_key or "").strip()
+    if not key or not is_qg_proxy_api_url(raw):
+        return raw
+    parsed = urlsplit(raw)
+    key_item = f"key={quote_plus(key)}"
+    query = f"{key_item}&{parsed.query}" if parsed.query else key_item
+    return urlunsplit(parsed._replace(query=query))
 
 
 def is_cliproxy_whitelist_url(value: str) -> bool:

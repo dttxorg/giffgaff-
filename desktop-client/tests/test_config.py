@@ -10,9 +10,11 @@ from ctexcel_client.config import (
     PURCHASE_ROUTE_FREECARD,
     RegistrationDefaults,
     TelegramConfig,
+    display_qg_proxy_api_url,
     is_qg_proxy_api_url,
     load_config,
     save_config,
+    split_qg_proxy_api_key,
 )
 
 
@@ -42,7 +44,7 @@ def test_client_ui_uses_scoped_api_without_hidden_entry_field():
     assert "self.continuous_workers.setRange(1, 10)" in source
     assert '"Telegram 付款提醒"' in source
     assert '"测试推送"' in source
-    assert __version__ == "2.4.0"
+    assert __version__ == "2.4.1"
     assert 'f"CTExcel 申请工作台 v{__version__}"' in source
 
 
@@ -106,6 +108,23 @@ def test_qg_key_embedded_in_url_is_removed_before_config_write(tmp_path: Path):
     assert "area=350500" in raw
 
 
+def test_qg_full_extraction_link_round_trip_preserves_parameters():
+    full_url = (
+        "https://share.proxy.qg.net/get?key=sample-key&num=1&area="
+        "&isp=0&format=txt&seq=\\r\\n&distinct=false"
+    )
+
+    sanitized, api_key = split_qg_proxy_api_key(full_url)
+    displayed = display_qg_proxy_api_url(sanitized, api_key)
+
+    assert api_key == "sample-key"
+    assert sanitized == (
+        "https://share.proxy.qg.net/get?num=1&area=&isp=0&format=txt"
+        "&seq=\\r\\n&distinct=false"
+    )
+    assert displayed == full_url
+
+
 def test_proxy_ui_exposes_fixed_and_dynamic_socks5_modes():
     source = (
         Path(__file__).resolve().parents[1]
@@ -126,7 +145,9 @@ def test_proxy_ui_exposes_fixed_and_dynamic_socks5_modes():
     assert "当前出口公网 IP" in source
     assert "background-color: #ffffff" in source
     assert "Qt.TextSelectableByMouse" in source
-    assert "青果代理 API Key" in source
+    assert 'self.proxy_api_url_label = self._field_label("完整提取链接")' in source
+    assert "self.proxy_api_key" not in source
+    assert "直接粘贴服务商生成的完整 /get 链接" in source
     assert is_qg_proxy_api_url(DEFAULT_PROXY_API_URL)
 
 
