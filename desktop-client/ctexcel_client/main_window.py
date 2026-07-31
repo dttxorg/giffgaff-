@@ -911,7 +911,7 @@ class MainWindow(QMainWindow):
             widget.setVisible(api_mode)
         qg_api = api_mode and is_qg_proxy_api_url(self.proxy_api_url.text())
         for widget in (self.public_ip_status, self.copy_public_ip_btn):
-            widget.setVisible(api_mode)
+            widget.setVisible(api_mode and not qg_api)
         self.proxy_test_btn.setEnabled(mode != "none")
         if mode == "none":
             self.proxy_status.setText("当前使用直连")
@@ -946,6 +946,8 @@ class MainWindow(QMainWindow):
         qg_api = mode == "api" and is_qg_proxy_api_url(
             self.proxy_api_url.text()
         )
+        for widget in (self.public_ip_status, self.copy_public_ip_btn):
+            widget.setVisible(mode == "api" and not qg_api)
         self.proxy_api_url.setToolTip(self.proxy_api_url.text().strip())
         if mode != "none":
             self.proxy_status.setText("代理配置已修改，请提取并测试")

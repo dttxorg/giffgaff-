@@ -474,3 +474,43 @@ def test_prepare_proxy_adds_detected_public_ip_to_whitelist_error(
     assert "当前出口公网 IP：8.8.8.8" in message
     assert "局域网 IP 或服务器 IP" in message
     assert "已按 SOCKS5 协议验证" in message
+
+
+def test_qg_prepare_proxy_skips_public_ip_and_whitelist_guidance(
+    monkeypatch,
+):
+    config = ProxyConfig(
+        mode="api",
+        proxy_type="socks5",
+        api_url=DEFAULT_PROXY_API_URL,
+        api_key="sample-key",
+    )
+
+    def unexpected_public_ip_detection():
+        raise AssertionError("QG links do not need public IP detection")
+
+    monkeypatch.setattr(
+        "ctexcel_client.proxy.detect_public_ip",
+        unexpected_public_ip_detection,
+    )
+    monkeypatch.setattr(
+        "ctexcel_client.proxy.resolve_proxy",
+        lambda _config: {"server": "socks5://proxy.example.test:3010"},
+    )
+
+    def reject(_proxy):
+        raise ProxyError("代理服务器连接或协议握手失败")
+
+    monkeypatch.setattr(
+        "ctexcel_client.proxy.probe_proxy_endpoint",
+        reject,
+    )
+
+    with pytest.raises(ProxyError) as exc_info:
+        prepare_proxy(config)
+
+    message = str(exc_info.value)
+    assert "该完整提取链接不使用客户端公网 IP 白名单" in message
+    assert "代理协议与所购产品一致" in message
+    assert "当前出口公网 IP" not in message
+    assert "局域网 IP 或服务器 IP" not in message

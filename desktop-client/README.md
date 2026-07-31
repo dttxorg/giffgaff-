@@ -176,6 +176,10 @@ https://share.proxy.qg.net/get?num=1&area=360000&isp=0&format=txt&seq=\r\n&disti
 Windows DPAPI 加密；再次打开设置时会自动还原成一条完整链接，不需要第二个
 Key 输入框。
 
+青果完整提取链接不依赖客户端公网 IP 白名单，因此界面不会显示公网 IP 复制区，
+连接失败时也不会再提示配置白名单；客户端只检查提取结果的代理协议、节点有效期
+以及目标端口连通性。
+
 客户端从响应 `data[0].server` 读取实际代理入口，不会把 `proxy_ip` 当作连接
 地址。`code` 非 `SUCCESS` 时会显示对应错误说明和 `request_id`，便于定位
 鉴权、60 次/分钟频控、资源不足及每日提取配额问题。
