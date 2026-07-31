@@ -1026,33 +1026,24 @@ class CTExcelAutomation:
         api: AdminApi,
         customer_id: int,
     ) -> dict[str, Any]:
-        """支付完成后等待订单邮件，并立即把手机号写入客户记录。"""
-        timeout_seconds = max(
-            15,
-            int(self.config.order_sync_timeout_seconds),
-        )
-        deadline = time.monotonic() + timeout_seconds
-        last_result: dict[str, Any] = {}
-        last_error = ""
-        while time.monotonic() < deadline:
-            self._check_stop()
-            try:
-                result = api.sync_order_info(customer_id)
-            except ApiError as exc:
-                last_error = str(exc)
-            else:
-                last_result = result
-                phone_number = str(result.get("phone_number") or "").strip()
-                if phone_number:
-                    self.log(f"手机号已从订单邮件同步：{phone_number}")
-                    return result
-            time.sleep(5)
-        detail = str(last_result.get("detail") or last_error).strip()
+        """支付完成后触发一次邮箱同步；手机号缺失不阻塞本单完成。"""
+        self._check_stop()
+        try:
+            result = api.sync_order_info(customer_id)
+        except ApiError as exc:
+            self.log(f"订单邮件即时扫描暂未完成：{exc}")
+            return {}
+        phone_number = str(result.get("phone_number") or "").strip()
+        if phone_number:
+            self.log(f"手机号已从订单邮件同步：{phone_number}")
+            return result
+        detail = str(result.get("detail") or "").strip()
         self.log(
-            "订单邮件暂未出现手机号，服务器后台会继续自动扫描"
+            "本单已完成；订单邮件暂未提供手机号，"
+            "服务器后台会继续自动扫描"
             + (f"：{detail}" if detail else "")
         )
-        return last_result
+        return result
 
     def _start_freecard_application(self, page: Page) -> None:
         self.stage("选择申请路线")
@@ -1603,22 +1594,15 @@ class CTExcelAutomation:
             ):
                 self.log(
                     "首次订单确认响应没有捕获到手机号，"
-                    "正在刷新确认页重新读取"
-                )
-                page.reload(
-                    wait_until="domcontentloaded",
-                    timeout=self.config.page_timeout_ms,
-                )
-                self._wait_for_page_ready(
-                    page,
-                    "重新读取 £1 订单确认资料",
+                    "短暂等待接口补充返回"
                 )
                 if not self._wait_for_confirmed_phone(
-                    timeout_seconds=15,
+                    timeout_seconds=3,
                 ):
-                    raise AutomationError(
-                        "订单确认接口没有返回手机号，已停止进入支付；"
-                        "本单尚未生成付款订单"
+                    self.log(
+                        "订单确认接口暂未返回手机号，继续进入支付；"
+                        "支付成功和订单确认邮件仍会完成本单，"
+                        "手机号由服务器后台继续同步"
                     )
         if self.config.purchase_route == PURCHASE_ROUTE_50GB:
             coupon_code = defaults.coupon_code.strip()
@@ -1796,60 +1780,27 @@ class CTExcelAutomation:
                         page,
                         known_order_number,
                     )
-                detail_deadline = min(
-                    deadline,
-                    time.monotonic() + 300,
-                )
+                detail_deadline = min(deadline, time.monotonic() + 8)
                 parsed = {
                     "order_number": "",
                     "phone_number": "",
                     "transaction_amount": "",
                 }
                 direct_detail = parsed.copy()
-                next_direct_query = 0.0
-                next_progress_log = time.monotonic() + 15
                 while time.monotonic() < detail_deadline:
                     self._check_stop()
                     if page.is_closed():
-                        raise AutomationError(
-                            "支付成功页已关闭，尚未完成手机号回写"
-                        )
+                        break
                     with contextlib.suppress(Exception):
                         parsed = parse_success_text(
                             page.locator("body").inner_text(timeout=3000)
                         )
-                    now = time.monotonic()
-                    if (
-                        not parsed["phone_number"]
-                        and not self.captured_phone_number
-                        and self.config.purchase_route
-                        == PURCHASE_ROUTE_FREECARD
-                        and known_order_number
-                        and now >= next_direct_query
-                    ):
-                        direct_detail = self._query_freecard_order_detail(
-                            page,
-                            known_order_number,
-                        )
-                        next_direct_query = time.monotonic() + 5
                     if (
                         parsed["phone_number"]
                         or self.captured_phone_number
                         or direct_detail["phone_number"]
                     ):
                         break
-                    if now >= next_progress_log:
-                        status_hint = (
-                            f"（官网接口状态：{self.order_detail_status}）"
-                            if self.order_detail_status
-                            else ""
-                        )
-                        self.log(
-                            "付款状态已确认，CTExcel 仍在分配号码；"
-                            "客户端继续直接查询本订单，不需要手动刷新"
-                            + status_hint
-                        )
-                        next_progress_log = now + 15
                     self._wait_interruptibly(1)
                 order_number = (
                     parsed["order_number"]
@@ -1863,26 +1814,9 @@ class CTExcelAutomation:
                     or direct_detail["phone_number"]
                 )
                 if not phone_number:
-                    recent_failures = [
-                        item
-                        for item in self.network_events
-                        if item.startswith(
-                            (
-                                "HTTP ",
-                                "FAILED ",
-                                "PAGE_ERROR ",
-                                "ORDER_DETAIL_",
-                            )
-                        )
-                    ][-3:]
-                    detail = (
-                        "；".join(recent_failures)
-                        if recent_failures
-                        else "订单详情接口未返回手机号"
-                    )
-                    raise AutomationError(
-                        "支付成功页在 5 分钟内没有返回 CTExcel 手机号码"
-                        f"：{detail}"
+                    self.log(
+                        "支付成功已确认；本次没有读取到手机号，"
+                        "本单仍标记为完成并继续后续流程"
                     )
                 transaction_amount = (
                     parsed["transaction_amount"]
@@ -1895,11 +1829,18 @@ class CTExcelAutomation:
                     transaction_amount=transaction_amount,
                     phone_number=phone_number,
                 )
-                self.log(
-                    "成功页资料已写入客户管理："
-                    f"{order_number} / {phone_number} / "
-                    f"£{transaction_amount}"
-                )
+                if phone_number:
+                    self.log(
+                        "成功页资料已写入客户管理："
+                        f"{order_number} / {phone_number} / "
+                        f"£{transaction_amount}"
+                    )
+                else:
+                    self.log(
+                        "支付成功订单已保留："
+                        f"{order_number} / £{transaction_amount}；"
+                        "手机号保持为空并交由后台邮件同步"
+                    )
                 return AutomationResult(
                     customer_id=customer_id,
                     email=email,

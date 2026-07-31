@@ -223,6 +223,59 @@ def test_success_page_ignores_loading_overlay_and_saves_phone():
     assert any("忽略该页面持续显示的 Loading 遮罩" in item for item in messages)
 
 
+def test_success_page_without_phone_still_completes_order():
+    class FakePage:
+        url = "https://www.ctexcel.com/freecard/activityPageSuccess"
+
+        def is_closed(self):
+            return True
+
+        def evaluate(self, *_args, **_kwargs):
+            return {"restored": True}
+
+    class FakeApi:
+        def __init__(self):
+            self.saved = None
+
+        def save_payment_checkpoint(self, customer_id, **fields):
+            self.saved = (customer_id, fields)
+            return {"ok": True}
+
+    messages = []
+    api = FakeApi()
+    automation = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _message: None,
+        customer_created=lambda _payload: None,
+    )
+
+    result = automation._wait_for_payment_success(
+        FakePage(),
+        api=api,
+        customer_id=488,
+        email="confirmed@example.test",
+        pending_order={
+            "order_number": "ORDERSUK2026073108002196346332",
+            "transaction_amount": "1.00",
+        },
+    )
+
+    assert result.order_number == "ORDERSUK2026073108002196346332"
+    assert result.phone_number == ""
+    assert result.transaction_amount == "1.00"
+    assert api.saved == (
+        488,
+        {
+            "order_number": "ORDERSUK2026073108002196346332",
+            "transaction_amount": "1.00",
+            "phone_number": "",
+        },
+    )
+    assert any("本单仍标记为完成" in item for item in messages)
+    assert any("手机号保持为空" in item for item in messages)
+
+
 def test_browser_profile_is_isolated_and_automation_banner_is_removed():
     source = (
         Path(__file__).resolve().parents[1]
@@ -367,7 +420,7 @@ def test_phone_is_read_from_page_level_console_capture():
     )
 
 
-def test_freecard_payment_is_blocked_when_preallocated_phone_is_missing():
+def test_freecard_payment_continues_when_preallocated_phone_is_missing():
     source = (
         Path(__file__).resolve().parents[1]
         / "ctexcel_client"
@@ -379,8 +432,8 @@ def test_freecard_payment_is_blocked_when_preallocated_phone_is_missing():
     assert "window.fetch = async" in source
     assert "CTEXCEL_ORDER_CAPTURE:" in source
     assert "window.__ctexcelOrderCapture" not in source
-    assert "page.reload(" in source
-    assert "订单确认接口没有返回手机号，已停止进入支付" in source
+    assert "订单确认接口暂未返回手机号，继续进入支付" in source
+    assert "订单确认接口没有返回手机号，已停止进入支付" not in source
 
 
 def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
