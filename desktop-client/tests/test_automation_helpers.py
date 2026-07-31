@@ -283,6 +283,55 @@ def test_success_page_phone_can_be_captured_from_finished_api_response():
     assert automation.captured_phone_number == "447434000172"
 
 
+def test_phone_is_captured_from_order_confirmation_before_payment():
+    handlers = {}
+
+    class FakePage:
+        url = "https://www.ctexcel.com/freecard/activityPageconfirm"
+
+        def on(self, name, handler):
+            handlers[name] = handler
+
+    class FakeResponse:
+        status = 200
+        headers = {"content-type": "application/json;charset=UTF-8"}
+
+        def text(self):
+            return (
+                '{"code":0,"data":{'
+                '"recommendPhone":"447942946765",'
+                '"msisdn":"447434000172",'
+                '"orderTotalPrice":"1.00"}}'
+            )
+
+    class FakeRequest:
+        url = (
+            "https://www.ctexcel.com/newcteuk/studentActivity/"
+            "getOrderConfirmList"
+        )
+        method = "POST"
+        resource_type = "xhr"
+
+        def response(self):
+            return FakeResponse()
+
+    automation = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _message: None,
+        customer_created=lambda _payload: None,
+    )
+    automation._attach_page_diagnostics(FakePage())
+
+    handlers["requestfinished"](FakeRequest())
+
+    assert automation.captured_phone_number == "447434000172"
+    assert any(
+        "source=confirm" in event
+        for event in automation.network_events
+    )
+
+
 def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     source = (
         Path(__file__).resolve().parents[1]

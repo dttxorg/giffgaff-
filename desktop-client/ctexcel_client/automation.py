@@ -412,6 +412,7 @@ class CTExcelAutomation:
         self.network_events: list[str] = []
         self.captured_order_number = ""
         self.captured_phone_number = ""
+        self.order_detail_status = ""
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -686,6 +687,7 @@ class CTExcelAutomation:
         self.network_events = []
         self.captured_order_number = ""
         self.captured_phone_number = ""
+        self.order_detail_status = ""
 
         def on_request_failed(request: Any) -> None:
             parsed = urlsplit(str(getattr(request, "url", "") or ""))
@@ -719,9 +721,20 @@ class CTExcelAutomation:
                         f"{getattr(request, 'method', 'GET')} "
                         f"{parsed.path}"
                     )
-                if not is_payment_success_url(page.url):
-                    return
                 if resource_type not in {"xhr", "fetch"}:
+                    return
+                is_success_page = is_payment_success_url(page.url)
+                is_order_confirm_response = parsed.path.endswith(
+                    "/studentActivity/getOrderConfirmList"
+                )
+                is_order_detail_response = parsed.path.endswith(
+                    "/studentActivity/getStuOrderCardDetail"
+                )
+                if not (
+                    is_success_page
+                    or is_order_confirm_response
+                    or is_order_detail_response
+                ):
                     return
                 content_type = str(
                     response.headers.get("content-type", "")
@@ -732,17 +745,43 @@ class CTExcelAutomation:
                 ):
                     return
                 body = response.text()
-                order = ORDER_PATTERN.search(body)
-                phone = PHONE_PATTERN.search(body)
-                if order:
-                    self.captured_order_number = order.group(0).upper()
-                if phone:
-                    self.captured_phone_number = phone.group(0)
-                if order or phone:
+                structured = {
+                    "order_number": "",
+                    "phone_number": "",
+                    "transaction_amount": "",
+                }
+                with contextlib.suppress(ValueError, TypeError):
+                    structured = parse_order_detail_response(
+                        json.loads(body)
+                    )
+                order_number = structured["order_number"]
+                phone_number = structured["phone_number"]
+                if is_success_page:
+                    order = ORDER_PATTERN.search(body)
+                    phone = PHONE_PATTERN.search(body)
+                    order_number = (
+                        order_number
+                        or (order.group(0).upper() if order else "")
+                    )
+                    phone_number = (
+                        phone_number
+                        or (phone.group(0) if phone else "")
+                    )
+                if order_number:
+                    self.captured_order_number = order_number
+                if phone_number:
+                    self.captured_phone_number = phone_number
+                if order_number or phone_number:
+                    source = (
+                        "confirm"
+                        if is_order_confirm_response
+                        else "detail"
+                    )
                     self._record_network_event(
                         f"CAPTURED {status} {parsed.path} · "
-                        f"order={'yes' if order else 'no'} · "
-                        f"phone={'yes' if phone else 'no'}"
+                        f"source={source} · "
+                        f"order={'yes' if order_number else 'no'} · "
+                        f"phone={'yes' if phone_number else 'no'}"
                     )
 
         def on_page_error(error: Any) -> None:
@@ -1402,6 +1441,11 @@ class CTExcelAutomation:
             if not price_is_expected(body_text, "1.00"):
                 raise AutomationError("£1 预存领卡订单金额校验失败")
             self.log("£1 预存领卡订单金额已核对")
+            if self.captured_phone_number:
+                self.log(
+                    "订单确认接口已分配手机号；"
+                    "付款成功后将直接写入客户管理"
+                )
 
         other_payment = page.get_by_role(
             "radio",
@@ -1569,9 +1613,15 @@ class CTExcelAutomation:
                     ):
                         break
                     if now >= next_progress_log:
+                        status_hint = (
+                            f"（官网接口状态：{self.order_detail_status}）"
+                            if self.order_detail_status
+                            else ""
+                        )
                         self.log(
                             "付款状态已确认，CTExcel 仍在分配号码；"
                             "客户端继续直接查询本订单，不需要手动刷新"
+                            + status_hint
                         )
                         next_progress_log = now + 15
                     self._wait_interruptibly(1)
@@ -1591,7 +1641,12 @@ class CTExcelAutomation:
                         item
                         for item in self.network_events
                         if item.startswith(
-                            ("HTTP ", "FAILED ", "PAGE_ERROR ")
+                            (
+                                "HTTP ",
+                                "FAILED ",
+                                "PAGE_ERROR ",
+                                "ORDER_DETAIL_",
+                            )
                         )
                     ][-3:]
                     detail = (
@@ -1679,6 +1734,7 @@ class CTExcelAutomation:
             return empty
         parsed = parse_order_detail_response(response)
         if parsed["phone_number"]:
+            self.order_detail_status = "已返回手机号"
             self._record_network_event(
                 "ORDER_DETAIL_DIRECT phone=yes order=yes"
             )
@@ -1689,10 +1745,17 @@ class CTExcelAutomation:
             else "invalid"
         )
         code = ""
+        message = ""
         if isinstance(response, dict):
             payload = response.get("payload")
             if isinstance(payload, dict):
                 code = str(payload.get("code") or "")
+                message = str(payload.get("message") or "").strip()
+        self.order_detail_status = status
+        if code:
+            self.order_detail_status += f" / code {code}"
+        if message:
+            self.order_detail_status += f" / {message[:80]}"
         self._record_network_event(
             f"ORDER_DETAIL_DIRECT phone=no status={status}"
             + (f" code={code}" if code else "")
