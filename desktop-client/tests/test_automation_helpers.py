@@ -10,6 +10,7 @@ from ctexcel_client.automation import (
     assess_verification_freshness,
     coupon_rejection_message,
     normalize_money,
+    parse_order_detail_response,
     parse_message_timestamp,
     parse_success_text,
     is_payment_success_url,
@@ -58,6 +59,91 @@ def test_success_page_fields_are_read_for_operator_summary_only():
     )
     assert freecard["order_number"] == "ORDERSUK2026073104095817734376"
     assert freecard["transaction_amount"] == "1.00"
+
+
+def test_order_detail_response_prioritizes_msisdn_over_referrer():
+    parsed = parse_order_detail_response(
+        {
+            "status": "response",
+            "payload": {
+                "code": 200,
+                "data": {
+                    "orderNo": "ORDERSUK2026073107254362376356",
+                    "recommendPhone": "447942946765",
+                    "msisdn": "447434000172",
+                    "totalPrice": "1",
+                },
+            },
+        }
+    )
+
+    assert parsed == {
+        "order_number": "ORDERSUK2026073107254362376356",
+        "phone_number": "447434000172",
+        "transaction_amount": "1.00",
+    }
+
+
+def test_order_detail_response_supports_msisdn_list():
+    parsed = parse_order_detail_response(
+        {
+            "payload": {
+                "data": {
+                    "msisdnList": [{"msisdn": "07900000009"}],
+                }
+            }
+        }
+    )
+
+    assert parsed["phone_number"] == "07900000009"
+
+
+def test_success_order_context_is_restored_and_direct_detail_is_parsed():
+    calls = []
+
+    class FakePage:
+        def evaluate(self, script, arguments):
+            calls.append((script, arguments))
+            if "__hidden_query__" in script:
+                return {
+                    "restored": True,
+                    "previousOrderNumber": "",
+                }
+            return {
+                "status": "response",
+                "payload": {
+                    "code": 200,
+                    "data": {
+                        "orderNo": arguments["orderNumber"],
+                        "msisdn": "447434000172",
+                        "totalPrice": "1.00",
+                    },
+                },
+            }
+
+    messages = []
+    automation = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _message: None,
+        customer_created=lambda _payload: None,
+    )
+    order_number = "ORDERSUK2026073107254362376356"
+
+    automation._restore_success_order_context(FakePage(), order_number)
+    parsed = automation._query_freecard_order_detail(
+        FakePage(),
+        order_number,
+    )
+
+    assert calls[0][1] == {"orderNumber": order_number}
+    assert calls[1][1] == {
+        "orderNumber": order_number,
+        "timeoutMs": 15000,
+    }
+    assert any("恢复查询上下文" in message for message in messages)
+    assert parsed["phone_number"] == "447434000172"
+    assert parsed["order_number"] == order_number
 
 
 def test_both_purchase_routes_recognize_their_success_page():

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import contextlib
+import json
 from pathlib import Path
 import re
 import shutil
@@ -65,6 +66,73 @@ LOADING_OVERLAY_SCRIPT = """() => {
   return selectors.some(selector =>
     Array.from(document.querySelectorAll(selector)).some(visible)
   );
+}"""
+RESTORE_SUCCESS_ORDER_CONTEXT_SCRIPT = """({orderNumber}) => {
+  const state = window.history.state || {};
+  const hidden = state.__hidden_query__ || {};
+  const previousOrderNumber = String(hidden.orderNo || '');
+  const restored = previousOrderNumber !== orderNumber;
+  window.history.replaceState(
+    {
+      ...state,
+      __hidden_query__: {
+        ...hidden,
+        orderNo: orderNumber,
+        payMethod: hidden.payMethod || '微信支付'
+      }
+    },
+    '',
+    window.location.href
+  );
+  return {restored, previousOrderNumber};
+}"""
+QUERY_FREECARD_ORDER_DETAIL_SCRIPT = """async ({orderNumber, timeoutMs}) => {
+  const source = Array.from(document.scripts)
+    .map(script => script.src || '')
+    .find(src => /\\/freecard\\/js\\/app\\.[^/]+\\.js(?:\\?|$)/.test(src));
+  if (!source) {
+    return {status: 'module-not-found'};
+  }
+  try {
+    const app = await import(source);
+    const values = Object.values(app);
+    const http = values.find(value =>
+      value
+      && typeof value.post === 'function'
+      && typeof value.postNoLoading === 'function'
+    );
+    const endpoints = values.find(value =>
+      value
+      && typeof value.getStuOrderCardDetail === 'string'
+    );
+    if (!http || !endpoints) {
+      return {status: 'api-not-found'};
+    }
+    return await new Promise(resolve => {
+      let settled = false;
+      const finish = result => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const timer = setTimeout(
+        () => finish({status: 'timeout'}),
+        timeoutMs
+      );
+      http.post(
+        endpoints.getStuOrderCardDetail,
+        {orderNo: orderNumber, language: 'zh'},
+        payload => finish({status: 'response', payload}),
+        error => finish({status: 'error', message: String(error)}),
+        true,
+        undefined,
+        true
+      );
+    });
+  } catch (error) {
+    return {status: 'exception', message: String(error)};
+  }
 }"""
 
 
@@ -183,6 +251,87 @@ def parse_success_text(page_text: str) -> dict[str, str]:
         "order_number": order.group(0).upper() if order else "",
         "phone_number": phone_match.group(1) if phone_match else "",
         "transaction_amount": amount_match.group(1) if amount_match else "",
+    }
+
+
+def parse_order_detail_response(value: Any) -> dict[str, str]:
+    """从官网订单详情模块返回值中提取本单号码，避免误取推荐人号码。"""
+    empty = {
+        "order_number": "",
+        "phone_number": "",
+        "transaction_amount": "",
+    }
+    if not isinstance(value, dict):
+        return empty
+    payload = value.get("payload", value)
+    if not isinstance(payload, dict):
+        return empty
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        return empty
+
+    def keyed_values(node: Any, expected_keys: set[str]) -> list[str]:
+        found: list[str] = []
+        if isinstance(node, dict):
+            for key, item in node.items():
+                normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+                if normalized in expected_keys:
+                    if isinstance(item, (dict, list, tuple)):
+                        found.append(
+                            json.dumps(
+                                item,
+                                ensure_ascii=False,
+                                default=str,
+                            )
+                        )
+                    else:
+                        found.append(str(item or ""))
+                if isinstance(item, (dict, list, tuple)):
+                    found.extend(keyed_values(item, expected_keys))
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                found.extend(keyed_values(item, expected_keys))
+        return found
+
+    order_number = ""
+    for candidate in keyed_values(
+        data,
+        {"orderno", "ordernumber", "outtradeno", "wxorderno"},
+    ):
+        match = ORDER_PATTERN.search(candidate)
+        if match:
+            order_number = match.group(0).upper()
+            break
+
+    phone_number = ""
+    for candidate in keyed_values(
+        data,
+        {"msisdn", "msisdnlist", "phonenumber", "mobilenumber"},
+    ):
+        match = PHONE_PATTERN.search(candidate)
+        if match:
+            phone_number = match.group(0)
+            break
+
+    transaction_amount = ""
+    for candidate in keyed_values(
+        data,
+        {
+            "totalprice",
+            "transactionamount",
+            "paymentamount",
+            "orderamount",
+        },
+    ):
+        normalized = normalize_money(candidate)
+        if normalized is not None:
+            transaction_amount = f"{normalized:.2f}"
+            break
+
+    return {
+        "order_number": order_number,
+        "phone_number": phone_number,
+        "transaction_amount": transaction_amount,
     }
 
 
@@ -1362,19 +1511,33 @@ class CTExcelAutomation:
         while time.monotonic() < deadline:
             self._check_stop()
             if is_payment_success_url(page.url):
+                known_order_number = str(
+                    pending_order.get("order_number") or ""
+                ).strip()
                 self.log(
                     "已进入支付成功页，正在从页面正文和订单接口读取手机号；"
                     "忽略该页面持续显示的 Loading 遮罩"
                 )
+                if (
+                    self.config.purchase_route == PURCHASE_ROUTE_FREECARD
+                    and known_order_number
+                ):
+                    self._restore_success_order_context(
+                        page,
+                        known_order_number,
+                    )
                 detail_deadline = min(
                     deadline,
-                    time.monotonic() + 90,
+                    time.monotonic() + 300,
                 )
                 parsed = {
                     "order_number": "",
                     "phone_number": "",
                     "transaction_amount": "",
                 }
+                direct_detail = parsed.copy()
+                next_direct_query = 0.0
+                next_progress_log = time.monotonic() + 15
                 while time.monotonic() < detail_deadline:
                     self._check_stop()
                     if page.is_closed():
@@ -1385,20 +1548,43 @@ class CTExcelAutomation:
                         parsed = parse_success_text(
                             page.locator("body").inner_text(timeout=3000)
                         )
+                    now = time.monotonic()
+                    if (
+                        not parsed["phone_number"]
+                        and not self.captured_phone_number
+                        and self.config.purchase_route
+                        == PURCHASE_ROUTE_FREECARD
+                        and known_order_number
+                        and now >= next_direct_query
+                    ):
+                        direct_detail = self._query_freecard_order_detail(
+                            page,
+                            known_order_number,
+                        )
+                        next_direct_query = time.monotonic() + 5
                     if (
                         parsed["phone_number"]
                         or self.captured_phone_number
+                        or direct_detail["phone_number"]
                     ):
                         break
+                    if now >= next_progress_log:
+                        self.log(
+                            "付款状态已确认，CTExcel 仍在分配号码；"
+                            "客户端继续直接查询本订单，不需要手动刷新"
+                        )
+                        next_progress_log = now + 15
                     self._wait_interruptibly(1)
                 order_number = (
                     parsed["order_number"]
                     or self.captured_order_number
+                    or direct_detail["order_number"]
                     or pending_order.get("order_number", "")
                 )
                 phone_number = (
                     parsed["phone_number"]
                     or self.captured_phone_number
+                    or direct_detail["phone_number"]
                 )
                 if not phone_number:
                     recent_failures = [
@@ -1414,11 +1600,12 @@ class CTExcelAutomation:
                         else "订单详情接口未返回手机号"
                     )
                     raise AutomationError(
-                        "支付成功页在 90 秒内没有返回 CTExcel 手机号码"
+                        "支付成功页在 5 分钟内没有返回 CTExcel 手机号码"
                         f"：{detail}"
                     )
                 transaction_amount = (
                     parsed["transaction_amount"]
+                    or direct_detail["transaction_amount"]
                     or pending_order.get("transaction_amount", "")
                 )
                 api.save_payment_checkpoint(
@@ -1441,6 +1628,76 @@ class CTExcelAutomation:
                 )
             page.wait_for_timeout(1000)
         raise AutomationError("等待人工支付完成超时，可在客户端重新载入该客户继续")
+
+    def _restore_success_order_context(
+        self,
+        page: Page,
+        order_number: str,
+    ) -> None:
+        """修复官网把订单号仅保存在 history.state 导致的丢参问题。"""
+        try:
+            result = page.evaluate(
+                RESTORE_SUCCESS_ORDER_CONTEXT_SCRIPT,
+                {"orderNumber": order_number},
+            )
+        except Exception as exc:
+            self._record_network_event(
+                "ORDER_CONTEXT_ERROR "
+                + str(exc).replace("\n", " ")[:300]
+            )
+            return
+        if isinstance(result, dict) and result.get("restored"):
+            self.log(
+                "检测到官网成功页丢失隐藏订单参数，"
+                "已使用付款前保存的订单号恢复查询上下文"
+            )
+
+    def _query_freecard_order_detail(
+        self,
+        page: Page,
+        order_number: str,
+    ) -> dict[str, str]:
+        """调用官网当前页面已加载的请求模块，直接查询本订单资料。"""
+        empty = {
+            "order_number": "",
+            "phone_number": "",
+            "transaction_amount": "",
+        }
+        try:
+            response = page.evaluate(
+                QUERY_FREECARD_ORDER_DETAIL_SCRIPT,
+                {
+                    "orderNumber": order_number,
+                    "timeoutMs": 15000,
+                },
+            )
+        except Exception as exc:
+            self._record_network_event(
+                "ORDER_DETAIL_ERROR "
+                + str(exc).replace("\n", " ")[:300]
+            )
+            return empty
+        parsed = parse_order_detail_response(response)
+        if parsed["phone_number"]:
+            self._record_network_event(
+                "ORDER_DETAIL_DIRECT phone=yes order=yes"
+            )
+            return parsed
+        status = (
+            str(response.get("status") or "unknown")
+            if isinstance(response, dict)
+            else "invalid"
+        )
+        code = ""
+        if isinstance(response, dict):
+            payload = response.get("payload")
+            if isinstance(payload, dict):
+                code = str(payload.get("code") or "")
+        self._record_network_event(
+            f"ORDER_DETAIL_DIRECT phone=no status={status}"
+            + (f" code={code}" if code else "")
+        )
+        return empty
 
     def _visible_locator(self, locator: Locator, label: str) -> Locator:
         deadline = time.monotonic() + max(
