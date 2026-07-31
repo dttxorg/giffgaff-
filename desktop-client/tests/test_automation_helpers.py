@@ -332,6 +332,57 @@ def test_phone_is_captured_from_order_confirmation_before_payment():
     )
 
 
+def test_phone_is_read_from_page_level_console_capture():
+    handlers = {}
+
+    class FakePage:
+        def on(self, name, handler):
+            handlers[name] = handler
+
+    class FakeConsole:
+        text = (
+            'CTEXCEL_ORDER_CAPTURE:{"phoneNumber":"447434000172",'
+            '"orderNumber":"ORDERSUK2026073108002196346332",'
+            '"source":"getOrderConfirmList"}'
+        )
+
+    automation = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _message: None,
+        customer_created=lambda _payload: None,
+    )
+    automation._attach_page_diagnostics(FakePage())
+
+    handlers["console"](FakeConsole())
+
+    assert automation.captured_phone_number == "447434000172"
+    assert (
+        automation.captured_order_number
+        == "ORDERSUK2026073108002196346332"
+    )
+    assert any(
+        "source=confirm" in event
+        for event in automation.network_events
+    )
+
+
+def test_freecard_payment_is_blocked_when_preallocated_phone_is_missing():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ctexcel_client"
+        / "automation.py"
+    ).read_text(encoding="utf-8")
+
+    assert "CAPTURE_CTEXCEL_ORDER_RESPONSES_SCRIPT" in source
+    assert "XMLHttpRequest.prototype.open" in source
+    assert "window.fetch = async" in source
+    assert "CTEXCEL_ORDER_CAPTURE:" in source
+    assert "window.__ctexcelOrderCapture" not in source
+    assert "page.reload(" in source
+    assert "订单确认接口没有返回手机号，已停止进入支付" in source
+
+
 def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     source = (
         Path(__file__).resolve().parents[1]

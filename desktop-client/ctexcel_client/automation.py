@@ -134,6 +134,115 @@ QUERY_FREECARD_ORDER_DETAIL_SCRIPT = """async ({orderNumber, timeoutMs}) => {
     return {status: 'exception', message: String(error)};
   }
 }"""
+ORDER_CAPTURE_CONSOLE_PREFIX = "CTEXCEL_ORDER_CAPTURE:"
+CAPTURE_CTEXCEL_ORDER_RESPONSES_SCRIPT = """(() => {
+  const consolePrefix = 'CTEXCEL_ORDER_CAPTURE:';
+  const phonePattern = /(?:\\+?44|0)7\\d{9}/;
+  const orderPattern = /(?:ORDER\\d{12,}|ORDERSUK\\d{12,})/i;
+  const stringify = value => {
+    try {
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    } catch (_error) {
+      return String(value || '');
+    }
+  };
+  const findPhone = value => {
+    const match = stringify(value).match(phonePattern);
+    return match ? match[0] : '';
+  };
+  const findOrder = value => {
+    const match = stringify(value).match(orderPattern);
+    return match ? match[0].toUpperCase() : '';
+  };
+  const inspect = (node, result) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach(item => inspect(item, result));
+      return;
+    }
+    Object.entries(node).forEach(([key, value]) => {
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (
+        !result.phoneNumber
+        && ['msisdn', 'msisdnlist', 'phonenumber'].includes(normalized)
+      ) {
+        result.phoneNumber = findPhone(value);
+      }
+      if (
+        !result.orderNumber
+        && ['orderno', 'ordernumber', 'outtradeno'].includes(normalized)
+      ) {
+        result.orderNumber = findOrder(value);
+      }
+      if (value && typeof value === 'object') inspect(value, result);
+    });
+  };
+  const capture = (payload, url) => {
+    const target = String(url || '');
+    if (![
+      'getOrderConfirmList',
+      'getStuOrderCardDetail',
+      'createStuBuyCardPreOrder'
+    ].some(marker => target.includes(marker))) return;
+    let value = payload;
+    if (typeof value === 'string') {
+      try {
+        value = JSON.parse(value);
+      } catch (_error) {
+        return;
+      }
+    }
+    const result = {phoneNumber: '', orderNumber: ''};
+    inspect(value, result);
+    if (!result.phoneNumber && !result.orderNumber) return;
+    console.info(consolePrefix + JSON.stringify({
+      phoneNumber: result.phoneNumber || '',
+      orderNumber: result.orderNumber || '',
+      source: target,
+      updatedAt: Date.now()
+    }));
+  };
+
+  const requestUrls = new WeakMap();
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, ...args) {
+    requestUrls.set(this, String(url || ''));
+    this.addEventListener('load', () => {
+      let payload = null;
+      try {
+        payload = (
+          this.responseType === '' || this.responseType === 'text'
+            ? this.responseText
+            : this.response
+        );
+      } catch (_error) {
+        payload = null;
+      }
+      capture(payload, requestUrls.get(this));
+    }, {once: true});
+    return originalOpen.call(this, method, url, ...args);
+  };
+
+  const originalFetch = window.fetch;
+  if (typeof originalFetch === 'function') {
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      const url = String(
+        (args[0] && args[0].url) || args[0] || response.url || ''
+      );
+      if ([
+        'getOrderConfirmList',
+        'getStuOrderCardDetail',
+        'createStuBuyCardPreOrder'
+      ].some(marker => url.includes(marker))) {
+        response.clone().json()
+          .then(payload => capture(payload, url))
+          .catch(() => {});
+      }
+      return response;
+    };
+  }
+})();"""
 
 
 class AutomationError(RuntimeError):
@@ -604,6 +713,9 @@ class CTExcelAutomation:
                 );
                 """
             )
+            self.context.add_init_script(
+                CAPTURE_CTEXCEL_ORDER_RESPONSES_SCRIPT
+            )
             self.log(
                 "已启用浏览器兼容模式：每单使用独立临时配置，"
                 "并移除 Chrome/Edge 的自动测试标记"
@@ -789,9 +901,55 @@ class CTExcelAutomation:
                 "PAGE_ERROR " + str(error).replace("\n", " ")[:500]
             )
 
+        def on_console(message: Any) -> None:
+            text = getattr(message, "text", "")
+            if callable(text):
+                text = text()
+            text = str(text or "")
+            if not text.startswith(ORDER_CAPTURE_CONSOLE_PREFIX):
+                return
+            try:
+                captured = json.loads(
+                    text[len(ORDER_CAPTURE_CONSOLE_PREFIX):]
+                )
+            except (TypeError, ValueError) as exc:
+                self._record_network_event(
+                    "ORDER_CAPTURE_CONSOLE_ERROR "
+                    + str(exc).replace("\n", " ")[:300]
+                )
+                return
+            if not isinstance(captured, dict):
+                return
+            phone = str(captured.get("phoneNumber") or "").strip()
+            order = str(
+                captured.get("orderNumber") or ""
+            ).strip().upper()
+            if phone and PHONE_PATTERN.fullmatch(phone):
+                self.captured_phone_number = phone
+            else:
+                phone = ""
+            if order and ORDER_PATTERN.fullmatch(order):
+                self.captured_order_number = order
+            else:
+                order = ""
+            if phone or order:
+                source = str(captured.get("source") or "")
+                marker = (
+                    "confirm"
+                    if "getOrderConfirmList" in source
+                    else "detail"
+                )
+                self._record_network_event(
+                    "ORDER_CAPTURE_CONSOLE "
+                    f"source={marker} · "
+                    f"order={'yes' if order else 'no'} · "
+                    f"phone={'yes' if phone else 'no'}"
+                )
+
         page.on("requestfailed", on_request_failed)
         page.on("requestfinished", on_request_finished)
         page.on("pageerror", on_page_error)
+        page.on("console", on_console)
 
     def _preserve_error_page(self, page: Page, exc: Exception) -> None:
         """保存错误现场，并在可视模式下短暂保留浏览器供人工检查。"""
@@ -1390,10 +1548,46 @@ class CTExcelAutomation:
                 )
                 self._wait_for_page_ready(page, "关闭营销订阅")
 
+    def _wait_for_confirmed_phone(
+        self,
+        *,
+        timeout_seconds: float,
+    ) -> bool:
+        deadline = time.monotonic() + max(0.5, timeout_seconds)
+        while time.monotonic() < deadline:
+            self._check_stop()
+            if self.captured_phone_number:
+                return True
+            self._wait_interruptibly(0.25)
+        return bool(self.captured_phone_number)
+
     def _confirm_order(self, page: Page) -> None:
         self.stage("确认订单")
         self._wait_for_page_ready(page, "订单确认页")
         defaults = self.config.registration
+        if self.config.purchase_route == PURCHASE_ROUTE_FREECARD:
+            if not self._wait_for_confirmed_phone(
+                timeout_seconds=6,
+            ):
+                self.log(
+                    "首次订单确认响应没有捕获到手机号，"
+                    "正在刷新确认页重新读取"
+                )
+                page.reload(
+                    wait_until="domcontentloaded",
+                    timeout=self.config.page_timeout_ms,
+                )
+                self._wait_for_page_ready(
+                    page,
+                    "重新读取 £1 订单确认资料",
+                )
+                if not self._wait_for_confirmed_phone(
+                    timeout_seconds=15,
+                ):
+                    raise AutomationError(
+                        "订单确认接口没有返回手机号，已停止进入支付；"
+                        "本单尚未生成付款订单"
+                    )
         if self.config.purchase_route == PURCHASE_ROUTE_50GB:
             coupon_code = defaults.coupon_code.strip()
             if not coupon_code:
