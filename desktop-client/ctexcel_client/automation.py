@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 from playwright.sync_api import (
     BrowserContext,
@@ -92,6 +93,17 @@ def application_target(config: AppConfig) -> int:
         return min(1000, max(1, int(config.continuous_count)))
     except (TypeError, ValueError):
         return 1
+
+
+def is_payment_success_url(value: str) -> bool:
+    try:
+        path = urlsplit(str(value or "")).path.rstrip("/").lower()
+    except ValueError:
+        return False
+    return path.endswith((
+        "/buycardsucceed",
+        "/activitypagesuccess",
+    ))
 
 
 def normalize_money(value: str) -> Optional[Decimal]:
@@ -1222,7 +1234,7 @@ class CTExcelAutomation:
         )
         while time.monotonic() < deadline:
             self._check_stop()
-            if page.url.rstrip("/").endswith("/buycardsucceed"):
+            if is_payment_success_url(page.url):
                 self._wait_for_page_ready(page, "支付成功页")
                 page.wait_for_function(
                     """() => {

@@ -12,6 +12,7 @@ from ctexcel_client.automation import (
     normalize_money,
     parse_message_timestamp,
     parse_success_text,
+    is_payment_success_url,
     payment_page_has_expected_amount,
     price_is_expected,
 )
@@ -57,6 +58,18 @@ def test_success_page_fields_are_read_for_operator_summary_only():
     )
     assert freecard["order_number"] == "ORDERSUK2026073104095817734376"
     assert freecard["transaction_amount"] == "1.00"
+
+
+def test_both_purchase_routes_recognize_their_success_page():
+    assert is_payment_success_url(
+        "https://www.ctexcel.com/freecard/activityPageSuccess"
+    )
+    assert is_payment_success_url(
+        "https://www.ctexcel.com/uk/buycard/buycardsucceed"
+    )
+    assert not is_payment_success_url(
+        "https://www.ctexcel.com/freecard/buycardWX"
+    )
 
 
 def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
