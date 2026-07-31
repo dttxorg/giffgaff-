@@ -60,7 +60,7 @@ class AdminApi:
         self.server_url = server_url.strip().rstrip("/")
         self.app_password = app_password.strip()
         headers = {
-            "User-Agent": "CTExcelApplyClient/2.5.7",
+            "User-Agent": "CTExcelApplyClient/2.5.8",
             "Accept": "application/json",
         }
         if self.app_password:
@@ -278,3 +278,18 @@ class AdminApi:
         if not isinstance(data, dict) or not data.get("ok"):
             raise ApiError("CTExcel 付款金额回写接口返回格式错误")
         return data
+
+    def release_ctexcel_customer(
+        self,
+        customer_id: int,
+        *,
+        request_key: str,
+    ) -> bool:
+        data = self._request(
+            "POST",
+            f"/api/ctexcel-client/customers/{int(customer_id)}/release",
+            json_body={"request_key": str(request_key).strip()},
+        )
+        if not isinstance(data, dict) or not data.get("ok"):
+            raise ApiError("释放 CTExcel 客户租约返回格式错误")
+        return bool(data.get("released"))

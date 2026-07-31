@@ -154,6 +154,37 @@ def test_client_api_reports_wrong_password_clearly():
     assert message == "客户端连接口令错误"
 
 
+def test_client_api_releases_customer_with_request_key():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == (
+            "/api/ctexcel-client/customers/321/release"
+        )
+        assert json.loads(request.content) == {
+            "request_key": "release_owner_key_1234567890"
+        }
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "customer_id": 321,
+                "released": True,
+            },
+        )
+
+    with AdminApi(
+        "https://manager.example.test",
+        "app-secret",
+        transport=httpx.MockTransport(handler),
+    ) as api:
+        released = api.release_ctexcel_customer(
+            321,
+            request_key="release_owner_key_1234567890",
+        )
+
+    assert released is True
+
+
 def test_client_api_reports_missing_server_endpoint():
     transport = httpx.MockTransport(
         lambda _request: httpx.Response(404, text="Not found")

@@ -30,7 +30,8 @@ from models import (
     SystemSettings, AuthLoginRequest, MoEmailCreateRequest,
     SimCodeImport, SimCodeUpdate, SimCodeOut, ActivationStatusUpdate,
     VerificationCodeOut, PaymentInfoEmailOut, CTExcelOrderInfoOut,
-    CTExcelClientCustomerCreate, CTExcelPaymentCheckpointRequest,
+    CTExcelClientCustomerCreate, CTExcelClientClaimReleaseRequest,
+    CTExcelPaymentCheckpointRequest,
     InboxMessageSummaryOut, InboxMessageListOut, InboxMessageDetailOut,
     DomainInfo, LabelConfig, EsimCodeUpdate,
     EmailProviderCreate, EmailProviderOut, EmailProviderUpdate,
@@ -108,6 +109,11 @@ CTEXCEL_AUTO_SYNC_LOOKBACK_DAYS = _env_int(
 CTEXCEL_AUTO_SYNC_BATCH_SIZE = _env_int(
     "CTEXCEL_AUTO_SYNC_BATCH_SIZE", 6, 1
 )
+CTEXCEL_CLIENT_LEASE_SECONDS = _env_int(
+    "CTEXCEL_CLIENT_LEASE_SECONDS", 45 * 60, 60
+)
+CTEXCEL_REQUEST_WAIT_SECONDS = 30
+CTEXCEL_REQUEST_STALE_SECONDS = 2 * 60
 _CTEXCEL_AUTO_SYNC_TASK: Optional[asyncio.Task] = None
 DEFAULT_LABEL_TEMPLATES = [
     {
@@ -1848,7 +1854,10 @@ async def get_customer_verification_code(customer_id: int):
     moemail_id, client = await _resolve_inbox_provider(c)
     email_address = c.get("moemail_address") or c.get("email") or ""
     try:
-        mailbox = client.get_email_messages(moemail_id)
+        mailbox = await asyncio.to_thread(
+            client.get_email_messages,
+            moemail_id,
+        )
         messages = _message_list(mailbox)
         messages.sort(key=_message_received_at, reverse=True)
         checked_count = 0
@@ -1858,9 +1867,18 @@ async def get_customer_verification_code(customer_id: int):
         for summary in messages[:10]:
             message_id = _message_id(summary)
             detail = {}
-            if message_id:
+            if message_id and not (
+                _message_body_text(summary)
+                or _message_html_body(summary)
+            ):
                 try:
-                    detail = _message_detail_payload(client.get_message(moemail_id, message_id))
+                    detail = _message_detail_payload(
+                        await asyncio.to_thread(
+                            client.get_message,
+                            moemail_id,
+                            message_id,
+                        )
+                    )
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code != 404:
                         raise
@@ -1903,6 +1921,10 @@ async def get_customer_verification_code(customer_id: int):
 
 async def _list_pending_ctexcel_client_customers(limit: int = 1000) -> list[dict]:
     """列出尚未同步手机号的 CTExcel 客户，供桌面客户端恢复流程。"""
+    lease_cutoff = (
+        datetime.datetime.utcnow()
+        - datetime.timedelta(seconds=CTEXCEL_CLIENT_LEASE_SECONDS)
+    ).replace(microsecond=0).isoformat() + "Z"
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall(
@@ -1919,47 +1941,19 @@ async def _list_pending_ctexcel_client_customers(limit: int = 1000) -> list[dict
                  AND NULLIF(
                        TRIM(ctexcel_payment_succeeded_at), ''
                      ) IS NULL
+                 AND (
+                       NULLIF(TRIM(automation_lock_owner), '') IS NULL
+                       OR NULLIF(TRIM(automation_locked_at), '') IS NULL
+                       OR automation_locked_at <= ?
+                     )
                ORDER BY id ASC
                LIMIT ?""",
-            (min(max(1, int(limit)), 1000),),
+            (lease_cutoff, min(max(1, int(limit)), 1000)),
         )
-    return [
-        {
-            "customer_id": int(row["id"]),
-            "email": row["email"],
-            "phone_number": row["phone_number"],
-            "order_number": row["ctexcel_order_number"],
-            "registration_confirmed_at": row[
-                "ctexcel_registration_confirmed_at"
-            ],
-            "payment_succeeded_at": row[
-                "ctexcel_payment_succeeded_at"
-            ],
-            "last_checked_at": row["ctexcel_last_checked_at"],
-            "created_at": row["created_at"],
-        }
-        for row in rows
-    ]
+    return [_ctexcel_client_customer_payload(row) for row in rows]
 
 
-async def _get_ctexcel_client_customer_by_request_key(
-    request_key: str,
-) -> Optional[dict]:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        row = await fetch_one(
-            db,
-            """SELECT id, email, phone_number, ctexcel_order_number,
-                      ctexcel_registration_confirmed_at,
-                      ctexcel_payment_succeeded_at,
-                      ctexcel_last_checked_at, created_at
-               FROM customers
-               WHERE product_type = 'ctexcel'
-                 AND ctexcel_client_request_key = ?""",
-            (request_key,),
-        )
-    if not row:
-        return None
+def _ctexcel_client_customer_payload(row) -> dict:
     return {
         "customer_id": int(row["id"]),
         "email": row["email"],
@@ -1976,18 +1970,227 @@ async def _get_ctexcel_client_customer_by_request_key(
     }
 
 
-async def _save_ctexcel_client_request_key(
-    customer_id: int,
-    request_key: Optional[str],
+CTEXCEL_CLIENT_CUSTOMER_SELECT = """SELECT id, email, phone_number,
+          ctexcel_order_number, ctexcel_registration_confirmed_at,
+          ctexcel_payment_succeeded_at, ctexcel_last_checked_at, created_at
+   FROM customers"""
+
+
+async def _get_ctexcel_client_customer_by_request_key(
+    request_key: str,
+) -> Optional[dict]:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await fetch_one(
+            db,
+            CTEXCEL_CLIENT_CUSTOMER_SELECT
+            + """ WHERE product_type = 'ctexcel'
+                    AND ctexcel_client_request_key = ?""",
+            (request_key,),
+        )
+    if not row:
+        return None
+    return _ctexcel_client_customer_payload(row)
+
+
+async def _reserve_ctexcel_client_request(
+    request_key: str,
+) -> tuple[str, Optional[dict]]:
+    """Elect one creator for a key across processes; followers await its row."""
+    owner_token = secrets.token_urlsafe(24)
+    deadline = time.monotonic() + CTEXCEL_REQUEST_WAIT_SECONDS
+    while True:
+        now = _utc_now()
+        stale_before = (
+            datetime.datetime.utcnow()
+            - datetime.timedelta(seconds=CTEXCEL_REQUEST_STALE_SECONDS)
+        ).replace(microsecond=0).isoformat() + "Z"
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            existing = await fetch_one(
+                db,
+                CTEXCEL_CLIENT_CUSTOMER_SELECT
+                + """ WHERE product_type = 'ctexcel'
+                        AND ctexcel_client_request_key = ?""",
+                (request_key,),
+            )
+            if existing:
+                await db.commit()
+                return "", _ctexcel_client_customer_payload(existing)
+            row = await fetch_one(
+                db,
+                """SELECT state, customer_id, owner_token, updated_at
+                   FROM ctexcel_client_requests WHERE request_key = ?""",
+                (request_key,),
+            )
+            if row is None:
+                await db.execute(
+                    """INSERT INTO ctexcel_client_requests
+                       (request_key, state, customer_id, owner_token,
+                        created_at, updated_at)
+                       VALUES (?, 'pending', NULL, ?, ?, ?)""",
+                    (request_key, owner_token, now, now),
+                )
+                await db.commit()
+                return owner_token, None
+            if row["state"] == "ready" and row["customer_id"]:
+                ready = await fetch_one(
+                    db,
+                    CTEXCEL_CLIENT_CUSTOMER_SELECT + " WHERE id = ?",
+                    (int(row["customer_id"]),),
+                )
+                if ready:
+                    await db.commit()
+                    return "", _ctexcel_client_customer_payload(ready)
+            if (
+                row["state"] in {"failed", "ready"}
+                or not row["updated_at"]
+                or str(row["updated_at"]) <= stale_before
+            ):
+                cursor = await db.execute(
+                    """UPDATE ctexcel_client_requests
+                       SET state = 'pending', customer_id = NULL,
+                           owner_token = ?, updated_at = ?
+                       WHERE request_key = ? AND owner_token = ?""",
+                    (
+                        owner_token,
+                        now,
+                        request_key,
+                        row["owner_token"],
+                    ),
+                )
+                await db.commit()
+                if cursor.rowcount == 1:
+                    return owner_token, None
+            else:
+                await db.commit()
+        if time.monotonic() >= deadline:
+            raise HTTPException(
+                status_code=409,
+                detail="同一建档请求仍在处理中，请稍后重试",
+            )
+        await asyncio.sleep(0.05)
+
+
+async def _finish_ctexcel_client_request(
+    request_key: str,
+    owner_token: str,
+    *,
+    customer_id: Optional[int] = None,
+    failed: bool = False,
 ) -> None:
-    if not request_key:
+    if not owner_token:
         return
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute(
+            """UPDATE ctexcel_client_requests
+               SET state = ?, customer_id = ?, updated_at = ?
+               WHERE request_key = ? AND owner_token = ?""",
+            (
+                "failed" if failed else "ready",
+                customer_id,
+                _utc_now(),
+                request_key,
+                owner_token,
+            ),
+        )
+        await db.commit()
+
+
+async def _claim_pending_ctexcel_client_customer(
+    *,
+    request_key: str,
+    resume_customer_id: Optional[int],
+) -> Optional[dict]:
+    """Atomically lease one unfinished customer to one desktop request."""
+    now = _utc_now()
+    lease_cutoff = (
+        datetime.datetime.utcnow()
+        - datetime.timedelta(seconds=CTEXCEL_CLIENT_LEASE_SECONDS)
+    ).replace(microsecond=0).isoformat() + "Z"
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        existing = await fetch_one(
+            db,
+            CTEXCEL_CLIENT_CUSTOMER_SELECT
+            + """ WHERE product_type = 'ctexcel'
+                    AND ctexcel_client_request_key = ?""",
+            (request_key,),
+        )
+        if existing:
+            await db.commit()
+            return _ctexcel_client_customer_payload(existing)
+        params: list = [lease_cutoff]
+        id_clause = ""
+        if resume_customer_id is not None:
+            id_clause = " AND id = ?"
+            params.append(int(resume_customer_id))
+        candidate = await fetch_one(
+            db,
+            CTEXCEL_CLIENT_CUSTOMER_SELECT
+            + """ WHERE product_type = 'ctexcel'
+                    AND NULLIF(TRIM(phone_number), '') IS NULL
+                    AND NULLIF(TRIM(ctexcel_registration_confirmed_at), '') IS NULL
+                    AND NULLIF(TRIM(ctexcel_payment_succeeded_at), '') IS NULL
+                    AND (
+                          NULLIF(TRIM(automation_lock_owner), '') IS NULL
+                          OR NULLIF(TRIM(automation_locked_at), '') IS NULL
+                          OR automation_locked_at <= ?
+                        )"""
+            + id_clause
+            + " ORDER BY id ASC LIMIT 1",
+            tuple(params),
+        )
+        if candidate is None:
+            await db.commit()
+            return None
+        cursor = await db.execute(
             """UPDATE customers
-               SET ctexcel_client_request_key = ?
+               SET ctexcel_client_request_key = ?,
+                   automation_lock_owner = ?, automation_locked_at = ?
+               WHERE id = ? AND product_type = 'ctexcel'
+                 AND NULLIF(TRIM(phone_number), '') IS NULL
+                 AND NULLIF(TRIM(ctexcel_registration_confirmed_at), '') IS NULL
+                 AND NULLIF(TRIM(ctexcel_payment_succeeded_at), '') IS NULL
+                 AND (
+                       NULLIF(TRIM(automation_lock_owner), '') IS NULL
+                       OR NULLIF(TRIM(automation_locked_at), '') IS NULL
+                       OR automation_locked_at <= ?
+                     )""",
+            (
+                request_key,
+                request_key,
+                now,
+                int(candidate["id"]),
+                lease_cutoff,
+            ),
+        )
+        if cursor.rowcount != 1:
+            await db.rollback()
+            return None
+        claimed = await fetch_one(
+            db,
+            CTEXCEL_CLIENT_CUSTOMER_SELECT + " WHERE id = ?",
+            (int(candidate["id"]),),
+        )
+        await db.commit()
+    return _ctexcel_client_customer_payload(claimed)
+
+
+async def _assign_ctexcel_client_request_to_new_customer(
+    customer_id: int,
+    request_key: str,
+) -> None:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            """UPDATE customers
+               SET ctexcel_client_request_key = ?,
+                   automation_lock_owner = ?, automation_locked_at = ?
                WHERE id = ? AND product_type = 'ctexcel'""",
-            (request_key, customer_id),
+            (request_key, request_key, _utc_now(), customer_id),
         )
         await db.commit()
 
@@ -2046,9 +2249,11 @@ async def create_ctexcel_client_customer(
 ):
     """优先复用中断客户，否则创建 CTExcel 客户和专属托管邮箱。"""
     _require_ctexcel_client(request)
-    request_key = normalize_optional_text(data.request_key)
-    if request_key:
-        existing = await _get_ctexcel_client_customer_by_request_key(
+    supplied_request_key = normalize_optional_text(data.request_key)
+    request_key = supplied_request_key or ""
+    reservation_owner = ""
+    if supplied_request_key:
+        reservation_owner, existing = await _reserve_ctexcel_client_request(
             request_key
         )
         if existing:
@@ -2059,48 +2264,46 @@ async def create_ctexcel_client_customer(
                 "reused": True,
                 "idempotent_replay": True,
             }
-    pending = await _list_pending_ctexcel_client_customers()
-    unfinished_pending = [
-        customer
-        for customer in pending
-        if not normalize_optional_text(
-            customer.get("registration_confirmed_at")
-        )
-        and not normalize_optional_text(
-            customer.get("payment_succeeded_at")
-        )
-    ]
-    resumable = None
-    if data.resume_customer_id is not None:
-        resumable = next(
-            (
-                customer
-                for customer in unfinished_pending
-                if int(customer["customer_id"])
-                == int(data.resume_customer_id)
-            ),
-            None,
-        )
-        if resumable is None:
+    try:
+        pending_count = len(await _list_pending_ctexcel_client_customers())
+        resumable = None
+        if data.reuse_pending and supplied_request_key:
+            resumable = await _claim_pending_ctexcel_client_customer(
+                request_key=request_key,
+                resume_customer_id=data.resume_customer_id,
+            )
+        elif data.reuse_pending:
+            pending = await _list_pending_ctexcel_client_customers()
+            if data.resume_customer_id is not None:
+                resumable = next(
+                    (
+                        customer
+                        for customer in pending
+                        if int(customer["customer_id"])
+                        == int(data.resume_customer_id)
+                    ),
+                    None,
+                )
+            elif pending:
+                resumable = pending[0]
+        if data.resume_customer_id is not None and resumable is None:
             raise HTTPException(
                 status_code=409,
-                detail="指定的待补全 CTExcel 客户已完成或已被处理",
+                detail="指定的待补全 CTExcel 客户已完成或已被其他流程领取",
             )
-    elif unfinished_pending:
-        resumable = unfinished_pending[0]
-    if data.reuse_pending and resumable:
-        await _save_ctexcel_client_request_key(
-            int(resumable["customer_id"]),
-            request_key,
-        )
-        return {
-            **resumable,
-            "product_type": "ctexcel",
-            "sim_activation_code": None,
-            "reused": True,
-            "pending_customer_count": len(pending),
-        }
-    try:
+        if resumable:
+            await _finish_ctexcel_client_request(
+                request_key,
+                reservation_owner,
+                customer_id=int(resumable["customer_id"]),
+            )
+            return {
+                **resumable,
+                "product_type": "ctexcel",
+                "sim_activation_code": None,
+                "reused": True,
+                "pending_customer_count": pending_count,
+            }
         created = await add_customer(
             CustomerCreate(
                 product_type="ctexcel",
@@ -2111,21 +2314,47 @@ async def create_ctexcel_client_customer(
                 use_sim_code=False,
             )
         )
-        await _save_ctexcel_client_request_key(
-            int(created["customer_id"]),
+        customer_id = int(created["customer_id"])
+        if supplied_request_key:
+            await _assign_ctexcel_client_request_to_new_customer(
+                customer_id,
+                request_key,
+            )
+        await _finish_ctexcel_client_request(
             request_key,
+            reservation_owner,
+            customer_id=customer_id,
         )
         return {
             **created,
             "reused": False,
-            "pending_customer_count": len(pending) + 1,
+            "pending_customer_count": pending_count + 1,
         }
     except HTTPException as exc:
+        await _finish_ctexcel_client_request(
+            request_key,
+            reservation_owner,
+            failed=True,
+        )
         if exc.status_code < 500:
             raise
         logging.getLogger(__name__).warning(
             "CTExcel client customer creation failed: %s",
             exc.detail,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="服务器创建 CTExcel 客户或专属邮箱失败",
+        ) from exc
+    except Exception as exc:
+        await _finish_ctexcel_client_request(
+            request_key,
+            reservation_owner,
+            failed=True,
+        )
+        logging.getLogger(__name__).warning(
+            "CTExcel client customer creation failed: %s",
+            exc,
         )
         raise HTTPException(
             status_code=502,
@@ -2187,6 +2416,26 @@ async def save_ctexcel_client_payment_checkpoint(
     )
     if not saved:
         raise HTTPException(status_code=404, detail="CTExcel 客户不存在")
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        if data.payment_succeeded:
+            await db.execute(
+                """UPDATE customers
+                   SET automation_lock_owner = NULL,
+                       automation_locked_at = NULL
+                   WHERE id = ? AND product_type = 'ctexcel'""",
+                (customer_id,),
+            )
+        else:
+            # The payment wait can last 30 minutes.  Refresh the owner lease
+            # when the QR checkpoint is reached so it cannot expire mid-wait.
+            await db.execute(
+                """UPDATE customers
+                   SET automation_locked_at = ?
+                   WHERE id = ? AND product_type = 'ctexcel'
+                     AND NULLIF(TRIM(automation_lock_owner), '') IS NOT NULL""",
+                (_utc_now(), customer_id),
+            )
+        await db.commit()
     return {
         "ok": True,
         "customer_id": customer_id,
@@ -2198,6 +2447,38 @@ async def save_ctexcel_client_payment_checkpoint(
             payment_succeeded_at
             or customer.get("ctexcel_payment_succeeded_at")
         ),
+    }
+
+
+@app.post(
+    "/api/ctexcel-client/customers/{customer_id}/release",
+)
+async def release_ctexcel_client_customer(
+    customer_id: int,
+    data: CTExcelClientClaimReleaseRequest,
+    request: Request,
+    response: Response,
+):
+    """Release an unfinished customer's lease after a clean client failure."""
+    _require_ctexcel_client(request)
+    response.headers["Cache-Control"] = "no-store"
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            """UPDATE customers
+               SET automation_lock_owner = NULL,
+                   automation_locked_at = NULL
+               WHERE id = ? AND product_type = 'ctexcel'
+                 AND automation_lock_owner = ?
+                 AND NULLIF(TRIM(phone_number), '') IS NULL
+                 AND NULLIF(TRIM(ctexcel_registration_confirmed_at), '') IS NULL
+                 AND NULLIF(TRIM(ctexcel_payment_succeeded_at), '') IS NULL""",
+            (customer_id, data.request_key),
+        )
+        await db.commit()
+    return {
+        "ok": True,
+        "customer_id": customer_id,
+        "released": cursor.rowcount == 1,
     }
 
 
@@ -2440,7 +2721,10 @@ async def get_customer_payment_info_emails(customer_id: int, limit: int = 50):
     email_address = c.get("moemail_address") or c.get("email") or ""
     limit = min(max(1, limit), 100)
     try:
-        mailbox = client.get_email_messages(moemail_id)
+        mailbox = await asyncio.to_thread(
+            client.get_email_messages,
+            moemail_id,
+        )
         messages = _message_list(mailbox)
         messages.sort(key=_message_received_at, reverse=True)
 
@@ -2454,9 +2738,18 @@ async def get_customer_payment_info_emails(customer_id: int, limit: int = 50):
         for summary in messages[:limit]:
             message_id = _message_id(summary)
             detail = {}
-            if message_id:
+            if message_id and not (
+                _message_body_text(summary)
+                or _message_html_body(summary)
+            ):
                 try:
-                    detail = _message_detail_payload(client.get_message(moemail_id, message_id))
+                    detail = _message_detail_payload(
+                        await asyncio.to_thread(
+                            client.get_message,
+                            moemail_id,
+                            message_id,
+                        )
+                    )
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code != 404:
                         raise
@@ -3181,6 +3474,7 @@ async def _restore_backup_payload(data: dict) -> dict:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         try:
             await db.execute("BEGIN")
+            await db.execute("DELETE FROM ctexcel_client_requests")
             await db.execute("DELETE FROM customers")
             await db.execute("DELETE FROM sim_codes")
             for sim in sim_codes:
@@ -3239,6 +3533,12 @@ async def _restore_backup_payload(data: dict) -> dict:
                     "ctexcel_referral_code": normalize_optional_text(c.get("ctexcel_referral_code")),
                     "ctexcel_referral_link": normalize_optional_text(c.get("ctexcel_referral_link")),
                     "ctexcel_last_checked_at": c.get("ctexcel_last_checked_at"),
+                    "ctexcel_registration_confirmed_at": c.get(
+                        "ctexcel_registration_confirmed_at"
+                    ),
+                    "ctexcel_payment_succeeded_at": c.get(
+                        "ctexcel_payment_succeeded_at"
+                    ),
                     "created_at": c["created_at"],
                 }
                 restore_columns = list(restore_values)

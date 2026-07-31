@@ -121,6 +121,9 @@ https://你的后台域名/<ADMIN_ENTRY_PATH 的随机路径>
 export CTEXCEL_AUTO_SYNC_INTERVAL_SECONDS=60
 export CTEXCEL_AUTO_SYNC_LOOKBACK_DAYS=14
 export CTEXCEL_AUTO_SYNC_BATCH_SIZE=6
+# 并发桌面客户端领取待完成客户后的崩溃兜底租约，默认 45 分钟；
+# 客户端正常退出或报错时会使用同一 request_key 立即释放
+export CTEXCEL_CLIENT_LEASE_SECONDS=2700
 ```
 
 将扫描间隔设为 `0` 可停用后台定时任务，详情页的“扫描订单邮件”仍可使用。

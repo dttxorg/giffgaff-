@@ -36,6 +36,7 @@ from ctexcel_client.automation import (
     page_url_matches_path,
     price_is_expected,
     proxy_browser_error_reason,
+    recent_verification_code,
     browser_startup_snapshot_is_blank,
     tunnel_browser_start_delay,
     verification_cooldown_message,
@@ -461,10 +462,10 @@ def test_payment_terms_wait_for_vue_binding_before_next_click(monkeypatch):
         "clicks": 1,
     }
     assert any("完成页面状态同步" in item for item in messages)
-    assert any("付款订单正在生成" in item for item in messages)
+    assert any("仅提交一次" in item for item in messages)
 
 
-def test_payment_terms_retry_next_when_first_click_is_ignored(monkeypatch):
+def test_payment_terms_never_retries_a_non_idempotent_submit(monkeypatch):
     state = {"checked": False, "dialog_visible": True, "clicks": 0}
     clock = {"value": 0.0}
 
@@ -486,8 +487,6 @@ def test_payment_terms_retry_next_when_first_click_is_ignored(monkeypatch):
     class FakeSubmit:
         def click(self, **_kwargs):
             state["clicks"] += 1
-            if state["clicks"] == 2:
-                state["dialog_visible"] = False
 
     class FakeDialog:
         checkbox = FakeCheckbox()
@@ -510,18 +509,6 @@ def test_payment_terms_retry_next_when_first_click_is_ignored(monkeypatch):
         customer_created=lambda _payload: None,
     )
     monkeypatch.setattr(
-        automation_module.time,
-        "monotonic",
-        lambda: clock["value"],
-    )
-    monkeypatch.setattr(
-        runner,
-        "_wait_interruptibly",
-        lambda seconds: clock.__setitem__(
-            "value", clock["value"] + seconds
-        ),
-    )
-    monkeypatch.setattr(
         runner,
         "_visible_locator",
         lambda locator, _label: locator,
@@ -529,9 +516,9 @@ def test_payment_terms_retry_next_when_first_click_is_ignored(monkeypatch):
 
     runner._submit_payment_terms(FakePage(), FakeDialog())
 
-    assert state["clicks"] == 2
-    assert state["dialog_visible"] is False
-    assert any("自动重试" in item for item in messages)
+    assert state["clicks"] == 1
+    assert state["dialog_visible"] is True
+    assert any("避免重复创建订单" in item for item in messages)
 
 
 def test_same_url_wechat_qr_content_is_accepted(monkeypatch):
@@ -569,6 +556,20 @@ def test_same_url_wechat_qr_content_is_accepted(monkeypatch):
 
     assert selected is page
     assert any("无需等待网址跳转" in item for item in messages)
+
+
+@pytest.mark.parametrize(
+    "body_text",
+    [
+        "请使用微信扫描二维码 订单号：ORDER202608010000000001",
+        "Scan the QR code with WeChat Order: ORDERSUK202608010000000001",
+    ],
+)
+def test_payment_page_readiness_accepts_order_label_variants(body_text):
+    assert payment_page_content_is_ready(body_text)
+    assert not payment_page_content_is_ready(
+        "订单号：ORDER202608010000000001 scanqrcode"
+    )
 
 
 def test_proxy_browser_error_skips_manual_hold_but_normal_error_preserves(
@@ -808,6 +809,7 @@ def test_proxy_browser_retry_stops_after_three_attempts(monkeypatch):
     prepare_calls = []
     customer_creations = []
     browser_attempts = []
+    releases = []
 
     def fake_prepare_proxy(_config, *, resolved_proxy=None):
         prepare_calls.append(resolved_proxy)
@@ -849,6 +851,10 @@ def test_proxy_browser_retry_stops_after_three_attempts(monkeypatch):
                 "reused": False,
             }
 
+        def release_ctexcel_customer(self, customer_id, *, request_key):
+            releases.append((customer_id, request_key))
+            return True
+
     monkeypatch.setattr(automation_module, "prepare_proxy", fake_prepare_proxy)
     monkeypatch.setattr(
         automation_module,
@@ -888,6 +894,7 @@ def test_proxy_browser_retry_stops_after_three_attempts(monkeypatch):
     assert customer_creations == [1]
     assert len(browser_attempts) == 3
     assert len(prepare_calls) == 3
+    assert releases == [(408, runner.request_key)]
 
 
 def test_application_flow_has_no_phone_capture_or_gate():
@@ -1367,15 +1374,11 @@ def test_batch_assigns_distinct_unpaid_customers_before_creating_new(
 
     assert runner.resume_assignment_supported is True
     assert runner.resume_customer_ids_by_ordinal == {1: 1, 2: 3}
-    assert runner.resume_customer_emails_by_ordinal == {
-        1: "pending-1@example.test",
-        2: "pending-3@example.test",
-    }
     assert sync_calls == [2, 3]
     assert any("不同的未成功付款客户" in item for item in messages)
 
 
-def test_legacy_preassigned_customer_skips_ambiguous_create_endpoint(
+def test_resume_customer_is_revalidated_by_server_create_endpoint(
     monkeypatch,
 ):
     create_calls = []
@@ -1395,7 +1398,11 @@ def test_legacy_preassigned_customer_skips_ambiguous_create_endpoint(
 
         def create_ctexcel_customer(self, **kwargs):
             create_calls.append(kwargs)
-            raise AssertionError("客户端已预分配客户时不应调用旧建档接口")
+            return {
+                "customer_id": kwargs["resume_customer_id"],
+                "email": "pending-701@example.test",
+                "reused": True,
+            }
 
     class FakeRoute:
         proxy = None
@@ -1418,7 +1425,6 @@ def test_legacy_preassigned_customer_skips_ambiguous_create_endpoint(
         stage=lambda _stage: None,
         customer_created=customer_events.append,
         resume_customer_id=701,
-        resume_customer_email="pending-701@example.test",
     )
     monkeypatch.setattr(
         runner,
@@ -1436,15 +1442,17 @@ def test_legacy_preassigned_customer_skips_ambiguous_create_endpoint(
 
     result = runner.run()
 
-    assert create_calls == []
+    assert len(create_calls) == 1
+    assert create_calls[0]["resume_customer_id"] == 701
     assert result.customer_id == 701
     assert result.email == "pending-701@example.test"
     assert customer_events[0]["customer_id"] == 701
 
 
-def test_old_api_preassigns_distinct_pending_customers_and_keeps_parallel(
+def test_old_api_uses_serial_server_revalidation_without_pending_endpoint(
     monkeypatch,
 ):
+    pending_calls = []
     class FakeAdminApi:
         def __init__(self, *_args, **_kwargs):
             pass
@@ -1459,16 +1467,8 @@ def test_old_api_preassigns_distinct_pending_customers_and_keeps_parallel(
             return {"ok": True, "api_version": 7}
 
         def pending_customers(self):
-            return [
-                {
-                    "customer_id": customer_id,
-                    "email": f"pending-{customer_id}@example.test",
-                    "order_number": None,
-                    "payment_succeeded_at": None,
-                    "registration_confirmed_at": None,
-                }
-                for customer_id in range(101, 109)
-            ]
+            pending_calls.append(True)
+            raise AssertionError("旧 API 不应依赖 pending 列表端点")
 
     monkeypatch.setattr(automation_module, "AdminApi", FakeAdminApi)
     messages = []
@@ -1484,34 +1484,29 @@ def test_old_api_preassigns_distinct_pending_customers_and_keeps_parallel(
         item_started=lambda *_args: None,
         item_completed=lambda *_args: None,
     )
-    parallel_calls = []
+    serial_calls = []
     monkeypatch.setattr(
         runner,
         "_run_serial",
+        lambda **kwargs: serial_calls.append(kwargs) or "serial-result",
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_parallel",
         lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("旧 API 有不同待完成客户时不应降为单线程")
+            AssertionError("旧 API 必须降为单线程")
         ),
     )
 
-    def run_parallel(**kwargs):
-        parallel_calls.append(kwargs)
-        return "parallel-result"
-
-    monkeypatch.setattr(runner, "_run_parallel", run_parallel)
-
     result = runner.run()
 
-    assert result == "parallel-result"
-    assert parallel_calls == [{"total": 8, "completed": 0, "workers": 5}]
-    assert runner.legacy_api_client_assignment is True
-    assert runner.resume_customer_ids_by_ordinal == {
-        ordinal: 100 + ordinal for ordinal in range(1, 9)
-    }
-    assert runner.resume_customer_emails_by_ordinal[1] == (
-        "pending-101@example.test"
-    )
-    assert any("继续保留配置的并发数" in item for item in messages)
-    assert any("继续使用 5 个浏览器线程" in item for item in messages)
+    assert result == "serial-result"
+    assert serial_calls == [{"total": 8, "completed": 0}]
+    assert runner.legacy_api_serial_required is True
+    assert runner.resume_customer_ids_by_ordinal == {}
+    assert pending_calls == []
+    assert any("单线程" in item for item in messages)
+    assert any("已暂停配置的 5 线程并发" in item for item in messages)
 
 
 def test_qg_allocator_retries_duplicate_ip_and_assigns_unique_nodes(
@@ -2103,18 +2098,43 @@ def test_verification_feedback_success_does_not_add_five_second_delay(
     )
 
     class FakePage:
-        def evaluate(self, _script):
-            return "验证码发送成功"
+        calls = 0
 
-    monkeypatch.setattr(
-        runner,
-        "_wait_interruptibly",
-        lambda _seconds: (_ for _ in ()).throw(
-            AssertionError("成功反馈出现后不应继续等待")
-        ),
-    )
+        def evaluate(self, _script):
+            self.calls += 1
+            return "验证码发送成功" if self.calls == 1 else ""
+
+    waits = []
+    monkeypatch.setattr(runner, "_wait_interruptibly", waits.append)
 
     assert runner._visible_verification_cooldown(FakePage()) == ""
+    assert waits == [0.1]
+
+
+def test_stale_success_feedback_does_not_mask_delayed_cooldown(monkeypatch):
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    feedback = iter(
+        [
+            "验证码发送成功",
+            "验证码发送成功",
+            "验证码发送成功 | 180秒之内不要重复操作哦~",
+        ]
+    )
+
+    class FakePage:
+        def evaluate(self, _script):
+            return next(feedback)
+
+    monkeypatch.setattr(runner, "_wait_interruptibly", lambda _seconds: None)
+
+    assert runner._visible_verification_cooldown(FakePage()) == (
+        "180秒之内不要重复操作"
+    )
 
 
 def test_browser_retry_reuses_cached_verification_without_resending(
@@ -2143,9 +2163,19 @@ def test_browser_retry_reuses_cached_verification_without_resending(
         ),
     )
 
+    class FakeApi:
+        def verification_code(self, customer_id):
+            assert customer_id == 701
+            return {
+                "found": True,
+                "code": "123456",
+                "message_id": "cached-message",
+                "received_at": datetime.now(timezone.utc).isoformat(),
+            }
+
     code = runner._obtain_verification_code(
         object(),
-        object(),
+        FakeApi(),
         701,
     )
 
@@ -2156,14 +2186,26 @@ def test_browser_retry_reuses_cached_verification_without_resending(
 def test_cooldown_reuses_existing_mail_instead_of_waiting_for_new_one(
     monkeypatch,
 ):
+    calls = []
+
     class FakeApi:
         def verification_code(self, customer_id):
             assert customer_id == 702
+            calls.append(customer_id)
+            if len(calls) == 1:
+                return {
+                    "found": True,
+                    "code": "111111",
+                    "message_id": "stale-message",
+                    "received_at": (
+                        datetime.now(timezone.utc) - timedelta(minutes=10)
+                    ).isoformat(),
+                }
             return {
                 "found": True,
                 "code": "654321",
-                "message_id": "existing-message",
-                "received_at": "2026-08-01T02:00:00Z",
+                "message_id": "new-message",
+                "received_at": datetime.now(timezone.utc).isoformat(),
             }
 
     messages = []
@@ -2199,9 +2241,34 @@ def test_cooldown_reuses_existing_mail_instead_of_waiting_for_new_one(
     )
 
     assert code == "654321"
+    assert len(calls) == 2
     assert clicks == ["获取验证码"]
     assert runner.cached_verification_code == "654321"
-    assert any("冷却期验证码已复用" in item for item in messages)
+    assert any("冷却期近期验证码已复核并复用" in item for item in messages)
+
+
+def test_recent_verification_code_rejects_missing_or_old_timestamp():
+    now = datetime.now(timezone.utc)
+    assert recent_verification_code(
+        {
+            "found": True,
+            "code": "123456",
+            "received_at": now.isoformat(),
+        },
+        now=now,
+    ) == "123456"
+    assert recent_verification_code(
+        {
+            "found": True,
+            "code": "123456",
+            "received_at": (now - timedelta(minutes=4)).isoformat(),
+        },
+        now=now,
+    ) == ""
+    assert recent_verification_code(
+        {"found": True, "code": "123456"},
+        now=now,
+    ) == ""
 
 
 def test_coupon_rejection_is_reported_instead_of_looking_like_missing_input():

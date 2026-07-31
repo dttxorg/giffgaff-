@@ -84,7 +84,7 @@ for (const apiBase of [
       `https://gg.6667766.xyz/p/${TOKEN}`,
     ]);
     assert.ok(calls.every((url) => !new URL(url).pathname.startsWith("//")));
-    assert.equal(response.headers.get("X-Public-Card-Worker"), "6");
+    assert.equal(response.headers.get("X-Public-Card-Worker"), "7");
     assert.equal(response.headers.get("X-Origin-Stage"), "page");
     assert.equal(response.headers.get("X-Origin-Status"), "200");
   });
@@ -102,7 +102,7 @@ test("missing API_BASE returns an explicit configuration error", async () => {
   assert.equal(response.status, 500);
   assert.equal(await response.text(), "Worker configuration error");
   assert.equal(response.headers.get("X-Worker-Error"), "api-base");
-  assert.equal(response.headers.get("X-Public-Card-Worker"), "6");
+  assert.equal(response.headers.get("X-Public-Card-Worker"), "7");
   assert.equal(fetchCalled, false);
 });
 
@@ -183,12 +183,50 @@ test("first page request is MISS and the next request is HIT", async () => {
   assert.equal(second.headers.get("X-Cache"), "HIT");
   assert.equal(first.headers.get("Cache-Control"), "no-store, max-age=0");
   assert.equal(second.headers.get("Cache-Control"), "no-store, max-age=0");
-  assert.equal(second.headers.get("X-Public-Card-Worker"), "6");
-  const [storedUrl, storedResponse] = [...cacheEntries.entries()][0];
-  assert.ok(storedUrl.includes("&worker=6"));
+  assert.equal(second.headers.get("X-Public-Card-Worker"), "7");
+  assert.equal(second.headers.get("X-Version-Cache"), "FRESH");
+  const [storedUrl, storedResponse] = [...cacheEntries.entries()].find(
+    ([url]) => url.includes("?v="),
+  );
+  assert.ok(storedUrl.includes("&worker=7"));
   assert.equal(storedResponse.headers.get("Cache-Control"), "public, max-age=2592000");
-  assert.equal(versionCalls, 2);
+  assert.equal(versionCalls, 1);
   assert.equal(pageCalls, 1);
+});
+
+test("stale version metadata serves an existing page during origin outage", async () => {
+  installFetch((url) => {
+    if (url.endsWith("/version")) return jsonResponse({ public_version: 3 });
+    return new Response("stale-capable page", { status: 200 });
+  });
+  const first = await requestWorker();
+  assert.equal(first.status, 200);
+
+  const [metadataUrl, metadataResponse] = [...cacheEntries.entries()].find(
+    ([url]) => url.includes("/__public-card-version/"),
+  );
+  const metadata = await metadataResponse.json();
+  metadata.checked_at = Date.now() - 2 * 60 * 1000;
+  cacheEntries.set(
+    metadataUrl,
+    new Response(JSON.stringify(metadata), {
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  let originCalls = 0;
+  installFetch(() => {
+    originCalls += 1;
+    throw new Error("origin unavailable");
+  });
+  waitUntilPromises = [];
+
+  const second = await requestWorker();
+
+  assert.equal(second.status, 200);
+  assert.equal(await second.text(), "stale-capable page");
+  assert.equal(second.headers.get("X-Cache"), "HIT");
+  assert.equal(second.headers.get("X-Version-Cache"), "STALE");
+  assert.equal(originCalls, 1);
 });
 
 test("frontend deployment snippet stays identical to worker source", () => {
