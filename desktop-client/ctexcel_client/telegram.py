@@ -35,7 +35,7 @@ class TelegramNotifier:
             timeout=timeout,
             transport=transport,
             trust_env=False,
-            headers={"User-Agent": "CTExcelApplyClient/2.5.4"},
+            headers={"User-Agent": "CTExcelApplyClient/2.5.5"},
         )
 
     def close(self) -> None:

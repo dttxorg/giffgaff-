@@ -80,6 +80,7 @@ class CustomerOut(BaseModel):
     ctexcel_referral_link: Optional[str] = None
     ctexcel_last_checked_at: Optional[str] = None
     ctexcel_registration_confirmed_at: Optional[str] = None
+    ctexcel_payment_succeeded_at: Optional[str] = None
     payment_changed_at: Optional[str] = None
     payment_updated_at: Optional[str] = None
     payment_last_checked_at: Optional[str] = None
@@ -123,6 +124,7 @@ class CustomerDetail(BaseModel):
     ctexcel_referral_link: Optional[str] = None
     ctexcel_last_checked_at: Optional[str] = None
     ctexcel_registration_confirmed_at: Optional[str] = None
+    ctexcel_payment_succeeded_at: Optional[str] = None
     payment_changed_at: Optional[str] = None
     payment_updated_at: Optional[str] = None
     payment_last_checked_at: Optional[str] = None
@@ -154,6 +156,8 @@ class CTExcelClientCustomerCreate(BaseModel):
     reuse_pending: bool = True
     # 连续申请时，已有订单号但尚待邮件同步手机号的客户不阻塞下一单。
     allow_new_after_checkpoint: bool = False
+    # 并发客户端为每个线程预分配不同的待补全客户。
+    resume_customer_id: Optional[int] = Field(default=None, ge=1)
     # 客户端为每个并发申请生成唯一键；请求重试时返回同一客户。
     request_key: Optional[str] = Field(
         default=None,
@@ -167,6 +171,7 @@ class CTExcelPaymentCheckpointRequest(BaseModel):
     order_number: Optional[str] = Field(default=None, max_length=80)
     transaction_amount: str = Field(min_length=1, max_length=20)
     phone_number: Optional[str] = Field(default=None, max_length=30)
+    payment_succeeded: bool = False
 
 
 class MoEmailCreateRequest(BaseModel):

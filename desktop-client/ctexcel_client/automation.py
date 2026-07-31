@@ -56,6 +56,12 @@ StageCallback = Callable[[str], None]
 CustomerCallback = Callable[[dict[str, Any]], None]
 
 STALE_BROWSER_PROFILE_SECONDS = 24 * 60 * 60
+AUTOMATION_STALL_TIMEOUT_MS = 20_000
+BROWSER_STARTUP_TIMEOUT_MS = AUTOMATION_STALL_TIMEOUT_MS
+BROWSER_SLOW_MO_MAX_MS = 250
+PAGE_READY_STABLE_SECONDS = 0.35
+TUNNEL_BROWSER_STAGGER_SECONDS = 5
+TUNNEL_BROWSER_STAGGER_MAX_SECONDS = 20
 PURCHASE_LIMIT_MARKERS = (
     "purchase limit",
     "purchase_limit",
@@ -139,6 +145,50 @@ def proxy_browser_error_reason(*values: Any) -> str:
         if marker in evidence:
             return label
     return ""
+
+
+def browser_startup_snapshot_is_blank(snapshot: dict[str, Any]) -> bool:
+    """Treat an empty viewport or a lone loading label as a blank startup page."""
+    text = re.sub(r"\s+", "", str(snapshot.get("text") or "")).lower()
+    loading_only = text in {
+        "",
+        "loading",
+        "loading...",
+        "加载中",
+        "加载中...",
+        "加载中…",
+        "正在加载",
+        "正在加载...",
+        "正在加载…",
+    }
+    try:
+        visible_content = int(snapshot.get("visible_content") or 0)
+    except (TypeError, ValueError):
+        visible_content = 0
+    return loading_only and visible_content == 0
+
+
+def tunnel_browser_start_delay(worker_slot: int) -> int:
+    """Stagger shared-tunnel browser starts to avoid one simultaneous burst."""
+    position = max(1, int(worker_slot)) - 1
+    return min(
+        TUNNEL_BROWSER_STAGGER_MAX_SECONDS,
+        position * TUNNEL_BROWSER_STAGGER_SECONDS,
+    )
+
+
+def is_wechat_payment_url(value: Any, purchase_route: str) -> bool:
+    """Match either payment route without depending on query parameters."""
+    try:
+        path = urlsplit(str(value or "")).path.rstrip("/").lower()
+    except ValueError:
+        return False
+    expected = (
+        "/freecard/buycardwx"
+        if purchase_route == PURCHASE_ROUTE_FREECARD
+        else "/buycard/buycardwx"
+    )
+    return path.endswith(expected)
 
 
 ORDER_PATTERN = re.compile(
@@ -240,8 +290,26 @@ class AutomationError(RuntimeError):
     pass
 
 
-class RetryableProxyBrowserError(AutomationError):
+class RetryableBrowserError(AutomationError):
+    """The current browser must close and restart with the same customer."""
+
+    pass
+
+
+class RetryableProxyBrowserError(RetryableBrowserError):
     """当前浏览器代理连接失败，可关闭窗口并使用新连接重试。"""
+
+    pass
+
+
+class RetryableBlankPageError(RetryableBrowserError):
+    """The registration entry stayed blank for the startup deadline."""
+
+    pass
+
+
+class RetryableStalledPageError(RetryableBrowserError):
+    """No browser-side progress was observed before the pre-payment limit."""
 
     pass
 
@@ -466,8 +534,10 @@ class CTExcelAutomation:
         customer_created: CustomerCallback,
         request_key: str = "",
         reuse_pending_customer: bool = True,
+        resume_customer_id: Optional[int] = None,
         worker_slot: int = 1,
         proxy_override: Optional[dict[str, str]] = None,
+        proxy_provider: Optional[Callable[[], dict[str, str]]] = None,
         browser_start_barrier: Optional[threading.Barrier] = None,
         batch_ordinal: int = 1,
     ):
@@ -480,16 +550,23 @@ class CTExcelAutomation:
             or uuid.uuid4().hex
         )
         self.reuse_pending_customer = bool(reuse_pending_customer)
+        self.resume_customer_id = (
+            int(resume_customer_id)
+            if resume_customer_id is not None
+            else None
+        )
         self.worker_slot = max(1, int(worker_slot))
         self.proxy_override = (
             dict(proxy_override) if proxy_override is not None else None
         )
+        self.proxy_provider = proxy_provider
         self.browser_start_barrier = browser_start_barrier
         self.batch_ordinal = max(1, int(batch_ordinal))
         self.stop_event = threading.Event()
         self.context: Optional[BrowserContext] = None
         self.profile_dir: Optional[Path] = None
         self.network_events: list[str] = []
+        self.payment_qr_reached = False
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -503,9 +580,13 @@ class CTExcelAutomation:
 
     def run(self) -> AutomationResult:
         self._validate_registration_defaults()
-        route = self._prepare_browser_route(
-            resolved_proxy=self.proxy_override,
-        )
+        route = BrowserProxyRoute(proxy=None)
+        proxy_mode = self.config.proxy.mode.strip().lower()
+        defer_short_proxy = proxy_mode in {"api", "tunnel"}
+        if not defer_short_proxy:
+            route = self._prepare_browser_route(
+                resolved_proxy=self.proxy_override,
+            )
 
         try:
             self.stage("连接客户管理")
@@ -518,13 +599,17 @@ class CTExcelAutomation:
                 api.connect()
                 self.log("客户管理连接成功")
                 self.stage("准备 CTExcel 客户")
-                if self.reuse_pending_customer:
+                if (
+                    self.reuse_pending_customer
+                    and self.resume_customer_id is None
+                ):
                     self._refresh_pending_customers(api)
                 created = api.create_ctexcel_customer(
                     reuse_pending=self.reuse_pending_customer,
                     allow_new_after_checkpoint=(
                         self.config.continuous_enabled
                     ),
+                    resume_customer_id=self.resume_customer_id,
                     request_key=self.request_key,
                 )
                 customer_id = int(created["customer_id"])
@@ -545,6 +630,22 @@ class CTExcelAutomation:
                         f"已新建 CTExcel 客户 #{customer_id}，专属邮箱：{email}"
                     )
                 self._check_stop()
+                # 客户/邮箱准备完成后才建立短效代理，避免后台查询消耗 IP 寿命。
+                initial_proxy = self.proxy_override
+                if defer_short_proxy:
+                    if (
+                        initial_proxy is None
+                        and self.proxy_provider is not None
+                    ):
+                        try:
+                            initial_proxy = self.proxy_provider()
+                        except ProxyError as exc:
+                            raise AutomationError(
+                                f"青果独立 IP 提取失败：{exc}"
+                            ) from exc
+                    route = self._prepare_browser_route(
+                        resolved_proxy=initial_proxy,
+                    )
                 for attempt in range(1, PROXY_BROWSER_RETRY_ATTEMPTS + 1):
                     try:
                         return self._run_browser(
@@ -554,31 +655,53 @@ class CTExcelAutomation:
                             browser_proxy=route.proxy,
                             synchronize_start=(attempt == 1),
                         )
-                    except RetryableProxyBrowserError as exc:
+                    except RetryableBrowserError as exc:
                         route.close()
                         route = BrowserProxyRoute(proxy=None)
-                        self.log(
-                            f"代理连接失败，已关闭当前浏览器：{exc}"
-                        )
+                        if isinstance(exc, RetryableBlankPageError):
+                            self.stage("空白页超时，关闭浏览器")
+                            self.log(f"{exc}；已关闭当前空白浏览器")
+                        elif isinstance(exc, RetryableStalledPageError):
+                            self.stage("20 秒无进展，关闭浏览器")
+                            self.log(f"{exc}；已关闭当前卡住的浏览器")
+                        else:
+                            self.log(
+                                f"代理连接失败，已关闭当前浏览器：{exc}"
+                            )
                         if attempt >= PROXY_BROWSER_RETRY_ATTEMPTS:
-                            self.stage("代理重试失败")
+                            self.stage("浏览器重试失败")
                             raise AutomationError(
-                                "代理连续 "
-                                f"{PROXY_BROWSER_RETRY_ATTEMPTS} 次未能建立连接，"
+                                "浏览器连续 "
+                                f"{PROXY_BROWSER_RETRY_ATTEMPTS} 次在付款二维码前中断，"
                                 "当前客户已保留，可重新运行继续"
                             ) from exc
                         next_attempt = attempt + 1
-                        self.stage("重新获取浏览器代理")
+                        self.stage("重新准备浏览器")
+                        retry_delay = min(
+                            10,
+                            1 + max(0, self.worker_slot - 1) * 2,
+                        )
                         self.log(
-                            "正在重新获取代理并启动第 "
-                            f"{next_attempt} / {PROXY_BROWSER_RETRY_ATTEMPTS} 次"
+                            f"{retry_delay} 秒后重新准备代理并启动第 "
+                            f"{next_attempt} / {PROXY_BROWSER_RETRY_ATTEMPTS} 次；"
+                            "继续使用当前客户和邮箱"
                         )
-                        self._wait_interruptibly(1)
-                        retry_override = (
-                            None
-                            if self.config.proxy.mode.strip().lower() == "api"
-                            else self.proxy_override
-                        )
+                        self._wait_interruptibly(retry_delay)
+                        if (
+                            self.config.proxy.mode.strip().lower() == "api"
+                            and self.proxy_provider is not None
+                        ):
+                            try:
+                                retry_override = self.proxy_provider()
+                            except ProxyError as proxy_exc:
+                                raise AutomationError(
+                                    "青果重试节点提取失败："
+                                    f"{proxy_exc}"
+                                ) from proxy_exc
+                        elif self.config.proxy.mode.strip().lower() == "api":
+                            retry_override = None
+                        else:
+                            retry_override = initial_proxy
                         route = self._prepare_browser_route(
                             resolved_proxy=retry_override,
                         )
@@ -636,43 +759,41 @@ class CTExcelAutomation:
         if not pending:
             self.log("没有无手机号的待完成客户，将新建客户")
             return
-        confirmed_pending = [
+        completed_pending = [
             customer
             for customer in pending
-            if str(
-                customer.get("registration_confirmed_at") or ""
-            ).strip()
+            if (
+                str(
+                    customer.get("registration_confirmed_at") or ""
+                ).strip()
+                or str(
+                    customer.get("payment_succeeded_at") or ""
+                ).strip()
+            )
         ]
-        if confirmed_pending:
+        if completed_pending:
             self.log(
-                f"{len(confirmed_pending)} 个账号已有订单确认邮件，"
-                "不会再次提交注册"
+                f"{len(completed_pending)} 个账号已确认支付或注册成功，"
+                "不会再次提交"
             )
         scan_targets = [
             customer
             for customer in pending
-            if not str(
-                customer.get("registration_confirmed_at") or ""
-            ).strip()
+            if customer not in completed_pending
         ]
-        if self.config.continuous_enabled:
-            scan_targets = [
-                customer
-                for customer in scan_targets
-                if not str(customer.get("order_number") or "").strip()
-            ]
-            paid_pending = len(pending) - len(
-                scan_targets
-            ) - len(confirmed_pending)
-            if paid_pending:
-                self.log(
-                    f"{paid_pending} 个已生成订单的客户由服务器后台同步，"
-                    "不阻塞本轮连续申请"
-                )
         if not scan_targets:
             return
+        unpaid_order_count = sum(
+            bool(str(customer.get("order_number") or "").strip())
+            for customer in scan_targets
+        )
+        if unpaid_order_count:
+            self.log(
+                f"{unpaid_order_count} 个已生成订单但尚未确认支付成功的客户，"
+                "将优先复用而不是新建档案"
+            )
         self.log(
-            f"检测到 {len(scan_targets)} 个未生成订单的中断客户，"
+            f"检测到 {len(scan_targets)} 个未完成的中断客户，"
             "先扫描订单邮件"
         )
         synced_count = 0
@@ -744,6 +865,7 @@ class CTExcelAutomation:
         synchronize_start: bool = True,
     ) -> AutomationResult:
         self.stage("启动浏览器")
+        self.payment_qr_reached = False
         with sync_playwright() as playwright:
             profile_root = Path(app_config_dir()) / "browser-runs"
             profile_root.mkdir(parents=True, exist_ok=True)
@@ -758,8 +880,12 @@ class CTExcelAutomation:
             )
             launch_options: dict[str, Any] = {
                 "headless": bool(self.config.headless),
-                # 该流程用于逐单人工支付；保留可观察的操作节奏，避免连续快速点击。
-                "slow_mo": max(800, int(self.config.slow_mo_ms)),
+                # 短效节点下优先在有效期内完成自动化步骤；
+                # 仍保留少量可观察间隔，且防止旧配置恢复为 800ms。
+                "slow_mo": min(
+                    BROWSER_SLOW_MO_MAX_MS,
+                    max(0, int(self.config.slow_mo_ms)),
+                ),
                 # 去掉 Chrome 的自动测试横幅和最明显的 webdriver 标记。
                 "ignore_default_args": [
                     "--enable-automation",
@@ -781,6 +907,18 @@ class CTExcelAutomation:
                 launch_options["channel"] = channel
             if browser_proxy:
                 launch_options["proxy"] = browser_proxy
+            proxy_mode = self.config.proxy.mode.strip().lower()
+            if synchronize_start and proxy_mode == "tunnel":
+                stagger_seconds = tunnel_browser_start_delay(
+                    self.worker_slot
+                )
+                if stagger_seconds:
+                    self.stage("隧道浏览器错峰启动")
+                    self.log(
+                        f"共享隧道线程在建立浏览器前错峰 "
+                        f"{stagger_seconds} 秒，不消耗已建立连接的寿命"
+                    )
+                    self._wait_interruptibly(stagger_seconds)
             self.context = playwright.chromium.launch_persistent_context(
                 str(self.profile_dir),
                 **launch_options,
@@ -817,9 +955,11 @@ class CTExcelAutomation:
                         }"""
                     )
                 self._attach_page_diagnostics(page)
-                page.set_default_timeout(max(1000, int(self.config.step_timeout_ms)))
+                page.set_default_timeout(
+                    self._automation_step_timeout_ms()
+                )
                 page.set_default_navigation_timeout(
-                    max(5000, int(self.config.page_timeout_ms))
+                    self._automation_wait_timeout_ms()
                 )
                 if browser_proxy:
                     if self.config.proxy.mode == "tunnel":
@@ -832,7 +972,11 @@ class CTExcelAutomation:
                             "青果代理已通过 CTExcel 端口预检；"
                             "跳过第三方 IP 检测并直接进入注册"
                         )
-                if synchronize_start and self.browser_start_barrier is not None:
+                if (
+                    synchronize_start
+                    and proxy_mode not in {"api", "tunnel"}
+                    and self.browser_start_barrier is not None
+                ):
                     self.stage("等待并发窗口就绪")
                     self.log("浏览器已就绪，等待首批并发窗口")
                     try:
@@ -840,6 +984,8 @@ class CTExcelAutomation:
                         self.log("首批窗口已全部就绪，同时开始操作")
                     except threading.BrokenBarrierError:
                         self.log("部分窗口未按时就绪，当前线程继续操作")
+                elif synchronize_start and proxy_mode == "api":
+                    self.log("短效节点不等待并发屏障，浏览器就绪后立即操作")
                 if self.config.purchase_route == PURCHASE_ROUTE_FREECARD:
                     self._start_freecard_application(page)
                 else:
@@ -847,7 +993,7 @@ class CTExcelAutomation:
                     self._configure_sim(page)
                 self._fill_customer_info(page, api, customer_id, email)
                 self._confirm_order(page)
-                pending = self._open_wechat_payment(
+                page, pending = self._open_wechat_payment(
                     page,
                     api=api,
                     customer_id=customer_id,
@@ -901,14 +1047,147 @@ class CTExcelAutomation:
         *,
         browser_proxy: Optional[dict[str, str]],
     ) -> None:
-        reason = self._page_proxy_error_reason(page, exc)
+        diagnostic_page = page
+        try:
+            page_closed = page is None or page.is_closed()
+        except Exception:
+            page_closed = True
+        if page_closed and self.context is not None:
+            with contextlib.suppress(Exception):
+                open_pages = [
+                    candidate
+                    for candidate in self.context.pages
+                    if not candidate.is_closed()
+                ]
+                if open_pages:
+                    diagnostic_page = open_pages[-1]
+        reason = self._page_proxy_error_reason(diagnostic_page, exc)
         if browser_proxy and reason:
             self.stage("代理异常，关闭浏览器")
             self.log(f"检测到可重试代理错误：{reason}")
             raise RetryableProxyBrowserError(reason) from exc
-        if page is not None:
-            self._preserve_error_page(page, exc)
+        if isinstance(exc, RetryableBrowserError):
+            raise exc
+        closed_error = any(
+            marker in str(exc).lower()
+            for marker in (
+                "target page, context or browser has been closed",
+                "page has been closed",
+            )
+        )
+        if not self.payment_qr_reached and (
+            isinstance(exc, PlaywrightTimeoutError)
+            or closed_error
+        ):
+            raise RetryableStalledPageError(
+                "付款二维码前 20 秒未出现新页面动作"
+                if isinstance(exc, PlaywrightTimeoutError)
+                else "付款二维码前浏览器页面意外关闭"
+            ) from exc
+        if diagnostic_page is not None:
+            self._preserve_error_page(diagnostic_page, exc)
         raise exc
+
+    def _automation_wait_timeout_ms(self) -> int:
+        return min(
+            AUTOMATION_STALL_TIMEOUT_MS,
+            max(1_000, int(self.config.page_timeout_ms)),
+        )
+
+    def _automation_step_timeout_ms(self) -> int:
+        return min(
+            AUTOMATION_STALL_TIMEOUT_MS,
+            max(1_000, int(self.config.step_timeout_ms)),
+        )
+
+    def _browser_startup_timeout_ms(self) -> int:
+        return self._automation_wait_timeout_ms()
+
+    def _page_startup_snapshot(self, page: Page) -> dict[str, Any]:
+        snapshot: dict[str, Any] = {
+            "text": "",
+            "visible_content": 0,
+            "ready_state": "unknown",
+            "title": "",
+            "url": str(getattr(page, "url", "") or ""),
+        }
+        with contextlib.suppress(Exception):
+            value = page.evaluate(
+                """() => {
+                  const body = document.body;
+                  const visible = element => {
+                    if (!element || element.hidden) return false;
+                    const style = getComputedStyle(element);
+                    const rect = element.getBoundingClientRect();
+                    return style.display !== 'none'
+                      && style.visibility !== 'hidden'
+                      && Number(style.opacity || 1) > 0
+                      && rect.width > 4
+                      && rect.height > 4;
+                  };
+                  const content = body
+                    ? Array.from(body.querySelectorAll(
+                        'a,button,input,select,textarea,img,svg,canvas,'
+                        + 'video,iframe,[role="button"]'
+                      )).filter(visible).length
+                    : 0;
+                  return {
+                    text: body?.innerText || '',
+                    visible_content: content,
+                    ready_state: document.readyState,
+                    title: document.title || '',
+                    url: location.href
+                  };
+                }"""
+            )
+            if isinstance(value, dict):
+                snapshot.update(value)
+        return snapshot
+
+    def _open_registration_entry(
+        self,
+        page: Page,
+        url: str,
+        *,
+        label: str,
+        ready_script: str,
+    ) -> None:
+        """Open an entry page and require useful content within 30 seconds."""
+        timeout_ms = self._browser_startup_timeout_ms()
+        timeout_seconds = max(1, timeout_ms // 1000)
+        started = time.monotonic()
+        self.log(f"{label}已启用 {timeout_seconds} 秒空白页看门狗")
+        try:
+            response = page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=timeout_ms,
+            )
+        except PlaywrightTimeoutError as exc:
+            raise RetryableBlankPageError(
+                f"{label}打开超过 {timeout_seconds} 秒仍未完成"
+            ) from exc
+        self._raise_if_proxy_error_page(page, response)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        remaining_ms = max(1, timeout_ms - elapsed_ms)
+        try:
+            page.wait_for_function(
+                ready_script,
+                timeout=remaining_ms,
+            )
+        except PlaywrightTimeoutError as exc:
+            self._raise_if_proxy_error_page(page, response)
+            snapshot = self._page_startup_snapshot(page)
+            if browser_startup_snapshot_is_blank(snapshot):
+                raise RetryableBlankPageError(
+                    f"{label}打开 {timeout_seconds} 秒仍是一片空白"
+                ) from exc
+            title = str(snapshot.get("title") or "").strip()
+            raise AutomationError(
+                f"{label}在 {timeout_seconds} 秒内未出现预期内容；"
+                f"当前页面非空白（标题：{title or '无'}）"
+            ) from exc
+        self.log(f"{label}已加载出有效页面内容")
 
     def _page_proxy_error_reason(
         self,
@@ -1038,22 +1317,18 @@ class CTExcelAutomation:
 
     def _start_freecard_application(self, page: Page) -> None:
         self.stage("选择申请路线")
-        response = page.goto(
+        self._open_registration_entry(
+            page,
             FREECARD_APPLICATION_URL,
-            wait_until="domcontentloaded",
-            timeout=self.config.page_timeout_ms,
-        )
-        self._raise_if_proxy_error_page(page, response)
-        self._dismiss_cookie_consent(page)
-        self._wait_for_page_ready(page, "£1 领卡活动页")
-        page.wait_for_function(
-            """() => {
+            label="£1 领卡活动页",
+            ready_script="""() => {
               const text = document.body?.innerText || '';
               return text.includes('还没选好套餐')
                 && text.includes('先预存£1领卡');
             }""",
-            timeout=self.config.page_timeout_ms,
         )
+        self._dismiss_cookie_consent(page)
+        self._wait_for_page_ready(page, "£1 领卡活动页")
         self._click_visible_text(
             page,
             "还没选好套餐，先预存£1领卡 >",
@@ -1067,7 +1342,7 @@ class CTExcelAutomation:
                 && text.includes('订单金额')
                 && text.includes('£1');
             }""",
-            timeout=self.config.page_timeout_ms,
+            timeout=self._automation_wait_timeout_ms(),
         )
         self._ensure_selected_option(
             page,
@@ -1088,24 +1363,23 @@ class CTExcelAutomation:
         self._click_button(page, "下一步")
         page.wait_for_url(
             "**/freecard/activityPagefillInfos",
-            timeout=self.config.page_timeout_ms,
+            timeout=self._automation_wait_timeout_ms(),
         )
         self._wait_for_page_ready(page, "£1 领卡资料页")
 
     def _select_plan(self, page: Page) -> None:
         self.stage("选择申请路线")
-        response = page.goto(
+        self._open_registration_entry(
+            page,
             self.config.application_url,
-            wait_until="domcontentloaded",
-            timeout=self.config.page_timeout_ms,
+            label="套餐列表",
+            ready_script=(
+                "() => document.body "
+                "&& document.body.innerText.includes('50GB')"
+            ),
         )
-        self._raise_if_proxy_error_page(page, response)
         self._dismiss_cookie_consent(page)
         self._wait_for_page_ready(page, "套餐列表")
-        page.wait_for_function(
-            "() => document.body && document.body.innerText.includes('50GB')",
-            timeout=self.config.page_timeout_ms,
-        )
         selected = page.evaluate(
             """() => {
               const norm = value => String(value || '').replace(/\\s+/g, '');
@@ -1134,7 +1408,7 @@ class CTExcelAutomation:
             raise AutomationError("没有定位到 50GB / £11.9 套餐的立即订购按钮")
         page.wait_for_url(
             "**/buycard/simcarddetails/**",
-            timeout=self.config.page_timeout_ms,
+            timeout=self._automation_wait_timeout_ms(),
         )
         self._wait_for_page_ready(page, "套餐详情")
         self.log("已选择 50GB、£11.9/30天套餐")
@@ -1148,7 +1422,7 @@ class CTExcelAutomation:
               const text = document.body?.innerText || '';
               return text.includes('SIM卡类型') && text.includes('自动续订');
             }""",
-            timeout=self.config.page_timeout_ms,
+            timeout=self._automation_wait_timeout_ms(),
         )
         # “实体SIM卡”与说明文字在同一个 div 中，exact=True 会得到 0 个匹配。
         self._ensure_selected_option(
@@ -1184,19 +1458,21 @@ class CTExcelAutomation:
                   const root = document.querySelector('.el-switch');
                   return root && !root.classList.contains('is-checked');
                 }""",
-                timeout=self.config.step_timeout_ms,
+                timeout=self._automation_step_timeout_ms(),
             )
         switch_class = switch.get_attribute("class") or ""
         if "is-checked" in switch_class:
             raise AutomationError("自动续订仍处于开启状态")
         self.log("实体 SIM、免费随机号码、1个月、1张，自动续订已关闭")
         self._click_button(page, "下一步")
-        page.wait_for_url("**/buycard/fillinfos", timeout=self.config.page_timeout_ms)
+        page.wait_for_url("**/buycard/fillinfos", timeout=self._automation_wait_timeout_ms())
         self._wait_for_page_ready(page, "客户资料页")
 
     def _dismiss_cookie_consent(self, page: Page) -> None:
         """关闭 Usercentrics；页面内监视器会继续处理延迟弹出。"""
-        deadline = time.monotonic() + 10
+        started = time.monotonic()
+        deadline = started + 5
+        quiet_deadline = started + 0.8
         saw_dialog = False
         while time.monotonic() < deadline:
             self._check_stop()
@@ -1235,7 +1511,7 @@ class CTExcelAutomation:
             action = str((state or {}).get("action") or "")
             visible = bool((state or {}).get("visible"))
             if action:
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(100)
                 self.log(
                     "已自动关闭隐私设置（"
                     + ("拒绝非必要 Cookie" if action == "reject" else "确认 Cookie 选择")
@@ -1247,13 +1523,13 @@ class CTExcelAutomation:
             elif saw_dialog:
                 self.log("隐私设置已自动关闭")
                 return
-            elif time.monotonic() + 7 < deadline:
+            elif time.monotonic() < quiet_deadline:
                 # 首页短暂等待弹窗；后续延迟出现由页面监视器处理。
-                page.wait_for_timeout(200)
+                page.wait_for_timeout(100)
                 continue
             else:
                 return
-            page.wait_for_timeout(200)
+            page.wait_for_timeout(100)
         if saw_dialog:
             raise AutomationError("隐私设置遮罩仍在阻挡页面操作")
 
@@ -1391,7 +1667,7 @@ class CTExcelAutomation:
         else:
             page.wait_for_url(
                 "**/buycard/buycardlist",
-                timeout=self.config.page_timeout_ms,
+                timeout=self._automation_wait_timeout_ms(),
             )
             self._wait_for_page_ready(page, "订单确认页")
 
@@ -1413,7 +1689,7 @@ class CTExcelAutomation:
         confirm.click()
         page.wait_for_url(
             "**/freecard/activityPageconfirm",
-            timeout=self.config.page_timeout_ms,
+            timeout=self._automation_wait_timeout_ms(),
         )
         self._wait_for_page_ready(page, "£1 订单确认页")
 
@@ -1499,17 +1775,10 @@ class CTExcelAutomation:
         page: Page,
         label: str,
         *,
-        stable_seconds: float = 1.2,
+        stable_seconds: float = PAGE_READY_STABLE_SECONDS,
     ) -> None:
         """等待全屏 Loading 消失并保持稳定，避免请求刚结束就继续点击。"""
-        configured_timeout = max(
-            90_000,
-            int(self.config.step_timeout_ms) * 3,
-        )
-        timeout_ms = min(
-            max(5_000, int(self.config.page_timeout_ms)),
-            configured_timeout,
-        )
+        timeout_ms = self._automation_wait_timeout_ms()
         deadline = time.monotonic() + timeout_ms / 1000
         stable_since: Optional[float] = None
         saw_loading = False
@@ -1519,7 +1788,7 @@ class CTExcelAutomation:
                 loading = bool(page.evaluate(LOADING_OVERLAY_SCRIPT))
             except Exception:
                 if page.is_closed():
-                    raise AutomationError(
+                    raise RetryableStalledPageError(
                         f"页面已关闭，等待加载中止：{label}"
                     )
                 stable_since = None
@@ -1534,20 +1803,15 @@ class CTExcelAutomation:
                 if stable_since is None:
                     stable_since = time.monotonic()
                 elif time.monotonic() - stable_since >= max(
-                    0.5,
+                    0.25,
                     stable_seconds,
                 ):
                     if saw_loading:
-                        with contextlib.suppress(PlaywrightTimeoutError):
-                            page.wait_for_load_state(
-                                "networkidle",
-                                timeout=3000,
-                            )
                         self.log(f"页面加载完成：{label}")
                     return
-            self._wait_interruptibly(0.2)
-        raise AutomationError(
-            f"页面加载超时：{label}；Loading 遮罩持续未消失"
+            self._wait_interruptibly(0.1)
+        raise RetryableStalledPageError(
+            f"{label} 20 秒没有新动作；Loading 遮罩持续未消失"
         )
 
     @staticmethod
@@ -1612,7 +1876,7 @@ class CTExcelAutomation:
         self.log(f"智能识别基础地址：{expected_base}")
         dialog.get_by_role("button", name="开始识别", exact=True).click()
         self._wait_for_page_ready(page, "智能识别地址")
-        dialog.wait_for(state="hidden", timeout=self.config.step_timeout_ms)
+        dialog.wait_for(state="hidden", timeout=self._automation_step_timeout_ms())
 
         region_value = region.input_value().strip()
         detail_value = detail.input_value().strip()
@@ -1674,12 +1938,11 @@ class CTExcelAutomation:
             if coupon.input_value().strip() != coupon_code:
                 raise AutomationError("优惠码没有完整写入结算页输入框")
             self.log(f"优惠码已填入并核对：{coupon_code}")
-            self._wait_interruptibly(2)
             self._click_button(page, "使用优惠码")
             expected = defaults.expected_price_gbp.strip()
             deadline = time.monotonic() + max(
                 5,
-                int(self.config.step_timeout_ms) / 1000,
+                self._automation_step_timeout_ms() / 1000,
             )
             body_text = ""
             while time.monotonic() < deadline:
@@ -1695,7 +1958,7 @@ class CTExcelAutomation:
                     )
                 self._wait_interruptibly(0.25)
             else:
-                raise AutomationError(
+                raise RetryableStalledPageError(
                     f"优惠码 {coupon_code} 已提交，但订单金额没有变为 £{expected}"
                 )
             if not price_is_expected(body_text, expected):
@@ -1739,7 +2002,7 @@ class CTExcelAutomation:
         *,
         api: AdminApi,
         customer_id: int,
-    ) -> dict[str, str]:
+    ) -> tuple[Page, dict[str, str]]:
         self.stage("确认支付条款")
         self._click_button(page, "确认支付")
         dialogs = page.get_by_role("dialog")
@@ -1758,19 +2021,13 @@ class CTExcelAutomation:
         if not checkbox.is_checked():
             raise AutomationError("支付条款没有成功勾选")
         dialog.get_by_role("button", name="下一步", exact=True).click()
-        self._wait_for_page_ready(page, "生成微信支付订单")
-        payment_path = (
-            "**/freecard/buycardWX"
-            if self.config.purchase_route == PURCHASE_ROUTE_FREECARD
-            else "**/buycard/buycardWX"
-        )
-        page.wait_for_url(payment_path, timeout=self.config.page_timeout_ms)
-        page.wait_for_function(
+        payment_page = self._wait_for_wechat_payment_page(page)
+        payment_page.wait_for_function(
             "() => document.body && document.body.innerText.includes('订单号码')",
-            timeout=self.config.page_timeout_ms,
+            timeout=self._automation_wait_timeout_ms(),
         )
-        self._wait_for_page_ready(page, "微信支付页")
-        page_text = page.locator("body").inner_text()
+        self._wait_for_page_ready(payment_page, "微信支付页")
+        page_text = payment_page.locator("body").inner_text()
         order = ORDER_PATTERN.search(page_text)
         expected = (
             "1.00"
@@ -1791,15 +2048,72 @@ class CTExcelAutomation:
             "订单号和付款金额已回写客户管理"
             f"：{order_number} / £{expected}"
         )
+        self.payment_qr_reached = True
         self.stage("等待人工微信支付")
         self.log(
             f"微信二维码已显示，金额 £{expected}"
             + (f"，订单号 {order_number}" if order_number else "")
         )
-        return {
+        return payment_page, {
             "order_number": order_number,
             "transaction_amount": expected,
         }
+
+    def _wait_for_wechat_payment_page(self, source_page: Page) -> Page:
+        """Follow a same-tab redirect or the new tab used by some site builds."""
+        timeout_ms = min(
+            BROWSER_STARTUP_TIMEOUT_MS,
+            max(5_000, int(self.config.page_timeout_ms)),
+        )
+        deadline = time.monotonic() + timeout_ms / 1000
+        saw_extra_page = False
+        next_proxy_check = time.monotonic()
+        while time.monotonic() < deadline:
+            self._check_stop()
+            candidates: list[Page] = [source_page]
+            if self.context is not None:
+                with contextlib.suppress(Exception):
+                    for candidate in self.context.pages:
+                        if all(candidate is not item for item in candidates):
+                            candidates.append(candidate)
+            if len(candidates) > 1:
+                saw_extra_page = True
+            open_pages: list[Page] = []
+            for candidate in reversed(candidates):
+                try:
+                    if candidate.is_closed():
+                        continue
+                    open_pages.append(candidate)
+                    if is_wechat_payment_url(
+                        candidate.url,
+                        self.config.purchase_route,
+                    ):
+                        if candidate is not source_page:
+                            self.log(
+                                "微信支付页在新窗口打开，"
+                                "已自动切换后续跟踪"
+                            )
+                        else:
+                            self.log("已进入微信支付页")
+                        return candidate
+                except Exception:
+                    continue
+            now = time.monotonic()
+            if now >= next_proxy_check:
+                next_proxy_check = now + 1
+                for candidate in open_pages:
+                    reason = self._page_proxy_error_reason(candidate)
+                    if reason:
+                        raise RetryableProxyBrowserError(reason)
+            self._wait_interruptibly(0.1)
+        detail = (
+            "检测到新窗口，但新窗口未进入支付页"
+            if saw_extra_page
+            else "确认页未跳转，也未打开支付新窗口"
+        )
+        raise RetryableStalledPageError(
+            f"生成微信支付订单 20 秒无新动作：{detail}"
+        )
 
     def _wait_for_payment_success(
         self,
@@ -1827,6 +2141,7 @@ class CTExcelAutomation:
                     customer_id,
                     order_number=order_number,
                     transaction_amount=transaction_amount,
+                    payment_succeeded=True,
                 )
                 self.log(
                     "支付成功已确认："
@@ -1956,7 +2271,7 @@ class CTExcelAutomation:
     def _visible_locator(self, locator: Locator, label: str) -> Locator:
         deadline = time.monotonic() + max(
             1,
-            int(self.config.step_timeout_ms) / 1000,
+            self._automation_step_timeout_ms() / 1000,
         )
         last_count = 0
         while time.monotonic() < deadline:
@@ -1967,7 +2282,7 @@ class CTExcelAutomation:
                 if candidate.is_visible():
                     return candidate
             time.sleep(0.15)
-        raise AutomationError(
+        raise RetryableStalledPageError(
             f"没有找到可见控件：{label}（页面匹配 {last_count} 个）"
         )
 
@@ -1978,7 +2293,6 @@ class CTExcelAutomation:
             text,
         )
         locator.click()
-        self._wait_for_page_ready(page, f"操作“{text}”")
 
     def _click_button(self, page: Page, name: str) -> None:
         self._wait_for_page_ready(page, f"点击“{name}”前")
@@ -1987,7 +2301,6 @@ class CTExcelAutomation:
             f"按钮“{name}”",
         )
         locator.click()
-        self._wait_for_page_ready(page, f"点击“{name}”")
 
 
 class CTExcelBatchAutomation:
@@ -2026,6 +2339,86 @@ class CTExcelBatchAutomation:
         )
         self.qg_proxy_lock = threading.Lock()
         self.qg_proxy_ips: set[str] = set()
+        self.resume_customer_ids_by_ordinal: dict[int, int] = {}
+        self.resume_assignment_supported = False
+
+    def _prepare_resume_customer_ids(
+        self,
+        *,
+        first_ordinal: int,
+        total: int,
+    ) -> None:
+        """Assign distinct unfinished customers before any proxy is acquired."""
+        self.resume_customer_ids_by_ordinal = {}
+        self.resume_assignment_supported = False
+        if self.automation_factory is not CTExcelAutomation:
+            return
+        self.stage("优先整理未完成客户")
+        with AdminApi(
+            self.config.server_url,
+            self.config.app_password,
+            retry_callback=self.log,
+            sleep=lambda seconds: self.stop_event.wait(seconds),
+        ) as api:
+            status = api.connect()
+            api_version = int(status.get("api_version") or 0)
+            if api_version < 8:
+                self.log(
+                    "客户管理 API 版本较旧，本轮保留单线程待完成客户复用策略"
+                )
+                return
+            self.resume_assignment_supported = True
+            pending = api.pending_customers()
+            needed = max(0, int(total) - int(first_ordinal) + 1)
+            resumable: list[int] = []
+            for customer in sorted(
+                pending,
+                key=lambda item: int(item.get("customer_id") or 0),
+            ):
+                if len(resumable) >= needed:
+                    break
+                customer_id = int(customer.get("customer_id") or 0)
+                if not customer_id:
+                    continue
+                if (
+                    str(
+                        customer.get("registration_confirmed_at") or ""
+                    ).strip()
+                    or str(
+                        customer.get("payment_succeeded_at") or ""
+                    ).strip()
+                ):
+                    continue
+                # 已有订单号的旧记录先扫描邮箱，避免把实际已完成
+                # 但尚未同步的账号再次提交。
+                if str(customer.get("order_number") or "").strip():
+                    try:
+                        refreshed = api.sync_order_info(customer_id)
+                    except ApiError as exc:
+                        self.log(
+                            f"客户 #{customer_id} 邮件状态刷新暂未完成：{exc}"
+                        )
+                    else:
+                        if refreshed.get("registration_confirmed"):
+                            self.log(
+                                f"客户 #{customer_id} 已确认注册成功，跳过复用"
+                            )
+                            continue
+                resumable.append(customer_id)
+            self.resume_customer_ids_by_ordinal = {
+                ordinal: customer_id
+                for ordinal, customer_id in zip(
+                    range(first_ordinal, total + 1),
+                    resumable,
+                )
+            }
+        if resumable:
+            self.log(
+                f"已按创建顺序为前 {len(resumable)} 单分配不同的"
+                "未成功付款客户；这些客户完成前不新建档案"
+            )
+        else:
+            self.log("没有可复用的未完成客户，后续按需新建")
 
     def _next_unique_qg_proxy(self) -> dict[str, str]:
         """Serialize extraction and never assign one QG IP to two browsers."""
@@ -2055,6 +2448,7 @@ class CTExcelBatchAutomation:
         total: int,
         worker_slot: int,
         reuse_pending_customer: bool,
+        resume_customer_id: Optional[int] = None,
         browser_start_barrier: Optional[threading.Barrier] = None,
     ) -> AutomationResult:
         prefix = (
@@ -2083,18 +2477,20 @@ class CTExcelBatchAutomation:
             )
 
         proxy_override: Optional[dict[str, str]] = None
+        proxy_provider: Optional[Callable[[], dict[str, str]]] = None
         if (
             self.config.proxy.mode.strip().lower() == "api"
             and is_qg_proxy_api_url(self.config.proxy.api_url)
         ):
-            try:
-                proxy_override = self._next_unique_qg_proxy()
-            except ProxyError as exc:
-                raise AutomationError(f"青果独立 IP 提取失败：{exc}") from exc
-            item_log(
-                "本浏览器已独立提取青果节点："
-                f"{masked_proxy_label(proxy_override)}"
-            )
+            def provide_qg_proxy() -> dict[str, str]:
+                proxy = self._next_unique_qg_proxy()
+                item_log(
+                    "客户邮箱已就绪，现在为本浏览器独立提取青果节点："
+                    f"{masked_proxy_label(proxy)}"
+                )
+                return proxy
+
+            proxy_provider = provide_qg_proxy
         elif self.proxy_pool is not None:
             lease = self.proxy_pool.next()
             proxy_override = lease.proxy
@@ -2114,8 +2510,10 @@ class CTExcelBatchAutomation:
                 f"batch-{uuid.uuid4().hex}-{ordinal}"
             ),
             reuse_pending_customer=reuse_pending_customer,
+            resume_customer_id=resume_customer_id,
             worker_slot=worker_slot,
             proxy_override=proxy_override,
+            proxy_provider=proxy_provider,
             browser_start_barrier=browser_start_barrier,
             batch_ordinal=ordinal,
         )
@@ -2146,11 +2544,19 @@ class CTExcelBatchAutomation:
                 raise AutomationError("用户已停止连续申请")
             self.item_started(ordinal, total)
             self.log(f"开始第 {ordinal} / {total} 单申请")
+            resume_customer_id = self.resume_customer_ids_by_ordinal.get(
+                ordinal
+            )
             last_result = self._run_item(
                 ordinal=ordinal,
                 total=total,
                 worker_slot=1,
-                reuse_pending_customer=True,
+                reuse_pending_customer=(
+                    resume_customer_id is not None
+                    if self.resume_assignment_supported
+                    else True
+                ),
+                resume_customer_id=resume_customer_id,
             )
             completed += 1
             self.item_completed(last_result, completed, total)
@@ -2207,7 +2613,14 @@ class CTExcelBatchAutomation:
                 ordinal=ordinal,
                 total=total,
                 worker_slot=worker_slot,
-                reuse_pending_customer=(ordinal == first_ordinal),
+                reuse_pending_customer=(
+                    ordinal in self.resume_customer_ids_by_ordinal
+                    if self.resume_assignment_supported
+                    else ordinal == first_ordinal
+                ),
+                resume_customer_id=(
+                    self.resume_customer_ids_by_ordinal.get(ordinal)
+                ),
                 browser_start_barrier=(
                     browser_start_barrier
                     if ordinal <= first_wave_last_ordinal
@@ -2287,6 +2700,10 @@ class CTExcelBatchAutomation:
                 completed_count=completed,
                 total_count=total,
             )
+        self._prepare_resume_customer_ids(
+            first_ordinal=completed + 1,
+            total=total,
+        )
         workers = (
             min(
                 total - completed,

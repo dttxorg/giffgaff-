@@ -60,7 +60,7 @@ class AdminApi:
         self.server_url = server_url.strip().rstrip("/")
         self.app_password = app_password.strip()
         headers = {
-            "User-Agent": "CTExcelApplyClient/2.5.4",
+            "User-Agent": "CTExcelApplyClient/2.5.5",
             "Accept": "application/json",
         }
         if self.app_password:
@@ -203,6 +203,7 @@ class AdminApi:
         *,
         reuse_pending: bool = True,
         allow_new_after_checkpoint: bool = False,
+        resume_customer_id: Optional[int] = None,
         request_key: str = "",
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -213,6 +214,8 @@ class AdminApi:
         }
         if str(request_key or "").strip():
             body["request_key"] = str(request_key).strip()
+        if resume_customer_id is not None:
+            body["resume_customer_id"] = int(resume_customer_id)
         data = self._request(
             "POST",
             "/api/ctexcel-client/customers",
@@ -254,6 +257,7 @@ class AdminApi:
         order_number: str,
         transaction_amount: str,
         phone_number: str = "",
+        payment_succeeded: bool = False,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "order_number": str(order_number or "").strip() or None,
@@ -261,6 +265,8 @@ class AdminApi:
         }
         if str(phone_number or "").strip():
             body["phone_number"] = str(phone_number).strip()
+        if payment_succeeded:
+            body["payment_succeeded"] = True
         data = self._request(
             "POST",
             (

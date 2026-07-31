@@ -44,7 +44,7 @@ def test_client_ui_uses_scoped_api_without_hidden_entry_field():
     assert "self.continuous_workers.setRange(1, 10)" in source
     assert '"Telegram 付款提醒"' in source
     assert '"测试推送"' in source
-    assert __version__ == "2.5.4"
+    assert __version__ == "2.5.5"
     assert 'f"CTExcel 申请工作台 v{__version__}"' in source
 
 
@@ -234,6 +234,32 @@ def test_invalid_saved_purchase_route_migrates_to_freecard(tmp_path: Path):
     loaded = load_config(target)
 
     assert loaded.purchase_route == PURCHASE_ROUTE_FREECARD
+
+
+def test_legacy_slow_browser_defaults_migrate_to_short_proxy_timing(
+    tmp_path: Path,
+):
+    target = tmp_path / "config.json"
+    target.write_text(
+        '{"slow_mo_ms": 800, "verification_min_wait_seconds": 8}',
+        encoding="utf-8",
+    )
+
+    loaded = load_config(target)
+
+    assert AppConfig().slow_mo_ms == 100
+    assert AppConfig().verification_min_wait_seconds == 3
+    assert loaded.slow_mo_ms == 100
+    assert loaded.verification_min_wait_seconds == 3
+
+
+def test_custom_browser_delay_is_bounded_for_short_lived_proxies(
+    tmp_path: Path,
+):
+    target = tmp_path / "config.json"
+    target.write_text('{"slow_mo_ms": 9000}', encoding="utf-8")
+
+    assert load_config(target).slow_mo_ms == 250
 
 
 def test_invalid_continuous_values_are_bounded(tmp_path: Path):

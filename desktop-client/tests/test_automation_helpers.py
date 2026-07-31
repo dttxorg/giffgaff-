@@ -15,7 +15,9 @@ from ctexcel_client.automation import (
     AutomationError,
     CTExcelBatchAutomation,
     CTExcelAutomation,
+    RetryableBlankPageError,
     RetryableProxyBrowserError,
+    RetryableStalledPageError,
     application_target,
     address_region_token,
     append_address_suffix,
@@ -27,12 +29,16 @@ from ctexcel_client.automation import (
     normalize_money,
     parse_message_timestamp,
     is_payment_success_url,
+    is_wechat_payment_url,
     payment_page_has_expected_amount,
     price_is_expected,
     proxy_browser_error_reason,
+    browser_startup_snapshot_is_blank,
+    tunnel_browser_start_delay,
 )
 from ctexcel_client.config import (
     AppConfig,
+    PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
     ProxyConfig,
     RegistrationDefaults,
@@ -60,6 +66,21 @@ def test_both_purchase_routes_recognize_their_success_page():
     )
     assert not is_payment_success_url(
         "https://www.ctexcel.com/freecard/buycardWX"
+    )
+
+
+def test_wechat_payment_url_matches_same_tab_and_popup_routes():
+    assert is_wechat_payment_url(
+        "https://www.ctexcel.com/freecard/buycardWX?order=1",
+        PURCHASE_ROUTE_FREECARD,
+    )
+    assert is_wechat_payment_url(
+        "https://www.ctexcel.com/uk/buycard/buycardWX",
+        PURCHASE_ROUTE_50GB,
+    )
+    assert not is_wechat_payment_url(
+        "https://www.ctexcel.com/freecard/activityPageconfirm",
+        PURCHASE_ROUTE_FREECARD,
     )
 
 
@@ -105,6 +126,7 @@ def test_success_page_completes_immediately_without_reading_phone():
         {
             "order_number": "ORDERSUK2026073106180627794025",
             "transaction_amount": "1.00",
+            "payment_succeeded": True,
         },
     )
     assert any("客户端不再读取手机号" in item for item in messages)
@@ -222,6 +244,154 @@ def test_proxy_browser_errors_are_recognized(evidence, expected):
     assert expected in proxy_browser_error_reason(evidence)
 
 
+@pytest.mark.parametrize(
+    ("snapshot", "expected"),
+    [
+        ({"text": "", "visible_content": 0}, True),
+        ({"text": "Loading...", "visible_content": 0}, True),
+        ({"text": "加载中…", "visible_content": 0}, True),
+        ({"text": "HTTP ERROR 407", "visible_content": 0}, False),
+        ({"text": "", "visible_content": 1}, False),
+    ],
+)
+def test_browser_startup_blank_snapshot_detection(snapshot, expected):
+    assert browser_startup_snapshot_is_blank(snapshot) is expected
+
+
+def test_tunnel_browser_starts_are_staggered_by_worker_slot():
+    assert [tunnel_browser_start_delay(slot) for slot in range(1, 7)] == [
+        0,
+        5,
+        10,
+        15,
+        20,
+        20,
+    ]
+
+
+def test_registration_entry_blank_page_raises_retryable_error():
+    class FakeBody:
+        def inner_text(self, timeout):
+            assert timeout == 1000
+            return ""
+
+    class FakePage:
+        url = "https://www.ctexcel.com/freecard/home"
+
+        def goto(self, url, *, wait_until, timeout):
+            assert url == self.url
+            assert wait_until == "domcontentloaded"
+            assert timeout == 5000
+            return SimpleNamespace(status=200)
+
+        def wait_for_function(self, _script, *, timeout):
+            assert 1 <= timeout <= 5000
+            raise automation_module.PlaywrightTimeoutError("timeout")
+
+        def evaluate(self, _script):
+            return {
+                "text": "",
+                "visible_content": 0,
+                "ready_state": "complete",
+                "title": "",
+                "url": self.url,
+            }
+
+        def title(self):
+            return ""
+
+        def locator(self, selector):
+            assert selector == "body"
+            return FakeBody()
+
+    runner = CTExcelAutomation(
+        AppConfig(page_timeout_ms=5000),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    with pytest.raises(RetryableBlankPageError, match="仍是一片空白"):
+        runner._open_registration_entry(
+            FakePage(),
+            "https://www.ctexcel.com/freecard/home",
+            label="活动页",
+            ready_script="() => false",
+        )
+
+
+def test_registration_entry_nonblank_unexpected_page_is_diagnostic_error():
+    class FakeBody:
+        def inner_text(self, timeout):
+            return "网站维护通知"
+
+    class FakePage:
+        url = "https://www.ctexcel.com/freecard/home"
+
+        def goto(self, *_args, **_kwargs):
+            return SimpleNamespace(status=200)
+
+        def wait_for_function(self, _script, *, timeout):
+            raise automation_module.PlaywrightTimeoutError("timeout")
+
+        def evaluate(self, _script):
+            return {
+                "text": "网站维护通知",
+                "visible_content": 0,
+                "ready_state": "complete",
+                "title": "维护中",
+                "url": self.url,
+            }
+
+        def title(self):
+            return "维护中"
+
+        def locator(self, _selector):
+            return FakeBody()
+
+    runner = CTExcelAutomation(
+        AppConfig(page_timeout_ms=5000),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    with pytest.raises(AutomationError, match="当前页面非空白"):
+        runner._open_registration_entry(
+            FakePage(),
+            "https://www.ctexcel.com/freecard/home",
+            label="活动页",
+            ready_script="() => false",
+        )
+
+
+def test_payment_popup_is_selected_instead_of_waiting_on_confirmation_page():
+    class FakePage:
+        def __init__(self, url):
+            self.url = url
+
+        def is_closed(self):
+            return False
+
+    source = FakePage(
+        "https://www.ctexcel.com/freecard/activityPageconfirm"
+    )
+    popup = FakePage("https://www.ctexcel.com/freecard/buycardWX")
+    messages = []
+    runner = CTExcelAutomation(
+        AppConfig(page_timeout_ms=5000),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    runner.context = SimpleNamespace(pages=[source, popup])
+
+    selected = runner._wait_for_wechat_payment_page(source)
+
+    assert selected is popup
+    assert any("新窗口" in message for message in messages)
+
+
 def test_proxy_browser_error_skips_manual_hold_but_normal_error_preserves(
     monkeypatch,
 ):
@@ -284,8 +454,60 @@ def test_proxy_browser_error_skips_manual_hold_but_normal_error_preserves(
     assert preserved == [(normal_page, normal_error)]
 
 
-def test_api_proxy_error_reopens_browser_with_same_customer_and_fresh_proxy(
+def test_pre_payment_timeout_restarts_but_qr_wait_is_exempt(monkeypatch):
+    class FakeBody:
+        def inner_text(self, timeout):
+            return "正常业务页面"
+
+    class FakePage:
+        def is_closed(self):
+            return False
+
+        def title(self):
+            return "申请页"
+
+        def locator(self, _selector):
+            return FakeBody()
+
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    preserved = []
+    monkeypatch.setattr(
+        runner,
+        "_preserve_error_page",
+        lambda page, exc: preserved.append((page, exc)),
+    )
+    timeout = automation_module.PlaywrightTimeoutError("timeout")
+
+    with pytest.raises(RetryableStalledPageError, match="20 秒"):
+        runner._handle_browser_failure(
+            FakePage(),
+            timeout,
+            browser_proxy=None,
+        )
+    assert preserved == []
+
+    runner.payment_qr_reached = True
+    with pytest.raises(automation_module.PlaywrightTimeoutError):
+        runner._handle_browser_failure(
+            FakePage(),
+            timeout,
+            browser_proxy=None,
+        )
+    assert len(preserved) == 1
+
+
+@pytest.mark.parametrize(
+    "retry_error",
+    [RetryableProxyBrowserError, RetryableBlankPageError],
+)
+def test_api_browser_error_reopens_with_same_customer_and_fresh_proxy(
     monkeypatch,
+    retry_error,
 ):
     prepare_calls = []
     browser_attempts = []
@@ -377,7 +599,7 @@ def test_api_proxy_error_reopens_browser_with_same_customer_and_fresh_proxy(
             (customer_id, email, browser_proxy, synchronize_start)
         )
         if len(browser_attempts) < 3:
-            raise RetryableProxyBrowserError("HTTP ERROR 407（代理认证失败）")
+            raise retry_error("浏览器入口需要重试")
         return AutomationResult(customer_id=customer_id, email=email)
 
     monkeypatch.setattr(runner, "_run_browser", fake_run_browser)
@@ -624,7 +846,7 @@ def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     assert 'page.locator(".el-switch")' in source
     assert "'.el-loading-mask'" in source
     assert "Loading 遮罩持续未消失" in source
-    assert '"networkidle"' in source
+    assert '"networkidle"' not in source
     configure_start = source.index("def _configure_sim")
     switch_click = source.index("switch.click()", configure_start)
     wait_before_switch = source.index(
@@ -643,7 +865,7 @@ def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     assert "先预存£1领卡" in source
     assert "activityPagefillInfos" in source
     assert "activityPageconfirm" in source
-    assert "freecard/buycardWX" in source
+    assert "freecard/buycardwx" in source
     assert "save_payment_checkpoint" in source
     assert "allow_new_after_checkpoint" in source
     assert "连续申请模式：本单已完成" in source
@@ -894,6 +1116,77 @@ def test_continuous_runner_supports_ten_safe_parallel_workers():
     assert sorted(completed_ordinals) == list(range(1, 13))
 
 
+def test_batch_assigns_distinct_unpaid_customers_before_creating_new(
+    monkeypatch,
+):
+    sync_calls = []
+
+    class FakeAdminApi:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def connect(self):
+            return {"ok": True, "api_version": 8}
+
+        def pending_customers(self):
+            return [
+                {
+                    "customer_id": 4,
+                    "order_number": "ORDER-PAID",
+                    "payment_succeeded_at": "2026-08-01T00:10:00Z",
+                    "registration_confirmed_at": None,
+                },
+                {
+                    "customer_id": 3,
+                    "order_number": "ORDER-UNPAID",
+                    "payment_succeeded_at": None,
+                    "registration_confirmed_at": None,
+                },
+                {
+                    "customer_id": 2,
+                    "order_number": "ORDER-CONFIRMED",
+                    "payment_succeeded_at": None,
+                    "registration_confirmed_at": None,
+                },
+                {
+                    "customer_id": 1,
+                    "order_number": None,
+                    "payment_succeeded_at": None,
+                    "registration_confirmed_at": None,
+                },
+            ]
+
+        def sync_order_info(self, customer_id):
+            sync_calls.append(customer_id)
+            return {
+                "registration_confirmed": customer_id == 2,
+            }
+
+    monkeypatch.setattr(automation_module, "AdminApi", FakeAdminApi)
+    messages = []
+    runner = CTExcelBatchAutomation(
+        AppConfig(continuous_enabled=True, continuous_count=3),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+        item_started=lambda *_args: None,
+        item_completed=lambda *_args: None,
+    )
+
+    runner._prepare_resume_customer_ids(first_ordinal=1, total=3)
+
+    assert runner.resume_assignment_supported is True
+    assert runner.resume_customer_ids_by_ordinal == {1: 1, 2: 3}
+    assert sync_calls == [2, 3]
+    assert any("不同的未成功付款客户" in item for item in messages)
+
+
 def test_qg_allocator_retries_duplicate_ip_and_assigns_unique_nodes(
     monkeypatch,
 ):
@@ -943,9 +1236,8 @@ def test_loading_overlay_waits_until_the_page_is_stably_ready():
         def is_closed(self):
             return False
 
-        def wait_for_load_state(self, state, timeout):
-            assert state == "networkidle"
-            assert timeout == 3000
+        def wait_for_load_state(self, *_args, **_kwargs):
+            raise AssertionError("Loading 遮罩稳定后不应再等 networkidle")
 
     messages = []
     automation = CTExcelAutomation(
@@ -967,6 +1259,33 @@ def test_loading_overlay_waits_until_the_page_is_stably_ready():
     ]
 
 
+def test_loading_overlay_stalled_for_twenty_seconds_restarts(monkeypatch):
+    class FakePage:
+        def evaluate(self, _script):
+            return True
+
+        def is_closed(self):
+            return False
+
+    clock = {"value": -5.0}
+
+    def monotonic():
+        clock["value"] += 5.0
+        return clock["value"]
+
+    monkeypatch.setattr(automation_module.time, "monotonic", monotonic)
+    runner = CTExcelAutomation(
+        AppConfig(page_timeout_ms=120000),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(runner, "_wait_interruptibly", lambda _seconds: None)
+
+    with pytest.raises(RetryableStalledPageError, match="20 秒"):
+        runner._wait_for_page_ready(FakePage(), "首页 Loading")
+
+
 def test_registration_fields_target_real_inputs_instead_of_placeholder_wrappers():
     source = (
         Path(__file__).resolve().parents[1]
@@ -979,7 +1298,7 @@ def test_registration_fields_target_real_inputs_instead_of_placeholder_wrappers(
     assert 'page.get_by_placeholder("请填写验证码").fill' not in source
 
 
-def test_country_is_selected_before_registration_fields_at_human_paced_speed():
+def test_country_is_selected_before_registration_fields_at_short_proxy_speed():
     source = (
         Path(__file__).resolve().parents[1]
         / "ctexcel_client"
@@ -992,8 +1311,10 @@ def test_country_is_selected_before_registration_fields_at_human_paced_speed():
     assert form_source.index("self._select_china(page)") < form_source.index(
         '"请填写姓"'
     )
-    assert '"slow_mo": max(800, int(self.config.slow_mo_ms))' in source
-    assert "stable_seconds: float = 1.2" in source
+    assert "BROWSER_SLOW_MO_MAX_MS = 250" in source
+    assert "PAGE_READY_STABLE_SECONDS = 0.35" in source
+    assert '"slow_mo": min(' in source
+    assert 'page.wait_for_load_state(\n                                "networkidle"' not in source
     assert "' el-select '" in source
 
 

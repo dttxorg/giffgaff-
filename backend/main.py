@@ -1270,6 +1270,9 @@ async def list_customers(search: str = ""):
         ctexcel_registration_confirmed_at=r.get(
             "ctexcel_registration_confirmed_at"
         ),
+        ctexcel_payment_succeeded_at=r.get(
+            "ctexcel_payment_succeeded_at"
+        ),
         payment_changed_at=r.get("payment_changed_at"),
         payment_updated_at=r.get("payment_updated_at"),
         payment_last_checked_at=r.get("payment_last_checked_at"),
@@ -1320,6 +1323,9 @@ async def get_customer_detail(customer_id: int):
         ctexcel_last_checked_at=c.get("ctexcel_last_checked_at"),
         ctexcel_registration_confirmed_at=c.get(
             "ctexcel_registration_confirmed_at"
+        ),
+        ctexcel_payment_succeeded_at=c.get(
+            "ctexcel_payment_succeeded_at"
         ),
         payment_changed_at=c.get("payment_changed_at"),
         payment_updated_at=c.get("payment_updated_at"),
@@ -1895,20 +1901,27 @@ async def get_customer_verification_code(customer_id: int):
         raise HTTPException(status_code=502, detail=f"邮箱接码失败：{e}") from e
 
 
-async def _list_pending_ctexcel_client_customers(limit: int = 100) -> list[dict]:
+async def _list_pending_ctexcel_client_customers(limit: int = 1000) -> list[dict]:
     """列出尚未同步手机号的 CTExcel 客户，供桌面客户端恢复流程。"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall(
             """SELECT id, email, phone_number, ctexcel_order_number,
                       ctexcel_registration_confirmed_at,
+                      ctexcel_payment_succeeded_at,
                       ctexcel_last_checked_at, created_at
                FROM customers
                WHERE product_type = 'ctexcel'
                  AND NULLIF(TRIM(phone_number), '') IS NULL
-               ORDER BY id DESC
+                 AND NULLIF(
+                       TRIM(ctexcel_registration_confirmed_at), ''
+                     ) IS NULL
+                 AND NULLIF(
+                       TRIM(ctexcel_payment_succeeded_at), ''
+                     ) IS NULL
+               ORDER BY id ASC
                LIMIT ?""",
-            (min(max(1, int(limit)), 100),),
+            (min(max(1, int(limit)), 1000),),
         )
     return [
         {
@@ -1918,6 +1931,9 @@ async def _list_pending_ctexcel_client_customers(limit: int = 100) -> list[dict]
             "order_number": row["ctexcel_order_number"],
             "registration_confirmed_at": row[
                 "ctexcel_registration_confirmed_at"
+            ],
+            "payment_succeeded_at": row[
+                "ctexcel_payment_succeeded_at"
             ],
             "last_checked_at": row["ctexcel_last_checked_at"],
             "created_at": row["created_at"],
@@ -1935,6 +1951,7 @@ async def _get_ctexcel_client_customer_by_request_key(
             db,
             """SELECT id, email, phone_number, ctexcel_order_number,
                       ctexcel_registration_confirmed_at,
+                      ctexcel_payment_succeeded_at,
                       ctexcel_last_checked_at, created_at
                FROM customers
                WHERE product_type = 'ctexcel'
@@ -1950,6 +1967,9 @@ async def _get_ctexcel_client_customer_by_request_key(
         "order_number": row["ctexcel_order_number"],
         "registration_confirmed_at": row[
             "ctexcel_registration_confirmed_at"
+        ],
+        "payment_succeeded_at": row[
+            "ctexcel_payment_succeeded_at"
         ],
         "last_checked_at": row["ctexcel_last_checked_at"],
         "created_at": row["created_at"],
@@ -1982,6 +2002,12 @@ async def get_ctexcel_client_status(request: Request, response: Response):
             """SELECT COUNT(*) AS total,
                       SUM(
                         CASE WHEN NULLIF(TRIM(phone_number), '') IS NULL
+                                  AND NULLIF(
+                                        TRIM(ctexcel_registration_confirmed_at), ''
+                                      ) IS NULL
+                                  AND NULLIF(
+                                        TRIM(ctexcel_payment_succeeded_at), ''
+                                      ) IS NULL
                              THEN 1 ELSE 0 END
                       ) AS pending
                FROM customers
@@ -1991,7 +2017,7 @@ async def get_ctexcel_client_status(request: Request, response: Response):
     pending = int(rows[0][1] or 0) if rows else 0
     return {
         "ok": True,
-        "api_version": 7,
+        "api_version": 8,
         "ctexcel_customer_count": total,
         "pending_customer_count": pending,
     }
@@ -2001,7 +2027,7 @@ async def get_ctexcel_client_status(request: Request, response: Response):
 async def get_ctexcel_client_pending_customers(
     request: Request,
     response: Response,
-    limit: int = Query(50, ge=1, le=100),
+    limit: int = Query(1000, ge=1, le=1000),
 ):
     """返回无手机号客户列表；不暴露普通客户管理接口。"""
     _require_ctexcel_client(request)
@@ -2040,15 +2066,28 @@ async def create_ctexcel_client_customer(
         if not normalize_optional_text(
             customer.get("registration_confirmed_at")
         )
+        and not normalize_optional_text(
+            customer.get("payment_succeeded_at")
+        )
     ]
-    resumable = next(
-        (
-            customer
-            for customer in unfinished_pending
-            if not normalize_optional_text(customer.get("order_number"))
-        ),
-        None,
-    )
+    resumable = None
+    if data.resume_customer_id is not None:
+        resumable = next(
+            (
+                customer
+                for customer in unfinished_pending
+                if int(customer["customer_id"])
+                == int(data.resume_customer_id)
+            ),
+            None,
+        )
+        if resumable is None:
+            raise HTTPException(
+                status_code=409,
+                detail="指定的待补全 CTExcel 客户已完成或已被处理",
+            )
+    elif unfinished_pending:
+        resumable = unfinished_pending[0]
     if data.reuse_pending and resumable:
         await _save_ctexcel_client_request_key(
             int(resumable["customer_id"]),
@@ -2061,21 +2100,6 @@ async def create_ctexcel_client_customer(
             "reused": True,
             "pending_customer_count": len(pending),
         }
-    if (
-        data.reuse_pending
-        and any(
-            normalize_optional_text(customer.get("order_number"))
-            for customer in unfinished_pending
-        )
-        and not data.allow_new_after_checkpoint
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "存在已产生订单但尚未抓取手机号的 CTExcel 客户；"
-                "请先同步手机号后再开始下一单"
-            ),
-        )
     try:
         created = await add_customer(
             CustomerCreate(
@@ -2153,11 +2177,13 @@ async def save_ctexcel_client_payment_checkpoint(
                 detail="CTExcel 手机号码格式错误",
             )
     normalized_amount = f"{amount:.2f}"
+    payment_succeeded_at = _utc_now() if data.payment_succeeded else None
     saved = await save_ctexcel_payment_checkpoint(
         customer_id,
         order_number=order_number,
         transaction_amount=normalized_amount,
         phone_number=phone_number,
+        payment_succeeded_at=payment_succeeded_at,
     )
     if not saved:
         raise HTTPException(status_code=404, detail="CTExcel 客户不存在")
@@ -2167,6 +2193,11 @@ async def save_ctexcel_client_payment_checkpoint(
         "order_number": order_number or customer.get("ctexcel_order_number"),
         "transaction_amount": normalized_amount,
         "phone_number": phone_number or customer.get("phone_number"),
+        "payment_succeeded": bool(data.payment_succeeded),
+        "payment_succeeded_at": (
+            payment_succeeded_at
+            or customer.get("ctexcel_payment_succeeded_at")
+        ),
     }
 
 

@@ -70,7 +70,7 @@ def test_client_status_uses_bearer_password_without_hidden_entry_cookie(client_a
     assert response.status_code == 200
     assert response.json() == {
         "ok": True,
-        "api_version": 7,
+        "api_version": 8,
         "ctexcel_customer_count": 0,
         "pending_customer_count": 0,
     }
@@ -217,24 +217,46 @@ def test_client_customer_request_key_is_idempotent(client_api):
     ]
 
 
-def test_continuous_client_can_create_after_paid_pending_customer(client_api):
+def test_client_reuses_order_checkpoint_without_payment_success(client_api):
     client, db_path = client_api
     with sqlite3.connect(db_path) as connection:
-        paid_pending_id = connection.execute(
+        unpaid_pending_id = connection.execute(
             """INSERT INTO customers
                (product_type, email, activation_date, ctexcel_order_number,
                 ctexcel_transaction_amount)
-               VALUES ('ctexcel', 'paid-pending@example.test', '2026-07-31',
+               VALUES ('ctexcel', 'unpaid-pending@example.test', '2026-07-31',
                        'ORDERSUK2026073104095817734376', '1.00')"""
         ).lastrowid
         connection.commit()
 
-    blocked = client.post(
+    response = client.post(
         "/api/ctexcel-client/customers",
         headers=AUTH_HEADERS,
-        json={"reuse_pending": True},
+        json={
+            "reuse_pending": True,
+            "allow_new_after_checkpoint": True,
+            "resume_customer_id": unpaid_pending_id,
+        },
     )
-    assert blocked.status_code == 409
+
+    assert response.status_code == 201, response.text
+    assert response.json()["reused"] is True
+    assert response.json()["customer_id"] == unpaid_pending_id
+    assert response.json()["email"] == "unpaid-pending@example.test"
+
+
+def test_client_does_not_reuse_confirmed_payment_customer(client_api):
+    client, db_path = client_api
+    with sqlite3.connect(db_path) as connection:
+        paid_customer_id = connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date, ctexcel_order_number,
+                ctexcel_transaction_amount, ctexcel_payment_succeeded_at)
+               VALUES ('ctexcel', 'paid@example.test', '2026-07-31',
+                       'ORDERSUK2026073104095817734376', '1.00',
+                       '2026-07-31T07:00:00Z')"""
+        ).lastrowid
+        connection.commit()
 
     email_mock = AsyncMock(
         return_value={
@@ -266,7 +288,7 @@ def test_continuous_client_can_create_after_paid_pending_customer(client_api):
 
     assert response.status_code == 201, response.text
     assert response.json()["reused"] is False
-    assert response.json()["customer_id"] != paid_pending_id
+    assert response.json()["customer_id"] != paid_customer_id
     assert response.json()["email"] == "next-batch@example.test"
 
 
@@ -316,12 +338,9 @@ def test_client_does_not_reuse_customer_with_confirmation_email(client_api):
         "/api/ctexcel-client/customers/pending",
         headers=AUTH_HEADERS,
     ).json()["customers"]
-    confirmed = next(
-        item for item in pending
-        if item["customer_id"] == confirmed_id
-    )
-    assert confirmed["registration_confirmed_at"] == (
-        "2026-07-31T07:05:00Z"
+    assert all(
+        item["customer_id"] != confirmed_id
+        for item in pending
     )
 
 
@@ -387,22 +406,24 @@ def test_client_payment_checkpoint_persists_success_page_fields(client_api):
             "order_number": "ORDERSUK2026073104095817734376",
             "transaction_amount": "1",
             "phone_number": "447900000009",
+            "payment_succeeded": True,
         },
     )
 
     assert response.status_code == 200, response.text
     assert response.headers["Cache-Control"] == "no-store"
-    assert response.json() == {
-        "ok": True,
-        "customer_id": ctexcel_id,
-        "order_number": "ORDERSUK2026073104095817734376",
-        "transaction_amount": "1.00",
-        "phone_number": "447900000009",
-    }
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["customer_id"] == ctexcel_id
+    assert payload["order_number"] == "ORDERSUK2026073104095817734376"
+    assert payload["transaction_amount"] == "1.00"
+    assert payload["phone_number"] == "447900000009"
+    assert payload["payment_succeeded"] is True
+    assert payload["payment_succeeded_at"]
     with sqlite3.connect(db_path) as connection:
         persisted = connection.execute(
             """SELECT ctexcel_order_number, ctexcel_transaction_amount,
-                      phone_number
+                      phone_number, ctexcel_payment_succeeded_at
                FROM customers WHERE id = ?""",
             (ctexcel_id,),
         ).fetchone()
@@ -410,6 +431,7 @@ def test_client_payment_checkpoint_persists_success_page_fields(client_api):
         "ORDERSUK2026073104095817734376",
         "1.00",
         "447900000009",
+        payload["payment_succeeded_at"],
     )
 
     assert client.post(

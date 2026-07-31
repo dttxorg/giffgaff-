@@ -27,6 +27,10 @@ FREECARD_APPLICATION_URL = "https://www.ctexcel.com/freecard/home"
 DEFAULT_PROXY_API_URL = (
     "https://share.proxy.qg.net/get?num=1&distinct=true"
 )
+DEFAULT_SLOW_MO_MS = 100
+LEGACY_SLOW_MO_MS = 800
+DEFAULT_VERIFICATION_MIN_WAIT_SECONDS = 3
+LEGACY_VERIFICATION_MIN_WAIT_SECONDS = 8
 
 
 def is_qg_proxy_api_url(value: str) -> bool:
@@ -258,10 +262,10 @@ class AppConfig:
     browser_channel: str = "msedge"
     user_data_dir: str = field(default_factory=default_user_data_dir)
     headless: bool = False
-    slow_mo_ms: int = 800
+    slow_mo_ms: int = DEFAULT_SLOW_MO_MS
     page_timeout_ms: int = 120000
     step_timeout_ms: int = 20000
-    verification_min_wait_seconds: int = 8
+    verification_min_wait_seconds: int = DEFAULT_VERIFICATION_MIN_WAIT_SECONDS
     verification_timeout_seconds: int = 180
     payment_timeout_seconds: int = 1800
     order_sync_timeout_seconds: int = 180
@@ -394,6 +398,32 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
         )
     except (TypeError, ValueError):
         values["continuous_interval_seconds"] = 3
+    try:
+        slow_mo_ms = int(
+            values.get("slow_mo_ms", DEFAULT_SLOW_MO_MS)
+        )
+    except (TypeError, ValueError):
+        slow_mo_ms = DEFAULT_SLOW_MO_MS
+    # v2.5.4 及更早版本把 800ms 当作内部默认值持久化。
+    # 这里自动迁移，否则升级后仍会每次 Playwright 操作强制等待 800ms。
+    if slow_mo_ms == LEGACY_SLOW_MO_MS:
+        slow_mo_ms = DEFAULT_SLOW_MO_MS
+    values["slow_mo_ms"] = min(250, max(0, slow_mo_ms))
+    try:
+        verification_wait = int(
+            values.get(
+                "verification_min_wait_seconds",
+                DEFAULT_VERIFICATION_MIN_WAIT_SECONDS,
+            )
+        )
+    except (TypeError, ValueError):
+        verification_wait = DEFAULT_VERIFICATION_MIN_WAIT_SECONDS
+    if verification_wait == LEGACY_VERIFICATION_MIN_WAIT_SECONDS:
+        verification_wait = DEFAULT_VERIFICATION_MIN_WAIT_SECONDS
+    values["verification_min_wait_seconds"] = min(
+        30,
+        max(3, verification_wait),
+    )
     values["app_password"] = unprotect_secret(
         str(raw.get("app_password_protected") or "")
     )
