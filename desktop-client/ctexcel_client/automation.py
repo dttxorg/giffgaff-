@@ -66,6 +66,18 @@ PURCHASE_LIMIT_MARKERS = (
     "超出限额",
     "达到上限",
 )
+PROXY_BROWSER_RETRY_ATTEMPTS = 3
+PROXY_BROWSER_ERROR_LABELS = (
+    ("proxy authentication required", "HTTP ERROR 407（代理认证失败）"),
+    (
+        "err_tunnel_connection_failed",
+        "ERR_TUNNEL_CONNECTION_FAILED（代理隧道建立失败）",
+    ),
+    (
+        "err_proxy_connection_failed",
+        "ERR_PROXY_CONNECTION_FAILED（代理连接失败）",
+    ),
+)
 
 
 def cleanup_stale_browser_profiles(
@@ -116,6 +128,18 @@ def diagnostic_response_excerpt(text: str, *, limit: int = 1600) -> str:
         compact,
     )
     return compact[: max(100, int(limit))]
+
+
+def proxy_browser_error_reason(*values: Any) -> str:
+    """识别浏览器代理认证和隧道错误，返回适合日志显示的原因。"""
+    evidence = "\n".join(str(value or "") for value in values).lower()
+    if re.search(r"(?<!\d)407(?!\d)", evidence):
+        return "HTTP ERROR 407（代理认证失败）"
+    for marker, label in PROXY_BROWSER_ERROR_LABELS:
+        if marker in evidence:
+            return label
+    return ""
+
 
 ORDER_PATTERN = re.compile(
     r"\b(?:ORDER\d{12,}|ORDERSUK\d{12,})\b",
@@ -213,6 +237,12 @@ COOKIE_CONSENT_WATCHER_SCRIPT = r"""(() => {
   setTimeout(() => clearInterval(timer), 60000);
 })()"""
 class AutomationError(RuntimeError):
+    pass
+
+
+class RetryableProxyBrowserError(AutomationError):
+    """当前浏览器代理连接失败，可关闭窗口并使用新连接重试。"""
+
     pass
 
 
@@ -473,45 +503,9 @@ class CTExcelAutomation:
 
     def run(self) -> AutomationResult:
         self._validate_registration_defaults()
-        self.stage("准备浏览器代理")
-        route = BrowserProxyRoute(proxy=None)
-        browser_upstream_proxy: Optional[dict[str, str]] = None
-        try:
-            prepared_proxy = prepare_proxy(
-                self.config.proxy,
-                resolved_proxy=self.proxy_override,
-            )
-            browser_upstream_proxy = prepared_proxy.playwright_proxy
-            if prepared_proxy.public_ip:
-                self.log(
-                    f"当前出口公网 IP：{prepared_proxy.public_ip}"
-                )
-            elif prepared_proxy.public_ip_error:
-                self.log(prepared_proxy.public_ip_error)
-            if browser_upstream_proxy:
-                source = {
-                    "api": "动态提取",
-                    "tunnel": "青果隧道",
-                    "pool": "代理池",
-                }.get(self.config.proxy.mode, "固定配置")
-                self.log(
-                    f"{source}代理已就绪："
-                    f"{masked_proxy_label(browser_upstream_proxy)}"
-                )
-                route = browser_compatible_proxy(browser_upstream_proxy)
-                if route.bridge:
-                    probe_proxy_endpoint(route.proxy or {})
-                    self.log(
-                        "带认证 SOCKS5 已通过本机桥接完成端到端预检："
-                        f"{masked_proxy_label(route.proxy)}"
-                    )
-                else:
-                    self.log("浏览器将直接载入已验证的代理")
-            else:
-                self.log("浏览器使用直连")
-        except ProxyError as exc:
-            route.close()
-            raise AutomationError(f"浏览器代理准备失败：{exc}") from exc
+        route = self._prepare_browser_route(
+            resolved_proxy=self.proxy_override,
+        )
 
         try:
             self.stage("连接客户管理")
@@ -551,14 +545,90 @@ class CTExcelAutomation:
                         f"已新建 CTExcel 客户 #{customer_id}，专属邮箱：{email}"
                     )
                 self._check_stop()
-                return self._run_browser(
-                    api,
-                    customer_id,
-                    email,
-                    browser_proxy=route.proxy,
-                )
+                for attempt in range(1, PROXY_BROWSER_RETRY_ATTEMPTS + 1):
+                    try:
+                        return self._run_browser(
+                            api,
+                            customer_id,
+                            email,
+                            browser_proxy=route.proxy,
+                            synchronize_start=(attempt == 1),
+                        )
+                    except RetryableProxyBrowserError as exc:
+                        route.close()
+                        route = BrowserProxyRoute(proxy=None)
+                        self.log(
+                            f"代理连接失败，已关闭当前浏览器：{exc}"
+                        )
+                        if attempt >= PROXY_BROWSER_RETRY_ATTEMPTS:
+                            self.stage("代理重试失败")
+                            raise AutomationError(
+                                "代理连续 "
+                                f"{PROXY_BROWSER_RETRY_ATTEMPTS} 次未能建立连接，"
+                                "当前客户已保留，可重新运行继续"
+                            ) from exc
+                        next_attempt = attempt + 1
+                        self.stage("重新获取浏览器代理")
+                        self.log(
+                            "正在重新获取代理并启动第 "
+                            f"{next_attempt} / {PROXY_BROWSER_RETRY_ATTEMPTS} 次"
+                        )
+                        self._wait_interruptibly(1)
+                        retry_override = (
+                            None
+                            if self.config.proxy.mode.strip().lower() == "api"
+                            else self.proxy_override
+                        )
+                        route = self._prepare_browser_route(
+                            resolved_proxy=retry_override,
+                        )
         finally:
             route.close()
+
+    def _prepare_browser_route(
+        self,
+        *,
+        resolved_proxy: Optional[dict[str, str]],
+    ) -> BrowserProxyRoute:
+        self.stage("准备浏览器代理")
+        route = BrowserProxyRoute(proxy=None)
+        try:
+            prepared_proxy = prepare_proxy(
+                self.config.proxy,
+                resolved_proxy=resolved_proxy,
+            )
+            browser_upstream_proxy = prepared_proxy.playwright_proxy
+            if prepared_proxy.public_ip:
+                self.log(
+                    f"当前出口公网 IP：{prepared_proxy.public_ip}"
+                )
+            elif prepared_proxy.public_ip_error:
+                self.log(prepared_proxy.public_ip_error)
+            if browser_upstream_proxy:
+                source = {
+                    "api": "动态提取",
+                    "tunnel": "青果隧道",
+                    "pool": "代理池",
+                }.get(self.config.proxy.mode, "固定配置")
+                self.log(
+                    f"{source}代理已就绪："
+                    f"{masked_proxy_label(browser_upstream_proxy)}"
+                )
+                route = browser_compatible_proxy(browser_upstream_proxy)
+                if route.bridge:
+                    probe_proxy_endpoint(route.proxy or {})
+                    self.log(
+                        "带认证 SOCKS5 已通过本机桥接完成端到端预检："
+                        f"{masked_proxy_label(route.proxy)}"
+                    )
+                else:
+                    self.log("浏览器将直接载入已验证的代理")
+            else:
+                self.log("浏览器使用直连")
+            return route
+        except ProxyError as exc:
+            route.close()
+            raise AutomationError(f"浏览器代理准备失败：{exc}") from exc
 
     def _refresh_pending_customers(self, api: AdminApi) -> None:
         """开始新流程前先扫描无手机号客户，避免重复建立空记录。"""
@@ -671,6 +741,7 @@ class CTExcelAutomation:
         email: str,
         *,
         browser_proxy: Optional[dict[str, str]],
+        synchronize_start: bool = True,
     ) -> AutomationResult:
         self.stage("启动浏览器")
         with sync_playwright() as playwright:
@@ -761,7 +832,7 @@ class CTExcelAutomation:
                             "青果代理已通过 CTExcel 端口预检；"
                             "跳过第三方 IP 检测并直接进入注册"
                         )
-                if self.browser_start_barrier is not None:
+                if synchronize_start and self.browser_start_barrier is not None:
                     self.stage("等待并发窗口就绪")
                     self.log("浏览器已就绪，等待首批并发窗口")
                     try:
@@ -807,9 +878,11 @@ class CTExcelAutomation:
                 self._wait_interruptibly(2)
                 return result
             except Exception as exc:
-                if page is not None:
-                    self._preserve_error_page(page, exc)
-                raise
+                self._handle_browser_failure(
+                    page,
+                    exc,
+                    browser_proxy=browser_proxy,
+                )
             finally:
                 with contextlib.suppress(Exception):
                     self.context.close()
@@ -820,6 +893,55 @@ class CTExcelAutomation:
                             "浏览器目录仍被系统占用；下次启动会自动清理"
                         )
                 self.profile_dir = None
+
+    def _handle_browser_failure(
+        self,
+        page: Optional[Page],
+        exc: Exception,
+        *,
+        browser_proxy: Optional[dict[str, str]],
+    ) -> None:
+        reason = self._page_proxy_error_reason(page, exc)
+        if browser_proxy and reason:
+            self.stage("代理异常，关闭浏览器")
+            self.log(f"检测到可重试代理错误：{reason}")
+            raise RetryableProxyBrowserError(reason) from exc
+        if page is not None:
+            self._preserve_error_page(page, exc)
+        raise exc
+
+    def _page_proxy_error_reason(
+        self,
+        page: Optional[Page],
+        *values: Any,
+    ) -> str:
+        page_title = ""
+        page_text = ""
+        if page is not None:
+            with contextlib.suppress(Exception):
+                page_title = page.title()
+            with contextlib.suppress(Exception):
+                page_text = page.locator("body").inner_text(timeout=1000)
+        reason = proxy_browser_error_reason(
+            *values,
+            page_title,
+            page_text,
+            *self.network_events[-20:],
+        )
+        return reason
+
+    def _raise_if_proxy_error_page(
+        self,
+        page: Page,
+        response: Any = None,
+    ) -> None:
+        status = ""
+        if response is not None:
+            with contextlib.suppress(Exception):
+                status = f"HTTP {int(response.status)}"
+        reason = self._page_proxy_error_reason(page, status)
+        if reason:
+            raise RetryableProxyBrowserError(reason)
 
     def _record_network_event(self, message: str) -> None:
         self.network_events.append(message)
@@ -916,11 +1038,12 @@ class CTExcelAutomation:
 
     def _start_freecard_application(self, page: Page) -> None:
         self.stage("选择申请路线")
-        page.goto(
+        response = page.goto(
             FREECARD_APPLICATION_URL,
             wait_until="domcontentloaded",
             timeout=self.config.page_timeout_ms,
         )
+        self._raise_if_proxy_error_page(page, response)
         self._dismiss_cookie_consent(page)
         self._wait_for_page_ready(page, "£1 领卡活动页")
         page.wait_for_function(
@@ -971,11 +1094,12 @@ class CTExcelAutomation:
 
     def _select_plan(self, page: Page) -> None:
         self.stage("选择申请路线")
-        page.goto(
+        response = page.goto(
             self.config.application_url,
             wait_until="domcontentloaded",
             timeout=self.config.page_timeout_ms,
         )
+        self._raise_if_proxy_error_page(page, response)
         self._dismiss_cookie_consent(page)
         self._wait_for_page_ready(page, "套餐列表")
         page.wait_for_function(

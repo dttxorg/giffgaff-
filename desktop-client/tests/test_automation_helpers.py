@@ -15,6 +15,7 @@ from ctexcel_client.automation import (
     AutomationError,
     CTExcelBatchAutomation,
     CTExcelAutomation,
+    RetryableProxyBrowserError,
     application_target,
     address_region_token,
     append_address_suffix,
@@ -28,6 +29,7 @@ from ctexcel_client.automation import (
     is_payment_success_url,
     payment_page_has_expected_amount,
     price_is_expected,
+    proxy_browser_error_reason,
 )
 from ctexcel_client.config import (
     AppConfig,
@@ -199,6 +201,292 @@ def test_network_diagnostics_capture_purchase_limit_response_body():
     assert "购买上限" in runner.network_events[0]
     assert "private-key" not in runner.network_events[0]
     assert "<redacted>" in runner.network_events[0]
+
+
+@pytest.mark.parametrize(
+    ("evidence", "expected"),
+    [
+        ("HTTP ERROR 407", "HTTP ERROR 407"),
+        (
+            "net::ERR_TUNNEL_CONNECTION_FAILED",
+            "ERR_TUNNEL_CONNECTION_FAILED",
+        ),
+        (
+            "net::ERR_PROXY_CONNECTION_FAILED",
+            "ERR_PROXY_CONNECTION_FAILED",
+        ),
+        ("Proxy Authentication Required", "HTTP ERROR 407"),
+    ],
+)
+def test_proxy_browser_errors_are_recognized(evidence, expected):
+    assert expected in proxy_browser_error_reason(evidence)
+
+
+def test_proxy_browser_error_skips_manual_hold_but_normal_error_preserves(
+    monkeypatch,
+):
+    class FakeBody:
+        def __init__(self, text):
+            self.text = text
+
+        def inner_text(self, timeout):
+            assert timeout == 1000
+            return self.text
+
+    class FakePage:
+        def __init__(self, text):
+            self.text = text
+
+        def title(self):
+            return "该网页无法正常运作"
+
+        def locator(self, selector):
+            assert selector == "body"
+            return FakeBody(self.text)
+
+    preserved = []
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_preserve_error_page",
+        lambda page, exc: preserved.append((page, exc)),
+    )
+
+    with pytest.raises(RetryableProxyBrowserError, match="407"):
+        runner._raise_if_proxy_error_page(
+            FakePage(""),
+            SimpleNamespace(status=407),
+        )
+
+    with pytest.raises(RetryableProxyBrowserError, match="407"):
+        runner._handle_browser_failure(
+            FakePage("HTTP ERROR 407"),
+            RuntimeError("navigation failed"),
+            browser_proxy={"server": "http://proxy.example.test:10001"},
+        )
+
+    assert preserved == []
+
+    normal_error = RuntimeError("没有定位到页面按钮")
+    normal_page = FakePage("正常业务页面")
+    with pytest.raises(RuntimeError, match="没有定位到页面按钮"):
+        runner._handle_browser_failure(
+            normal_page,
+            normal_error,
+            browser_proxy={"server": "http://proxy.example.test:10001"},
+        )
+
+    assert preserved == [(normal_page, normal_error)]
+
+
+def test_api_proxy_error_reopens_browser_with_same_customer_and_fresh_proxy(
+    monkeypatch,
+):
+    prepare_calls = []
+    browser_attempts = []
+    customer_creations = []
+    customer_callbacks = []
+    route_closes = []
+    logs = []
+
+    def fake_prepare_proxy(_config, *, resolved_proxy=None):
+        prepare_calls.append(resolved_proxy)
+        proxy = resolved_proxy or {
+            "server": f"http://203.0.113.{len(prepare_calls)}:10001"
+        }
+        return SimpleNamespace(
+            playwright_proxy=proxy,
+            public_ip="",
+            public_ip_error="",
+        )
+
+    class FakeRoute:
+        bridge = None
+
+        def __init__(self, proxy):
+            self.proxy = dict(proxy) if proxy else None
+
+        def close(self):
+            route_closes.append(self.proxy)
+
+    class FakeAdminApi:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def connect(self):
+            pass
+
+        def create_ctexcel_customer(self, **_kwargs):
+            customer_creations.append(1)
+            return {
+                "customer_id": 407,
+                "email": "same-customer@example.test",
+                "reused": False,
+            }
+
+    monkeypatch.setattr(automation_module, "prepare_proxy", fake_prepare_proxy)
+    monkeypatch.setattr(
+        automation_module,
+        "browser_compatible_proxy",
+        lambda proxy: FakeRoute(proxy),
+    )
+    monkeypatch.setattr(automation_module, "AdminApi", FakeAdminApi)
+
+    initial_proxy = {"server": "http://198.51.100.10:10001"}
+    runner = CTExcelAutomation(
+        AppConfig(
+            proxy=ProxyConfig(
+                mode="api",
+                api_url="https://share.proxy.qg.net/get?num=1",
+            ),
+            registration=RegistrationDefaults(
+                last_name="测试姓",
+                first_name="测试名",
+                contact_phone="13800000000",
+                chinese_address="测试地址",
+            ),
+        ),
+        log=logs.append,
+        stage=lambda _stage: None,
+        customer_created=customer_callbacks.append,
+        reuse_pending_customer=False,
+        proxy_override=initial_proxy,
+    )
+    monkeypatch.setattr(runner, "_wait_interruptibly", lambda _seconds: None)
+
+    def fake_run_browser(
+        _api,
+        customer_id,
+        email,
+        *,
+        browser_proxy,
+        synchronize_start,
+    ):
+        browser_attempts.append(
+            (customer_id, email, browser_proxy, synchronize_start)
+        )
+        if len(browser_attempts) < 3:
+            raise RetryableProxyBrowserError("HTTP ERROR 407（代理认证失败）")
+        return AutomationResult(customer_id=customer_id, email=email)
+
+    monkeypatch.setattr(runner, "_run_browser", fake_run_browser)
+
+    result = runner.run()
+
+    assert result.customer_id == 407
+    assert customer_creations == [1]
+    assert len(customer_callbacks) == 1
+    assert prepare_calls == [initial_proxy, None, None]
+    assert [item[0] for item in browser_attempts] == [407, 407, 407]
+    assert [item[1] for item in browser_attempts] == [
+        "same-customer@example.test",
+    ] * 3
+    assert [item[2]["server"] for item in browser_attempts] == [
+        "http://198.51.100.10:10001",
+        "http://203.0.113.2:10001",
+        "http://203.0.113.3:10001",
+    ]
+    assert [item[3] for item in browser_attempts] == [True, False, False]
+    assert len(route_closes) == 3
+    assert any("第 2 / 3 次" in item for item in logs)
+    assert any("第 3 / 3 次" in item for item in logs)
+
+
+def test_proxy_browser_retry_stops_after_three_attempts(monkeypatch):
+    prepare_calls = []
+    customer_creations = []
+    browser_attempts = []
+
+    def fake_prepare_proxy(_config, *, resolved_proxy=None):
+        prepare_calls.append(resolved_proxy)
+        return SimpleNamespace(
+            playwright_proxy={
+                "server": f"http://203.0.113.{len(prepare_calls)}:10001"
+            },
+            public_ip="",
+            public_ip_error="",
+        )
+
+    class FakeRoute:
+        bridge = None
+
+        def __init__(self, proxy):
+            self.proxy = proxy
+
+        def close(self):
+            pass
+
+    class FakeAdminApi:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def connect(self):
+            pass
+
+        def create_ctexcel_customer(self, **_kwargs):
+            customer_creations.append(1)
+            return {
+                "customer_id": 408,
+                "email": "retry-limit@example.test",
+                "reused": False,
+            }
+
+    monkeypatch.setattr(automation_module, "prepare_proxy", fake_prepare_proxy)
+    monkeypatch.setattr(
+        automation_module,
+        "browser_compatible_proxy",
+        lambda proxy: FakeRoute(proxy),
+    )
+    monkeypatch.setattr(automation_module, "AdminApi", FakeAdminApi)
+
+    runner = CTExcelAutomation(
+        AppConfig(
+            proxy=ProxyConfig(mode="api"),
+            registration=RegistrationDefaults(
+                last_name="测试姓",
+                first_name="测试名",
+                contact_phone="13800000000",
+                chinese_address="测试地址",
+            ),
+        ),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+        reuse_pending_customer=False,
+    )
+    monkeypatch.setattr(runner, "_wait_interruptibly", lambda _seconds: None)
+
+    def always_fail(*_args, **_kwargs):
+        browser_attempts.append(1)
+        raise RetryableProxyBrowserError(
+            "ERR_TUNNEL_CONNECTION_FAILED（代理隧道建立失败）"
+        )
+
+    monkeypatch.setattr(runner, "_run_browser", always_fail)
+
+    with pytest.raises(AutomationError, match="连续 3 次"):
+        runner.run()
+
+    assert customer_creations == [1]
+    assert len(browser_attempts) == 3
+    assert len(prepare_calls) == 3
 
 
 def test_application_flow_has_no_phone_capture_or_gate():
