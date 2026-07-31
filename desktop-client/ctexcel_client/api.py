@@ -23,7 +23,7 @@ class AdminApi:
         self.server_url = server_url.strip().rstrip("/")
         self.app_password = app_password.strip()
         headers = {
-                "User-Agent": "CTExcelApplyClient/2.0.8",
+            "User-Agent": "CTExcelApplyClient/2.1.0",
             "Accept": "application/json",
         }
         if self.app_password:
@@ -144,4 +144,26 @@ class AdminApi:
         )
         if not isinstance(data, dict):
             raise ApiError("CTExcel 订单资料接口返回格式错误")
+        return data
+
+    def save_payment_checkpoint(
+        self,
+        customer_id: int,
+        *,
+        order_number: str,
+        transaction_amount: str,
+    ) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            (
+                "/api/ctexcel-client/customers/"
+                f"{int(customer_id)}/payment-checkpoint"
+            ),
+            json_body={
+                "order_number": str(order_number or "").strip() or None,
+                "transaction_amount": str(transaction_amount or "").strip(),
+            },
+        )
+        if not isinstance(data, dict) or not data.get("ok"):
+            raise ApiError("CTExcel 付款金额回写接口返回格式错误")
         return data

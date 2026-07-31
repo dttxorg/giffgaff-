@@ -70,7 +70,7 @@ def test_client_status_uses_bearer_password_without_hidden_entry_cookie(client_a
     assert response.status_code == 200
     assert response.json() == {
         "ok": True,
-        "api_version": 2,
+        "api_version": 3,
         "ctexcel_customer_count": 0,
         "pending_customer_count": 0,
     }
@@ -199,6 +199,58 @@ def test_client_verification_endpoint_is_scoped_to_ctexcel(client_api):
     assert client.get(
         f"/api/ctexcel-client/customers/{giffgaff_id}/verification-code",
         headers=AUTH_HEADERS,
+    ).status_code == 400
+
+
+def test_client_payment_checkpoint_persists_order_and_amount(client_api):
+    client, db_path = client_api
+    with sqlite3.connect(db_path) as connection:
+        ctexcel_id = connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date)
+               VALUES ('ctexcel', 'payment@example.test', '2026-07-31')"""
+        ).lastrowid
+        giffgaff_id = connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date)
+               VALUES ('giffgaff', 'other@example.test', '2026-07-31')"""
+        ).lastrowid
+        connection.commit()
+
+    response = client.post(
+        f"/api/ctexcel-client/customers/{ctexcel_id}/payment-checkpoint",
+        headers=AUTH_HEADERS,
+        json={
+            "order_number": "ORDERSUK2026073104095817734376",
+            "transaction_amount": "1",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json() == {
+        "ok": True,
+        "customer_id": ctexcel_id,
+        "order_number": "ORDERSUK2026073104095817734376",
+        "transaction_amount": "1.00",
+    }
+    with sqlite3.connect(db_path) as connection:
+        persisted = connection.execute(
+            """SELECT ctexcel_order_number, ctexcel_transaction_amount
+               FROM customers WHERE id = ?""",
+            (ctexcel_id,),
+        ).fetchone()
+    assert persisted == ("ORDERSUK2026073104095817734376", "1.00")
+
+    assert client.post(
+        f"/api/ctexcel-client/customers/{giffgaff_id}/payment-checkpoint",
+        headers=AUTH_HEADERS,
+        json={"transaction_amount": "1.00"},
+    ).status_code == 400
+    assert client.post(
+        f"/api/ctexcel-client/customers/{ctexcel_id}/payment-checkpoint",
+        headers=AUTH_HEADERS,
+        json={"transaction_amount": "not-money"},
     ).status_code == 400
 
 

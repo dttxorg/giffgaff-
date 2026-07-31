@@ -21,6 +21,7 @@ import time
 import ipaddress
 from collections import deque
 from copy import deepcopy
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from database import init_db, DATABASE_PATH
@@ -29,7 +30,7 @@ from models import (
     SystemSettings, AuthLoginRequest, MoEmailCreateRequest,
     SimCodeImport, SimCodeUpdate, SimCodeOut, ActivationStatusUpdate,
     VerificationCodeOut, PaymentInfoEmailOut, CTExcelOrderInfoOut,
-    CTExcelClientCustomerCreate,
+    CTExcelClientCustomerCreate, CTExcelPaymentCheckpointRequest,
     InboxMessageSummaryOut, InboxMessageListOut, InboxMessageDetailOut,
     DomainInfo, LabelConfig, EsimCodeUpdate,
     EmailProviderCreate, EmailProviderOut, EmailProviderUpdate,
@@ -41,6 +42,7 @@ from crud import (
     update_customer_moemail,
     regenerate_public_link, ensure_public_link, bump_all_public_versions,
     save_payment_check_result, save_ctexcel_order_info,
+    save_ctexcel_payment_checkpoint,
     regenerate_identity,
     get_public_email,
     get_settings, set_setting, fetch_one, normalize_optional_text
@@ -698,7 +700,9 @@ def _extract_ctexcel_order_info(message: dict) -> dict:
         r"(?:手机号码|电话号码|mobile\s*(?:number|no\.?))\s*[:：]\s*\**\s*((?:\+?44|0)7\d{9})"
     )
     transaction_amount = find(
-        r"(?:交易金额|订单金额|transaction\s*amount)\s*[:：]\s*\**\s*[£￡]?\s*([0-9]+(?:\.[0-9]{1,2})?)"
+        r"(?:交易金额|订单金额|付款金额|支付金额|预存金额|"
+        r"transaction\s*amount|payment\s*amount)"
+        r"\s*[:：]\s*\**\s*[£￡]?\s*([0-9]+(?:\.[0-9]{1,2})?)"
     )
     referral_code = find(
         r"(?:专属推荐码|推荐码|referral\s*code)\s*[:：]\s*\**\s*([A-Z0-9]{4,20})"
@@ -1915,7 +1919,7 @@ async def get_ctexcel_client_status(request: Request, response: Response):
     pending = int(rows[0][1] or 0) if rows else 0
     return {
         "ok": True,
-        "api_version": 2,
+        "api_version": 3,
         "ctexcel_customer_count": total,
         "pending_customer_count": pending,
     }
@@ -1996,6 +2000,57 @@ async def create_ctexcel_client_customer(
             status_code=502,
             detail="服务器创建 CTExcel 客户或专属邮箱失败",
         ) from exc
+
+
+@app.post(
+    "/api/ctexcel-client/customers/{customer_id}/payment-checkpoint",
+)
+async def save_ctexcel_client_payment_checkpoint(
+    customer_id: int,
+    data: CTExcelPaymentCheckpointRequest,
+    request: Request,
+    response: Response,
+):
+    """保存桌面客户端支付页确认过的订单号和英镑金额。"""
+    _require_ctexcel_client(request)
+    response.headers["Cache-Control"] = "no-store"
+    customer = await get_customer(customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="客户不存在")
+    if _normalize_product_type(customer.get("product_type")) != "ctexcel":
+        raise HTTPException(status_code=400, detail="该客户不是 CTExcel 模式")
+
+    raw_amount = str(data.transaction_amount or "").strip()
+    try:
+        amount = Decimal(raw_amount).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        raise HTTPException(status_code=400, detail="付款金额格式错误")
+    if (
+        not amount.is_finite()
+        or amount <= 0
+        or amount > Decimal("10000")
+    ):
+        raise HTTPException(status_code=400, detail="付款金额超出允许范围")
+
+    order_number = normalize_optional_text(data.order_number)
+    if order_number:
+        order_number = order_number.upper()
+        if not re.fullmatch(r"[A-Z0-9-]{8,80}", order_number):
+            raise HTTPException(status_code=400, detail="CTExcel 订单号格式错误")
+    normalized_amount = f"{amount:.2f}"
+    saved = await save_ctexcel_payment_checkpoint(
+        customer_id,
+        order_number=order_number,
+        transaction_amount=normalized_amount,
+    )
+    if not saved:
+        raise HTTPException(status_code=404, detail="CTExcel 客户不存在")
+    return {
+        "ok": True,
+        "customer_id": customer_id,
+        "order_number": order_number or customer.get("ctexcel_order_number"),
+        "transaction_amount": normalized_amount,
+    }
 
 
 @app.get(

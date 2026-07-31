@@ -13,10 +13,17 @@ from urllib.parse import urlsplit
 
 APP_NAME = "CTExcelApplyClient"
 CRYPTPROTECT_UI_FORBIDDEN = 0x1
+PURCHASE_ROUTE_50GB = "plan_50gb"
+PURCHASE_ROUTE_FREECARD = "freecard_1gbp"
+PURCHASE_ROUTES = {
+    PURCHASE_ROUTE_50GB,
+    PURCHASE_ROUTE_FREECARD,
+}
 DEFAULT_APPLICATION_URL = (
     "https://www.ctexcel.com/uk/buyCard/buyCardPackage/1"
     "?recommendCode=NTKWJX"
 )
+FREECARD_APPLICATION_URL = "https://www.ctexcel.com/freecard/home"
 DEFAULT_PROXY_API_URL = (
     "https://api.cliproxy.io/white/api"
     "?region=Rand&num=1&time=10&format=n&type=txt"
@@ -173,6 +180,7 @@ class RegistrationDefaults:
     contact_phone: str = ""
     chinese_address: str = ""
     referral_code: str = "NTKWJX"
+    freecard_referrer: str = "447942946765"
     coupon_code: str = "DEAL50OFF"
     expected_price_gbp: str = "5.95"
 
@@ -182,6 +190,7 @@ class AppConfig:
     server_url: str = "https://gg.6667766.xyz"
     app_password: str = ""
     remember_credentials: bool = True
+    purchase_route: str = PURCHASE_ROUTE_FREECARD
     application_url: str = DEFAULT_APPLICATION_URL
     browser_channel: str = "msedge"
     user_data_dir: str = field(default_factory=default_user_data_dir)
@@ -234,6 +243,8 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
         if key in AppConfig.__dataclass_fields__
         and key not in {"proxy", "registration", "app_password"}
     }
+    if values.get("purchase_route") not in PURCHASE_ROUTES:
+        values["purchase_route"] = PURCHASE_ROUTE_FREECARD
     values["app_password"] = unprotect_secret(
         str(raw.get("app_password_protected") or "")
     )

@@ -19,7 +19,7 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
                 200,
                 json={
                     "ok": True,
-                    "api_version": 2,
+                    "api_version": 3,
                     "ctexcel_customer_count": 3,
                     "pending_customer_count": 1,
                 },
@@ -74,6 +74,21 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
                     "detail": "已同步",
                 },
             )
+        if path == "/api/ctexcel-client/customers/321/payment-checkpoint":
+            assert request.method == "POST"
+            assert json.loads(request.content) == {
+                "order_number": "ORDERSUK2026073104095817734376",
+                "transaction_amount": "1.00",
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "customer_id": 321,
+                    "order_number": "ORDERSUK2026073104095817734376",
+                    "transaction_amount": "1.00",
+                },
+            )
         raise AssertionError(f"unexpected request: {request.method} {path}")
 
     with AdminApi(
@@ -85,6 +100,11 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
         pending = api.pending_customers()
         created = api.create_ctexcel_customer()
         verification = api.verification_code(created["customer_id"])
+        checkpoint = api.save_payment_checkpoint(
+            created["customer_id"],
+            order_number="ORDERSUK2026073104095817734376",
+            transaction_amount="1.00",
+        )
         order_info = api.sync_order_info(created["customer_id"])
 
     assert status["ctexcel_customer_count"] == 3
@@ -92,12 +112,14 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
     assert pending[0]["customer_id"] == 321
     assert created["email"] == "customer@example.test"
     assert verification["code"] == "123456"
+    assert checkpoint["transaction_amount"] == "1.00"
     assert order_info["phone_number"] == "07900000009"
     assert requests == [
         ("GET", "/api/ctexcel-client/status"),
         ("GET", "/api/ctexcel-client/customers/pending"),
         ("POST", "/api/ctexcel-client/customers"),
         ("GET", "/api/ctexcel-client/customers/321/verification-code"),
+        ("POST", "/api/ctexcel-client/customers/321/payment-checkpoint"),
         ("POST", "/api/ctexcel-client/customers/321/order-info"),
     ]
 

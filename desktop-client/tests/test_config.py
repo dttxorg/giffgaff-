@@ -5,6 +5,8 @@ from ctexcel_client.config import (
     AppConfig,
     DEFAULT_PROXY_API_URL,
     ProxyConfig,
+    PURCHASE_ROUTE_50GB,
+    PURCHASE_ROUTE_FREECARD,
     RegistrationDefaults,
     load_config,
     save_config,
@@ -22,6 +24,9 @@ def test_client_ui_uses_scoped_api_without_hidden_entry_field():
     assert "隐藏管理入口" in source
     assert "entry_path" not in source
     assert "自动申请工作台" in source
+    assert '"预存 £1 领卡"' in source
+    assert '"50GB · £11.9/30天（优惠后 £5.95）"' in source
+    assert "£1 路线推荐人号码" in source
 
 
 def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
@@ -94,12 +99,14 @@ def test_non_secret_registration_defaults_round_trip(tmp_path: Path):
     target = tmp_path / "config.json"
     config = AppConfig(
         remember_credentials=False,
+        purchase_route=PURCHASE_ROUTE_50GB,
         registration=RegistrationDefaults(
             last_name="Fixed",
             first_name="Name",
             contact_phone="13800000000",
             chinese_address="fixed shipping address",
             referral_code="REFCODE",
+            freecard_referrer="447942946765",
             coupon_code="HALF",
             expected_price_gbp="5.95",
         ),
@@ -109,4 +116,17 @@ def test_non_secret_registration_defaults_round_trip(tmp_path: Path):
     loaded = load_config(target)
 
     assert loaded.registration == config.registration
+    assert loaded.purchase_route == PURCHASE_ROUTE_50GB
     assert loaded.app_password == ""
+
+
+def test_invalid_saved_purchase_route_migrates_to_freecard(tmp_path: Path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        '{"purchase_route": "removed-route"}',
+        encoding="utf-8",
+    )
+
+    loaded = load_config(target)
+
+    assert loaded.purchase_route == PURCHASE_ROUTE_FREECARD

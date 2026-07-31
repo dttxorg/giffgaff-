@@ -402,6 +402,29 @@ async def save_ctexcel_order_info(
         return cursor.rowcount > 0
 
 
+async def save_ctexcel_payment_checkpoint(
+    customer_id: int,
+    *,
+    order_number: Optional[str],
+    transaction_amount: str,
+) -> bool:
+    """保存桌面客户端已生成的支付订单号和应付英镑金额。"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            """UPDATE customers
+               SET ctexcel_order_number = COALESCE(?, ctexcel_order_number),
+                   ctexcel_transaction_amount = ?
+               WHERE id = ? AND product_type = 'ctexcel'""",
+            (
+                normalize_optional_text(order_number),
+                normalize_optional_text(transaction_amount),
+                customer_id,
+            ),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 
 async def set_setting(key: str, value: str):
     async with aiosqlite.connect(DATABASE_PATH) as db:

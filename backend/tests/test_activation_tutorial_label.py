@@ -396,7 +396,9 @@ def test_frontend_uses_customer_inbox_workspace_and_independent_print_flows():
     assert "element.type === 'text' && element.source === '初始密码'" in html
     assert '<th class="th-address">收货地址</th>' in html
     assert "addCell('收货地址', 'ledger-address ledger-ellipsis')" in html
-    assert "cell.colSpan = appMode === 'ctexcel' ? 10 : 11;" in html
+    assert '<th class="th-amount" data-mode-only="ctexcel">付款金额</th>' in html
+    assert "addCell('付款金额', 'mono ledger-amount')" in html
+    assert "cell.colSpan = 11;" in html
     assert "$('d-identity-disclosure').open = false;" in html
     assert '<details class="identity-disclosure" id="d-identity-disclosure" data-mode-only="giffgaff">' in html
     info_section = html.index('<section class="tab-content active detail-section" data-tab="info">')

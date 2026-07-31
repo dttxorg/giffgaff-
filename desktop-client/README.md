@@ -6,26 +6,37 @@
 2. 在客户管理列表中新建一个 `ctexcel` 客户。
 3. 客户管理系统通过 MoEmail / CloudMail 自动生成专属邮箱，并返回
    `customer_id + email`。
-4. 客户端用该邮箱完成 CTExcel 注册、邮箱验证码、地址、优惠码和微信支付。
+4. 客户端按所选路线完成 CTExcel 注册、邮箱验证码、地址和微信支付。
 5. 支付成功后客户端流程结束。
 6. 客户管理系统后台继续扫描该专属邮箱，把订单号、手机号码、交易金额、
    推荐码和推荐链接写入同一客户记录。
 
-客户端不访问隐藏管理入口、不使用旧的 Agent Token，也不直接回写订单字段。客户和订单通过
-**同一个专属邮箱**自然关联。
+客户端不访问隐藏管理入口、不使用旧的 Agent Token。支付二维码生成后只回写
+订单号和付款金额；手机号与推荐资料仍通过**同一个专属邮箱**自动关联。
 
-## 固定流程
+## 两条申请路线
 
-- 套餐：50GB，£11.9/30天
-- 实体 SIM
-- 免费随机号码
-- 1个月、1张
+### 预存 £1 领卡
+
+- 入口：`https://www.ctexcel.com/freecard/home`
+- 选择“还没选好套餐，先预存£1领卡”
+- 实体 SIM、免费随机号码
+- 推荐人号码：`447942946765`
+- 付款金额强制校验：`£1.00`
+
+### 50GB 套餐（保留）
+
+- 50GB，£11.9/30天
+- 实体 SIM、免费随机号码、1个月、1张
 - 自动续订关闭
-- 寄送国家：中国
-- 地址：使用 CTExcel「智能填写」
 - 推荐码：`NTKWJX`
 - 优惠码：`DEAL50OFF`
 - 优惠后价格强制校验：`£5.95`
+
+### 共同步骤
+
+- 寄送国家：中国
+- 地址：使用 CTExcel「智能填写」
 - 支付方式：微信
 - 人工扫码支付
 - 每次关键点击前后等待网站 `Loading` 遮罩完全消失并稳定
@@ -125,7 +136,8 @@ Cliproxy 白名单接口会自动锁定为 SOCKS5，旧版本保存的 HTTP 选�
 2. `GET /api/ctexcel-client/customers/pending` 查询无手机号客户
 3. `POST /api/ctexcel-client/customers` 复用待完成客户或创建新客户
 4. `GET /api/ctexcel-client/customers/{id}/verification-code` 查询注册验证码
-5. `POST /api/ctexcel-client/customers/{id}/order-info` 同步订单号和手机号
+5. `POST /api/ctexcel-client/customers/{id}/payment-checkpoint` 回写订单号和付款金额
+6. `POST /api/ctexcel-client/customers/{id}/order-info` 同步订单号和手机号
 
 请求使用 HTTPS `Authorization: Bearer` 传递现有 `APP_PASSWORD`。这组接口只
 开放连接检查、CTExcel 建档和对应邮箱接码；普通客户管理 API 仍受隐藏入口
@@ -137,7 +149,8 @@ Cliproxy 白名单接口会自动锁定为 SOCKS5，旧版本保存的 HTTP 选�
 GET /api/customers/{id}/ctexcel-order-info
 ```
 
-该接口的实际调用由后台定时同步任务完成，客户端不提交订单号或手机号。
+该接口的实际调用由后台定时同步任务完成。客户端仅提交支付页已经显示的
+订单号和付款金额，不提交手机号。
 
 ## 中断恢复
 

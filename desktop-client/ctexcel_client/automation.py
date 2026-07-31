@@ -19,7 +19,13 @@ from playwright.sync_api import (
 )
 
 from .api import AdminApi, ApiError
-from .config import AppConfig, app_config_dir
+from .config import (
+    AppConfig,
+    FREECARD_APPLICATION_URL,
+    PURCHASE_ROUTE_50GB,
+    PURCHASE_ROUTE_FREECARD,
+    app_config_dir,
+)
 from .proxy import (
     ProxyError,
     masked_proxy_label,
@@ -31,7 +37,10 @@ LogCallback = Callable[[str], None]
 StageCallback = Callable[[str], None]
 CustomerCallback = Callable[[dict[str, Any]], None]
 
-ORDER_PATTERN = re.compile(r"\bORDER\d{12,}\b", re.I)
+ORDER_PATTERN = re.compile(
+    r"\b(?:ORDER\d{12,}|ORDERSUK\d{12,})\b",
+    re.I,
+)
 PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?44|0)7\d{9}(?!\d)")
 LOADING_OVERLAY_SCRIPT = """() => {
   const visible = element => {
@@ -90,6 +99,25 @@ def price_is_expected(page_text: str, expected: str) -> bool:
     return any(normalize_money(candidate) == target for candidate in candidates)
 
 
+def payment_page_has_expected_amount(page_text: str, expected: str) -> bool:
+    """兼容旧支付页的英镑字段和新 £1 页面中的 ``(1GBP)``。"""
+    if price_is_expected(page_text, expected):
+        return True
+    target = normalize_money(expected)
+    if target is None:
+        return False
+    candidates = re.findall(
+        r"(?:£\s*([0-9]+(?:\.[0-9]{1,2})?)|"
+        r"([0-9]+(?:\.[0-9]{1,2})?)\s*GBP)",
+        page_text or "",
+        re.I,
+    )
+    return any(
+        normalize_money(left or right) == target
+        for left, right in candidates
+    )
+
+
 def coupon_rejection_message(page_text: str) -> str:
     """提取结算页对优惠码的明确拒绝提示。"""
     text = re.sub(r"\s+", "", page_text or "")
@@ -117,7 +145,8 @@ def parse_success_text(page_text: str) -> dict[str, str]:
         text,
     )
     amount_match = re.search(
-        r"交易金额\s*[:：]\s*£\s*([0-9]+(?:\.[0-9]{1,2})?)",
+        r"(?:交易金额|付款金额|支付金额|订单金额)"
+        r"\s*[:：]\s*£\s*([0-9]+(?:\.[0-9]{1,2})?)",
         text,
     )
     return {
@@ -182,8 +211,8 @@ def assess_verification_freshness(
 class CTExcelAutomation:
     """CTExcel 购买流程。
 
-    客户和邮箱由管理端先创建；订单号、号码等资料由管理端后台扫描订单邮件，
-    客户端不直接写订单字段。
+    客户和邮箱由管理端先创建；支付页生成后回写订单号和付款金额，
+    手机号码与推荐资料继续由管理端后台扫描订单邮件。
     """
 
     def __init__(
@@ -209,7 +238,6 @@ class CTExcelAutomation:
             raise AutomationError("用户已停止当前流程")
 
     def run(self) -> AutomationResult:
-        registration = self.config.registration
         self._validate_registration_defaults()
         self.stage("准备浏览器代理")
         try:
@@ -308,7 +336,18 @@ class CTExcelAutomation:
             raise AutomationError("请先填写：" + "、".join(missing))
         if not re.fullmatch(r"1\d{10}", defaults.contact_phone.strip()):
             raise AutomationError("固定联系电话应为 11 位中国手机号码")
-        if normalize_money(defaults.expected_price_gbp) is None:
+        if self.config.purchase_route == PURCHASE_ROUTE_FREECARD:
+            if not re.fullmatch(
+                r"(?:\+?44)?7\d{9,10}",
+                defaults.freecard_referrer.strip(),
+            ):
+                raise AutomationError("£1 路线推荐人号码格式错误")
+        elif self.config.purchase_route != PURCHASE_ROUTE_50GB:
+            raise AutomationError("请选择有效的 CTExcel 申请路线")
+        if (
+            self.config.purchase_route == PURCHASE_ROUTE_50GB
+            and normalize_money(defaults.expected_price_gbp) is None
+        ):
             raise AutomationError("预期优惠价格格式错误")
 
     def _run_browser(
@@ -342,11 +381,18 @@ class CTExcelAutomation:
                 page.set_default_navigation_timeout(
                     max(5000, int(self.config.page_timeout_ms))
                 )
-                self._select_plan(page)
-                self._configure_sim(page)
+                if self.config.purchase_route == PURCHASE_ROUTE_FREECARD:
+                    self._start_freecard_application(page)
+                else:
+                    self._select_plan(page)
+                    self._configure_sim(page)
                 self._fill_customer_info(page, api, customer_id, email)
                 self._confirm_order(page)
-                pending = self._open_wechat_payment(page)
+                pending = self._open_wechat_payment(
+                    page,
+                    api=api,
+                    customer_id=customer_id,
+                )
                 result = self._wait_for_payment_success(
                     page,
                     customer_id=customer_id,
@@ -446,8 +492,63 @@ class CTExcelAutomation:
         )
         return last_result
 
+    def _start_freecard_application(self, page: Page) -> None:
+        self.stage("选择申请路线")
+        page.goto(
+            FREECARD_APPLICATION_URL,
+            wait_until="domcontentloaded",
+            timeout=self.config.page_timeout_ms,
+        )
+        self._dismiss_cookie_consent(page)
+        self._wait_for_page_ready(page, "£1 领卡活动页")
+        page.wait_for_function(
+            """() => {
+              const text = document.body?.innerText || '';
+              return text.includes('还没选好套餐')
+                && text.includes('先预存£1领卡');
+            }""",
+            timeout=self.config.page_timeout_ms,
+        )
+        self._click_visible_text(
+            page,
+            "还没选好套餐，先预存£1领卡 >",
+        )
+
+        self.stage("配置 SIM / 套餐")
+        page.wait_for_function(
+            """() => {
+              const text = document.body?.innerText || '';
+              return text.includes('SIM卡类型')
+                && text.includes('订单金额')
+                && text.includes('£1');
+            }""",
+            timeout=self.config.page_timeout_ms,
+        )
+        self._ensure_selected_option(
+            page,
+            "实体SIM卡",
+            exact=False,
+            label="实体 SIM 卡",
+        )
+        self._ensure_selected_option(
+            page,
+            "免费随机号码",
+            exact=True,
+            label="免费随机号码",
+        )
+        page_text = page.locator("body").inner_text()
+        if not price_is_expected(page_text, "1.00"):
+            raise AutomationError("£1 预存领卡页面的订单金额校验失败")
+        self.log("已选择预存 £1 领卡、实体 SIM、免费随机号码")
+        self._click_button(page, "下一步")
+        page.wait_for_url(
+            "**/freecard/activityPagefillInfos",
+            timeout=self.config.page_timeout_ms,
+        )
+        self._wait_for_page_ready(page, "£1 领卡资料页")
+
     def _select_plan(self, page: Page) -> None:
-        self.stage("选择 50GB 套餐")
+        self.stage("选择申请路线")
         page.goto(
             self.config.application_url,
             wait_until="domcontentloaded",
@@ -493,7 +594,7 @@ class CTExcelAutomation:
         self.log("已选择 50GB、£11.9/30天套餐")
 
     def _configure_sim(self, page: Page) -> None:
-        self.stage("配置实体卡")
+        self.stage("配置 SIM / 套餐")
         self._dismiss_cookie_consent(page)
         self._wait_for_page_ready(page, "SIM 卡配置页")
         page.wait_for_function(
@@ -637,8 +738,16 @@ class CTExcelAutomation:
         self._fill_placeholder_input(
             page,
             "请填写推荐人电话/推荐号码（选填）",
-            defaults.referral_code.strip(),
-            "推荐码",
+            (
+                defaults.freecard_referrer.strip()
+                if self.config.purchase_route == PURCHASE_ROUTE_FREECARD
+                else defaults.referral_code.strip()
+            ),
+            (
+                "推荐人号码"
+                if self.config.purchase_route == PURCHASE_ROUTE_FREECARD
+                else "推荐码"
+            ),
         )
 
         baseline: dict[str, Any] = {}
@@ -680,11 +789,36 @@ class CTExcelAutomation:
         self._smart_fill_address(page, defaults.chinese_address.strip())
         self._ensure_marketing_off(page)
         self._click_button(page, "同意提交")
+        if self.config.purchase_route == PURCHASE_ROUTE_FREECARD:
+            self._confirm_freecard_address(page)
+        else:
+            page.wait_for_url(
+                "**/buycard/buycardlist",
+                timeout=self.config.page_timeout_ms,
+            )
+            self._wait_for_page_ready(page, "订单确认页")
+
+    def _confirm_freecard_address(self, page: Page) -> None:
+        dialog = self._visible_locator(
+            page.get_by_role("dialog"),
+            "确认地址弹窗",
+        )
+        heading = dialog.get_by_role(
+            "heading",
+            name="确认地址",
+            exact=True,
+        )
+        heading.wait_for(state="visible")
+        confirm = self._visible_locator(
+            dialog.get_by_text("确认支付", exact=True),
+            "确认地址弹窗中的确认支付",
+        )
+        confirm.click()
         page.wait_for_url(
-            "**/buycard/buycardlist",
+            "**/freecard/activityPageconfirm",
             timeout=self.config.page_timeout_ms,
         )
-        self._wait_for_page_ready(page, "订单确认页")
+        self._wait_for_page_ready(page, "£1 订单确认页")
 
     def _fill_placeholder_input(
         self,
@@ -885,50 +1019,56 @@ class CTExcelAutomation:
                 self._wait_for_page_ready(page, "关闭营销订阅")
 
     def _confirm_order(self, page: Page) -> None:
-        self.stage("应用半价优惠")
+        self.stage("确认订单")
         self._wait_for_page_ready(page, "订单确认页")
         defaults = self.config.registration
-        coupon_code = defaults.coupon_code.strip()
-        if not coupon_code:
-            raise AutomationError("客户端设置中的优惠码为空")
-        coupon = self._fill_placeholder_input(
-            page,
-            "请输入",
-            coupon_code,
-            "优惠码",
-        )
-        if coupon.input_value().strip() != coupon_code:
-            raise AutomationError("优惠码没有完整写入结算页输入框")
-        self.log(f"优惠码已填入并核对：{coupon_code}")
-        self._wait_interruptibly(2)
-        self._click_button(page, "使用优惠码")
-        expected = defaults.expected_price_gbp.strip()
-        deadline = time.monotonic() + max(
-            5,
-            int(self.config.step_timeout_ms) / 1000,
-        )
-        body_text = ""
-        while time.monotonic() < deadline:
-            self._check_stop()
-            body_text = page.locator("body").inner_text()
-            if price_is_expected(body_text, expected):
-                break
-            rejection = coupon_rejection_message(body_text)
-            if rejection:
+        if self.config.purchase_route == PURCHASE_ROUTE_50GB:
+            coupon_code = defaults.coupon_code.strip()
+            if not coupon_code:
+                raise AutomationError("客户端设置中的优惠码为空")
+            coupon = self._fill_placeholder_input(
+                page,
+                "请输入",
+                coupon_code,
+                "优惠码",
+            )
+            if coupon.input_value().strip() != coupon_code:
+                raise AutomationError("优惠码没有完整写入结算页输入框")
+            self.log(f"优惠码已填入并核对：{coupon_code}")
+            self._wait_interruptibly(2)
+            self._click_button(page, "使用优惠码")
+            expected = defaults.expected_price_gbp.strip()
+            deadline = time.monotonic() + max(
+                5,
+                int(self.config.step_timeout_ms) / 1000,
+            )
+            body_text = ""
+            while time.monotonic() < deadline:
+                self._check_stop()
+                body_text = page.locator("body").inner_text()
+                if price_is_expected(body_text, expected):
+                    break
+                rejection = coupon_rejection_message(body_text)
+                if rejection:
+                    raise AutomationError(
+                        f"网站拒绝优惠码 {coupon_code}：{rejection}；"
+                        "请在客户端设置中更换当前有效的优惠码"
+                    )
+                self._wait_interruptibly(0.25)
+            else:
                 raise AutomationError(
-                    f"网站拒绝优惠码 {coupon_code}：{rejection}；"
-                    "请在客户端设置中更换当前有效的优惠码"
+                    f"优惠码 {coupon_code} 已提交，但订单金额没有变为 £{expected}"
                 )
-            self._wait_interruptibly(0.25)
+            if not price_is_expected(body_text, expected):
+                raise AutomationError(
+                    f"订单价格校验失败，预期 £{expected}"
+                )
+            self.log(f"优惠码已生效，最终价格 £{expected}")
         else:
-            raise AutomationError(
-                f"优惠码 {coupon_code} 已提交，但订单金额没有变为 £{expected}"
-            )
-        if not price_is_expected(body_text, expected):
-            raise AutomationError(
-                f"订单价格校验失败，预期 £{expected}"
-            )
-        self.log(f"优惠码已生效，最终价格 £{expected}")
+            body_text = page.locator("body").inner_text()
+            if not price_is_expected(body_text, "1.00"):
+                raise AutomationError("£1 预存领卡订单金额校验失败")
+            self.log("£1 预存领卡订单金额已核对")
 
         other_payment = page.get_by_role(
             "radio",
@@ -954,14 +1094,16 @@ class CTExcelAutomation:
             raise AutomationError("微信支付方式没有进入选中状态")
         self.log("支付方式已切换为微信")
 
-    def _open_wechat_payment(self, page: Page) -> dict[str, str]:
+    def _open_wechat_payment(
+        self,
+        page: Page,
+        *,
+        api: AdminApi,
+        customer_id: int,
+    ) -> dict[str, str]:
         self.stage("确认支付条款")
         self._click_button(page, "确认支付")
         dialogs = page.get_by_role("dialog")
-        dialogs.first.wait_for(
-            state="visible",
-            timeout=self.config.step_timeout_ms,
-        )
         dialog = self._visible_locator(dialogs, "支付条款弹窗")
         checkbox = dialog.get_by_role("checkbox")
         if checkbox.count() != 1:
@@ -978,10 +1120,12 @@ class CTExcelAutomation:
             raise AutomationError("支付条款没有成功勾选")
         dialog.get_by_role("button", name="下一步", exact=True).click()
         self._wait_for_page_ready(page, "生成微信支付订单")
-        page.wait_for_url(
-            "**/buycard/buycardWX",
-            timeout=self.config.page_timeout_ms,
+        payment_path = (
+            "**/freecard/buycardWX"
+            if self.config.purchase_route == PURCHASE_ROUTE_FREECARD
+            else "**/buycard/buycardWX"
         )
+        page.wait_for_url(payment_path, timeout=self.config.page_timeout_ms)
         page.wait_for_function(
             "() => document.body && document.body.innerText.includes('订单号码')",
             timeout=self.config.page_timeout_ms,
@@ -989,16 +1133,34 @@ class CTExcelAutomation:
         self._wait_for_page_ready(page, "微信支付页")
         page_text = page.locator("body").inner_text()
         order = ORDER_PATTERN.search(page_text)
-        expected = self.config.registration.expected_price_gbp.strip()
-        if not price_is_expected(page_text, expected):
-            raise AutomationError("微信支付页的英镑金额与优惠后价格不一致")
+        expected = (
+            "1.00"
+            if self.config.purchase_route == PURCHASE_ROUTE_FREECARD
+            else self.config.registration.expected_price_gbp.strip()
+        )
+        if not payment_page_has_expected_amount(page_text, expected):
+            raise AutomationError("微信支付页的英镑金额与所选申请路线不一致")
         order_number = order.group(0).upper() if order else ""
+        if not order_number:
+            raise AutomationError("微信支付页没有识别到 CTExcel 订单号")
+        api.save_payment_checkpoint(
+            customer_id,
+            order_number=order_number,
+            transaction_amount=expected,
+        )
+        self.log(
+            "订单号和付款金额已回写客户管理"
+            f"：{order_number} / £{expected}"
+        )
         self.stage("等待人工微信支付")
         self.log(
             f"微信二维码已显示，金额 £{expected}"
             + (f"，订单号 {order_number}" if order_number else "")
         )
-        return {"order_number": order_number}
+        return {
+            "order_number": order_number,
+            "transaction_amount": expected,
+        }
 
     def _wait_for_payment_success(
         self,
@@ -1014,10 +1176,14 @@ class CTExcelAutomation:
         )
         while time.monotonic() < deadline:
             self._check_stop()
-            if "/buycard/buycardsucceed" in page.url:
+            if page.url.rstrip("/").endswith("/buycardsucceed"):
                 self._wait_for_page_ready(page, "支付成功页")
                 page.wait_for_function(
-                    "() => document.body && document.body.innerText.includes('订购成功')",
+                    """() => {
+                      const text = document.body?.innerText || '';
+                      return text.includes('订购成功')
+                        || text.includes('支付成功');
+                    }""",
                     timeout=self.config.page_timeout_ms,
                 )
                 parsed = parse_success_text(page.locator("body").inner_text())
@@ -1030,7 +1196,10 @@ class CTExcelAutomation:
                     email=email,
                     order_number=order_number,
                     phone_number=parsed["phone_number"],
-                    transaction_amount=parsed["transaction_amount"],
+                    transaction_amount=(
+                        parsed["transaction_amount"]
+                        or pending_order.get("transaction_amount", "")
+                    ),
                 )
             page.wait_for_timeout(1000)
         raise AutomationError("等待人工支付完成超时，可在客户端重新载入该客户继续")

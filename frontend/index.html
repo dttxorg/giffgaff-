@@ -1183,6 +1183,7 @@
     #tab-customers .customer-ledger-table .th-sim { width: 96px; }
     #tab-customers .customer-ledger-table .th-payment { width: 88px; }
     #tab-customers .customer-ledger-table .th-order { width: 205px; }
+    #tab-customers .customer-ledger-table .th-amount { width: 82px; }
     #tab-customers .customer-ledger-table .th-sync { width: 88px; }
     #tab-customers .customer-ledger-table .th-courier { width: 78px; }
     #tab-customers .customer-ledger-table .th-tracking { width: 120px; }
@@ -2006,6 +2007,7 @@
               <th class="th-sim" data-mode-only="giffgaff">SIM 激活码</th>
               <th class="th-payment" data-mode-only="giffgaff">解绑查询</th>
               <th class="th-order" data-mode-only="ctexcel">CTExcel 订单号</th>
+              <th class="th-amount" data-mode-only="ctexcel">付款金额</th>
               <th class="th-sync" data-mode-only="ctexcel">邮件同步</th>
               <th class="th-courier">快递公司</th>
               <th class="th-tracking">快递单号</th>
@@ -2094,7 +2096,7 @@
               <button type="button" class="small blue" onclick="copyElText('d-ctexcel-order-number', '已复制订单号')">复制</button>
             </div>
             <div class="registration-quick-item">
-              <span>交易金额</span>
+              <span>付款金额</span>
               <code id="d-ctexcel-amount">—</code>
             </div>
             <div class="registration-quick-item">
@@ -3120,7 +3122,7 @@ function renderCustomers() {
   if (!visibleCustomers.length) {
     const row = document.createElement('tr');
     const cell = document.createElement('td');
-    cell.colSpan = appMode === 'ctexcel' ? 10 : 11;
+    cell.colSpan = 11;
     cell.className = 'empty-state';
     cell.textContent = currentSearch || filtersActive
       ? `没有符合当前搜索或筛选条件的客户`
@@ -3457,6 +3459,14 @@ function buildCustomerRow(c, index) {
     if (c.ctexcel_order_number) highlightInto(orderCell, c.ctexcel_order_number, currentSearch);
     else orderCell.textContent = '—';
     orderCell.title = c.ctexcel_order_number || '等待从订单邮件同步';
+
+    const amountCell = addCell('付款金额', 'mono ledger-amount');
+    amountCell.textContent = c.ctexcel_transaction_amount
+      ? `£${c.ctexcel_transaction_amount}`
+      : '—';
+    amountCell.title = c.ctexcel_transaction_amount
+      ? `客户端或订单邮件记录的付款金额：£${c.ctexcel_transaction_amount}`
+      : '等待客户端或订单邮件回写付款金额';
 
     const syncCell = addCell('邮件同步', 'ledger-status');
     const syncBadge = document.createElement('span');

@@ -228,6 +228,23 @@ def test_ctexcel_order_email_syncs_for_both_provider_routes(ctexcel_client, prov
     assert row[5]
 
 
+def test_ctexcel_freecard_order_email_parses_new_order_and_payment_amount():
+    parsed = main._extract_ctexcel_order_info(
+        {
+            "subject": "CTExcel 预存领卡成功",
+            "text": (
+                "订单号：ORDERSUK2026073104095817734376\n"
+                "付款金额：£1.00\n"
+                "手机号码：07942946765"
+            ),
+        }
+    )
+
+    assert parsed["order_number"] == "ORDERSUK2026073104095817734376"
+    assert parsed["transaction_amount"] == "1.00"
+    assert parsed["phone_number"] == "07942946765"
+
+
 def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     client, db_path = ctexcel_client
     customer_id = _insert_ctexcel_customer(db_path)

@@ -9,9 +9,13 @@ from ctexcel_client.automation import (
     normalize_money,
     parse_message_timestamp,
     parse_success_text,
+    payment_page_has_expected_amount,
     price_is_expected,
 )
-from ctexcel_client.config import AppConfig
+from ctexcel_client.config import (
+    AppConfig,
+    PURCHASE_ROUTE_FREECARD,
+)
 
 
 def test_money_and_discount_price_parsing():
@@ -19,6 +23,10 @@ def test_money_and_discount_price_parsing():
     assert normalize_money("not-a-price") is None
     assert price_is_expected("订单金额：£5.95", "5.95") is True
     assert price_is_expected("订单金额：£11.90", "5.95") is False
+    assert payment_page_has_expected_amount(
+        "请使用微信扫描二维码 ¥9.11(1GBP)",
+        "1.00",
+    )
 
 
 def test_success_page_fields_are_read_for_operator_summary_only():
@@ -36,6 +44,16 @@ def test_success_page_fields_are_read_for_operator_summary_only():
         "phone_number": "07900000009",
         "transaction_amount": "5.95",
     }
+    freecard = parse_success_text(
+        """
+        支付成功
+        订单号：ORDERSUK2026073104095817734376
+        手机号码：07900000009
+        付款金额：£ 1.00
+        """
+    )
+    assert freecard["order_number"] == "ORDERSUK2026073104095817734376"
+    assert freecard["transaction_amount"] == "1.00"
 
 
 def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
@@ -64,6 +82,20 @@ def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     )
     assert "错误现场已保留" in source
     assert "error_browser_hold_seconds" in source
+    assert "def _start_freecard_application" in source
+    assert "FREECARD_APPLICATION_URL" in source
+    assert "先预存£1领卡" in source
+    assert "activityPagefillInfos" in source
+    assert "activityPageconfirm" in source
+    assert "freecard/buycardWX" in source
+    assert "save_payment_checkpoint" in source
+
+
+def test_freecard_route_is_the_new_default():
+    config = AppConfig()
+
+    assert config.purchase_route == PURCHASE_ROUTE_FREECARD
+    assert config.registration.freecard_referrer == "447942946765"
 
 
 def test_loading_overlay_waits_until_the_page_is_stably_ready():

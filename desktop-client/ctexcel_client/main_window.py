@@ -31,6 +31,8 @@ from .automation import AutomationResult, CTExcelAutomation
 from .config import (
     AppConfig,
     ProxyConfig,
+    PURCHASE_ROUTE_50GB,
+    PURCHASE_ROUTE_FREECARD,
     RegistrationDefaults,
     is_cliproxy_whitelist_url,
     load_config,
@@ -96,10 +98,10 @@ class MainWindow(QMainWindow):
         "连接客户管理",
         "准备 CTExcel 客户",
         "启动浏览器",
-        "选择 50GB 套餐",
-        "配置实体卡",
+        "选择申请路线",
+        "配置 SIM / 套餐",
         "填写客户资料",
-        "应用半价优惠",
+        "确认订单",
         "确认支付条款",
         "等待人工微信支付",
         "支付成功",
@@ -393,7 +395,7 @@ class MainWindow(QMainWindow):
     def _registration_card(self) -> QFrame:
         card, layout = self._card(
             "固定申请资料",
-            "这些信息只保存在本机；每位客户的注册邮箱由服务器单独生成。",
+            "先选择本次申请路线；固定资料只保存在本机，注册邮箱由服务器单独生成。",
         )
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
@@ -404,27 +406,41 @@ class MainWindow(QMainWindow):
         self.contact_phone = QLineEdit()
         self.chinese_address = QLineEdit()
         self.referral_code = QLineEdit()
+        self.freecard_referrer = QLineEdit()
         self.coupon_code = QLineEdit()
         self.expected_price = QLineEdit()
+        self.purchase_route = QComboBox()
+        self.purchase_route.addItem(
+            "预存 £1 领卡",
+            PURCHASE_ROUTE_FREECARD,
+        )
+        self.purchase_route.addItem(
+            "50GB · £11.9/30天（优惠后 £5.95）",
+            PURCHASE_ROUTE_50GB,
+        )
         self.browser_channel = QComboBox()
         self.browser_channel.addItems(["msedge", "chrome", "chromium"])
 
-        grid.addWidget(self._field_label("姓"), 0, 0)
-        grid.addWidget(self._field_label("名"), 0, 1)
-        grid.addWidget(self.last_name, 1, 0)
-        grid.addWidget(self.first_name, 1, 1)
-        grid.addWidget(self._field_label("固定联系电话"), 2, 0)
-        grid.addWidget(self._field_label("浏览器"), 2, 1)
-        grid.addWidget(self.contact_phone, 3, 0)
-        grid.addWidget(self.browser_channel, 3, 1)
-        grid.addWidget(self._field_label("固定中国收货地址"), 4, 0, 1, 2)
-        grid.addWidget(self.chinese_address, 5, 0, 1, 2)
-        grid.addWidget(self._field_label("推荐码"), 6, 0)
-        grid.addWidget(self._field_label("优惠码"), 6, 1)
-        grid.addWidget(self.referral_code, 7, 0)
-        grid.addWidget(self.coupon_code, 7, 1)
-        grid.addWidget(self._field_label("优惠后金额（GBP）"), 8, 0)
-        grid.addWidget(self.expected_price, 9, 0)
+        grid.addWidget(self._field_label("本次申请路线"), 0, 0, 1, 2)
+        grid.addWidget(self.purchase_route, 1, 0, 1, 2)
+        grid.addWidget(self._field_label("姓"), 2, 0)
+        grid.addWidget(self._field_label("名"), 2, 1)
+        grid.addWidget(self.last_name, 3, 0)
+        grid.addWidget(self.first_name, 3, 1)
+        grid.addWidget(self._field_label("固定联系电话"), 4, 0)
+        grid.addWidget(self._field_label("浏览器"), 4, 1)
+        grid.addWidget(self.contact_phone, 5, 0)
+        grid.addWidget(self.browser_channel, 5, 1)
+        grid.addWidget(self._field_label("固定中国收货地址"), 6, 0, 1, 2)
+        grid.addWidget(self.chinese_address, 7, 0, 1, 2)
+        grid.addWidget(self._field_label("£1 路线推荐人号码"), 8, 0)
+        grid.addWidget(self._field_label("50GB 路线推荐码"), 8, 1)
+        grid.addWidget(self.freecard_referrer, 9, 0)
+        grid.addWidget(self.referral_code, 9, 1)
+        grid.addWidget(self._field_label("50GB 路线优惠码"), 10, 0)
+        grid.addWidget(self._field_label("50GB 优惠后金额（GBP）"), 10, 1)
+        grid.addWidget(self.coupon_code, 11, 0)
+        grid.addWidget(self.expected_price, 11, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
@@ -522,8 +538,11 @@ class MainWindow(QMainWindow):
         self.contact_phone.setText(config.registration.contact_phone)
         self.chinese_address.setText(config.registration.chinese_address)
         self.referral_code.setText(config.registration.referral_code)
+        self.freecard_referrer.setText(config.registration.freecard_referrer)
         self.coupon_code.setText(config.registration.coupon_code)
         self.expected_price.setText(config.registration.expected_price_gbp)
+        route_index = self.purchase_route.findData(config.purchase_route)
+        self.purchase_route.setCurrentIndex(max(0, route_index))
         index = self.browser_channel.findText(config.browser_channel)
         self.browser_channel.setCurrentIndex(max(0, index))
         mode_index = self.proxy_mode.findData(config.proxy.mode)
@@ -547,6 +566,10 @@ class MainWindow(QMainWindow):
             contact_phone=self.contact_phone.text().strip(),
             chinese_address=self.chinese_address.text().strip(),
             referral_code=self.referral_code.text().strip() or "NTKWJX",
+            freecard_referrer=(
+                self.freecard_referrer.text().strip()
+                or "447942946765"
+            ),
             coupon_code=self.coupon_code.text().strip() or "DEAL50OFF",
             expected_price_gbp=self.expected_price.text().strip() or "5.95",
         )
@@ -565,6 +588,10 @@ class MainWindow(QMainWindow):
             server_url=self.server_url.text().strip(),
             app_password=self.app_password.text(),
             remember_credentials=self.remember_credentials.isChecked(),
+            purchase_route=str(
+                self.purchase_route.currentData()
+                or PURCHASE_ROUTE_FREECARD
+            ),
             browser_channel=self.browser_channel.currentText(),
             proxy=proxy,
             registration=registration,

@@ -152,6 +152,11 @@ class CTExcelClientCustomerCreate(BaseModel):
     reuse_pending: bool = True
 
 
+class CTExcelPaymentCheckpointRequest(BaseModel):
+    order_number: Optional[str] = Field(default=None, max_length=80)
+    transaction_amount: str = Field(min_length=1, max_length=20)
+
+
 class MoEmailCreateRequest(BaseModel):
     domain: Optional[str] = None
 
