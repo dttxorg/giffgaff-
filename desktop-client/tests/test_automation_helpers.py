@@ -16,6 +16,8 @@ from ctexcel_client.automation import (
     CTExcelBatchAutomation,
     CTExcelAutomation,
     application_target,
+    address_region_token,
+    append_address_suffix,
     registration_values_for_ordinal,
     assess_verification_freshness,
     cleanup_stale_browser_profiles,
@@ -370,10 +372,7 @@ def test_registration_ranges_increment_phone_and_append_address_suffix():
     defaults = RegistrationDefaults(
         contact_phone="13800000000",
         contact_phone_end="13800000999",
-        chinese_address=(
-            "江西省南昌市青山湖区艾溪湖管理处"
-            "南京东路丰源天域2期14栋菜鸟驿站1111"
-        ),
+        chinese_address="测试省测试市测试区测试路测试驿站1111",
         address_suffix_start=1,
         address_suffix_end=1000,
     )
@@ -390,6 +389,24 @@ def test_registration_ranges_increment_phone_and_append_address_suffix():
         "13800000999",
         defaults.chinese_address + "1000",
     )
+
+
+def test_address_suffix_is_appended_after_smart_recognition():
+    assert append_address_suffix("测试路88号收货点", 200) == (
+        "测试路88号收货点200"
+    )
+
+
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("江西省南昌市测试区测试路1号", "江西省"),
+        ("北京市朝阳区测试路1号", "北京市"),
+        ("内蒙古自治区呼和浩特市测试路1号", "内蒙古自治区"),
+    ],
+)
+def test_address_region_token_tracks_configured_province(address, expected):
+    assert address_region_token(address) == expected
 
 
 def test_registration_ranges_fail_before_reusing_an_exhausted_value():

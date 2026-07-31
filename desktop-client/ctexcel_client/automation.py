@@ -276,6 +276,28 @@ def registration_values_for_ordinal(
     return phone, f"{defaults.chinese_address.strip()}{suffix}"
 
 
+def normalize_address_text(value: str) -> str:
+    """Normalize visual separators while preserving the configured address."""
+    return re.sub(r"[\s,，。;；/／|]+", "", str(value or ""))
+
+
+def address_region_token(value: str) -> str:
+    normalized = normalize_address_text(value)
+    match = re.match(
+        r"^(.{2,8}?(?:特别行政区|自治区|省|市))",
+        normalized,
+    )
+    return match.group(1) if match else ""
+
+
+def append_address_suffix(detail: str, suffix: int | str) -> str:
+    base = str(detail or "").strip()
+    tail = str(suffix or "").strip()
+    if not base or not tail:
+        raise AutomationError("详细地址或地址尾号为空")
+    return f"{base}{tail}"
+
+
 def is_payment_success_url(value: str) -> bool:
     try:
         path = urlsplit(str(value or "")).path.rstrip("/").lower()
@@ -1231,10 +1253,15 @@ class CTExcelAutomation:
         )
         self.log("验证码已自动填入")
 
-        self._smart_fill_address(page, chinese_address)
+        address_suffix = defaults.address_suffix_start + self.batch_ordinal - 1
+        self._smart_fill_address(
+            page,
+            defaults.chinese_address.strip(),
+            address_suffix,
+        )
         self.log(
-            f"本单使用联系电话 {contact_phone}，地址尾号 "
-            f"{defaults.address_suffix_start + self.batch_ordinal - 1}"
+            f"本单使用联系电话 {contact_phone}；实际提交地址："
+            f"{chinese_address}"
         )
         self._ensure_marketing_off(page)
         self._click_button(page, "同意提交")
@@ -1433,25 +1460,67 @@ class CTExcelAutomation:
             raise AutomationError("寄送国家没有成功切换为中国")
         self.log("寄送国家已选择中国")
 
-    def _smart_fill_address(self, page: Page, address: str) -> None:
+    def _smart_fill_address(
+        self,
+        page: Page,
+        base_address: str,
+        suffix: int,
+    ) -> None:
+        expected_base = str(base_address or "").strip()
+        if not expected_base:
+            raise AutomationError("本单收货地址为空")
+        expected_region = address_region_token(expected_base)
+        region = page.get_by_role("textbox", name="*省市区", exact=True)
+        detail = page.get_by_role("textbox", name="*详细地址", exact=True)
+        with contextlib.suppress(Exception):
+            detail.fill("")
         self._click_visible_text(page, "智能填写")
         dialog = page.get_by_role("dialog", name="智能填写")
         dialog.wait_for(state="visible")
         textboxes = dialog.get_by_role("textbox")
         if textboxes.count() != 1:
             raise AutomationError("智能填写弹窗的地址输入框数量异常")
-        textboxes.fill(address)
+        textboxes.fill("")
+        textboxes.fill(expected_base)
+        dialog_value = textboxes.input_value().strip()
+        if dialog_value != expected_base:
+            raise AutomationError(
+                "智能填写弹窗没有写入本单设置地址："
+                f"期望 {expected_base}，实际 {dialog_value or '空'}"
+            )
+        self.log(f"智能识别基础地址：{expected_base}")
         dialog.get_by_role("button", name="开始识别", exact=True).click()
         self._wait_for_page_ready(page, "智能识别地址")
         dialog.wait_for(state="hidden", timeout=self.config.step_timeout_ms)
 
-        region = page.get_by_role("textbox", name="*省市区", exact=True)
-        detail = page.get_by_role("textbox", name="*详细地址", exact=True)
         region_value = region.input_value().strip()
         detail_value = detail.input_value().strip()
         if not region_value or not detail_value:
             raise AutomationError("智能填写没有生成完整的省市区和详细地址")
-        self.log(f"地址识别完成：{region_value} / {detail_value}")
+        if expected_region and expected_region not in normalize_address_text(
+            region_value
+        ):
+            raise AutomationError(
+                "智能填写仍保留了旧省市区："
+                f"期望 {expected_region}，实际 {region_value}"
+            )
+        final_detail = append_address_suffix(detail_value, suffix)
+        try:
+            detail.fill("")
+            detail.fill(final_detail)
+            detail.press("Tab")
+        except Exception as exc:
+            raise AutomationError("详细地址尾号追加失败") from exc
+        actual_detail = detail.input_value().strip()
+        if actual_detail != final_detail:
+            raise AutomationError(
+                "详细地址尾号没有写入页面："
+                f"期望 {final_detail}，实际 {actual_detail or '空'}"
+            )
+        self.log(
+            f"地址识别完成并追加尾号 {suffix}："
+            f"{region_value} / {actual_detail}"
+        )
 
     def _ensure_marketing_off(self, page: Page) -> None:
         switches = page.locator('input[role="switch"]')
