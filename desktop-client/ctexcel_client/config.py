@@ -211,7 +211,10 @@ class RegistrationDefaults:
     last_name: str = ""
     first_name: str = ""
     contact_phone: str = ""
+    contact_phone_end: str = ""
     chinese_address: str = ""
+    address_suffix_start: int = 1
+    address_suffix_end: int = 1000
     referral_code: str = "NTKWJX"
     freecard_referrer: str = "447942946765"
     coupon_code: str = "DEAL50OFF"
@@ -309,6 +312,23 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
             if key in RegistrationDefaults.__dataclass_fields__
         }
     )
+    for key, default in (
+        ("address_suffix_start", 1),
+        ("address_suffix_end", 1000),
+    ):
+        try:
+            setattr(
+                registration,
+                key,
+                min(1_000_000, max(1, int(getattr(registration, key)))),
+            )
+        except (TypeError, ValueError):
+            setattr(registration, key, default)
+    if registration.address_suffix_start > registration.address_suffix_end:
+        registration.address_suffix_start, registration.address_suffix_end = (
+            registration.address_suffix_end,
+            registration.address_suffix_start,
+        )
     telegram_raw = (
         raw.get("telegram")
         if isinstance(raw.get("telegram"), dict)

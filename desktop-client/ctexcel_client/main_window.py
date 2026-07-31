@@ -517,7 +517,7 @@ class MainWindow(QMainWindow):
     def _registration_card(self) -> QFrame:
         card, layout = self._card(
             "固定申请资料",
-            "先选择本次申请路线；固定资料只保存在本机，注册邮箱由服务器单独生成。",
+            "联系电话按起止区间逐单递增；固定地址后自动追加本单尾号。",
         )
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
@@ -526,7 +526,19 @@ class MainWindow(QMainWindow):
         self.last_name = QLineEdit()
         self.first_name = QLineEdit()
         self.contact_phone = QLineEdit()
+        self.contact_phone.setPlaceholderText("例如 13800000000")
+        self.contact_phone.setMaxLength(11)
+        self.contact_phone_end = QLineEdit()
+        self.contact_phone_end.setPlaceholderText("留空则固定；例如 13800000999")
+        self.contact_phone_end.setMaxLength(11)
         self.chinese_address = QLineEdit()
+        self.chinese_address.setPlaceholderText(
+            "填写固定部分，程序会在末尾继续追加 1、2、3……"
+        )
+        self.address_suffix_start = QSpinBox()
+        self.address_suffix_start.setRange(1, 1_000_000)
+        self.address_suffix_end = QSpinBox()
+        self.address_suffix_end.setRange(1, 1_000_000)
         self.referral_code = QLineEdit()
         self.freecard_referrer = QLineEdit()
         self.coupon_code = QLineEdit()
@@ -549,20 +561,26 @@ class MainWindow(QMainWindow):
         grid.addWidget(self._field_label("名"), 2, 1)
         grid.addWidget(self.last_name, 3, 0)
         grid.addWidget(self.first_name, 3, 1)
-        grid.addWidget(self._field_label("固定联系电话"), 4, 0)
-        grid.addWidget(self._field_label("浏览器"), 4, 1)
+        grid.addWidget(self._field_label("联系电话起始号码"), 4, 0)
+        grid.addWidget(self._field_label("联系电话结束号码"), 4, 1)
         grid.addWidget(self.contact_phone, 5, 0)
-        grid.addWidget(self.browser_channel, 5, 1)
+        grid.addWidget(self.contact_phone_end, 5, 1)
         grid.addWidget(self._field_label("固定中国收货地址"), 6, 0, 1, 2)
         grid.addWidget(self.chinese_address, 7, 0, 1, 2)
-        grid.addWidget(self._field_label("£1 路线推荐人号码"), 8, 0)
-        grid.addWidget(self._field_label("50GB 路线推荐码"), 8, 1)
-        grid.addWidget(self.freecard_referrer, 9, 0)
-        grid.addWidget(self.referral_code, 9, 1)
-        grid.addWidget(self._field_label("50GB 路线优惠码"), 10, 0)
-        grid.addWidget(self._field_label("50GB 优惠后金额（GBP）"), 10, 1)
-        grid.addWidget(self.coupon_code, 11, 0)
-        grid.addWidget(self.expected_price, 11, 1)
+        grid.addWidget(self._field_label("地址尾号起始数字"), 8, 0)
+        grid.addWidget(self._field_label("地址尾号结束数字"), 8, 1)
+        grid.addWidget(self.address_suffix_start, 9, 0)
+        grid.addWidget(self.address_suffix_end, 9, 1)
+        grid.addWidget(self._field_label("浏览器"), 10, 0)
+        grid.addWidget(self._field_label("£1 路线推荐人号码"), 10, 1)
+        grid.addWidget(self.browser_channel, 11, 0)
+        grid.addWidget(self.freecard_referrer, 11, 1)
+        grid.addWidget(self._field_label("50GB 路线推荐码"), 12, 0)
+        grid.addWidget(self._field_label("50GB 路线优惠码"), 12, 1)
+        grid.addWidget(self.referral_code, 13, 0)
+        grid.addWidget(self.coupon_code, 13, 1)
+        grid.addWidget(self._field_label("50GB 优惠后金额（GBP）"), 14, 0, 1, 2)
+        grid.addWidget(self.expected_price, 15, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
@@ -706,7 +724,14 @@ class MainWindow(QMainWindow):
         self.last_name.setText(config.registration.last_name)
         self.first_name.setText(config.registration.first_name)
         self.contact_phone.setText(config.registration.contact_phone)
+        self.contact_phone_end.setText(config.registration.contact_phone_end)
         self.chinese_address.setText(config.registration.chinese_address)
+        self.address_suffix_start.setValue(
+            config.registration.address_suffix_start
+        )
+        self.address_suffix_end.setValue(
+            config.registration.address_suffix_end
+        )
         self.referral_code.setText(config.registration.referral_code)
         self.freecard_referrer.setText(config.registration.freecard_referrer)
         self.coupon_code.setText(config.registration.coupon_code)
@@ -746,7 +771,10 @@ class MainWindow(QMainWindow):
             last_name=self.last_name.text().strip(),
             first_name=self.first_name.text().strip(),
             contact_phone=self.contact_phone.text().strip(),
+            contact_phone_end=self.contact_phone_end.text().strip(),
             chinese_address=self.chinese_address.text().strip(),
+            address_suffix_start=self.address_suffix_start.value(),
+            address_suffix_end=self.address_suffix_end.value(),
             referral_code=self.referral_code.text().strip() or "NTKWJX",
             freecard_referrer=(
                 self.freecard_referrer.text().strip()
@@ -1252,6 +1280,11 @@ class MainWindow(QMainWindow):
             target,
             self.config.purchase_route,
             self.config.continuous_workers,
+            self.config.registration.contact_phone,
+            self.config.registration.contact_phone_end,
+            self.config.registration.chinese_address,
+            self.config.registration.address_suffix_start,
+            self.config.registration.address_suffix_end,
         )
         resume = (
             self.batch_resume_pending

@@ -15,6 +15,7 @@ from ctexcel_client.automation import (
     CTExcelBatchAutomation,
     CTExcelAutomation,
     application_target,
+    registration_values_for_ordinal,
     assess_verification_freshness,
     coupon_rejection_message,
     normalize_money,
@@ -303,6 +304,59 @@ def test_freecard_route_is_the_new_default():
 
     assert config.purchase_route == PURCHASE_ROUTE_FREECARD
     assert config.registration.freecard_referrer == "447942946765"
+
+
+def test_registration_ranges_increment_phone_and_append_address_suffix():
+    defaults = RegistrationDefaults(
+        contact_phone="13800000000",
+        contact_phone_end="13800000999",
+        chinese_address=(
+            "江西省南昌市青山湖区艾溪湖管理处"
+            "南京东路丰源天域2期14栋菜鸟驿站1111"
+        ),
+        address_suffix_start=1,
+        address_suffix_end=1000,
+    )
+
+    assert registration_values_for_ordinal(defaults, 1) == (
+        "13800000000",
+        defaults.chinese_address + "1",
+    )
+    assert registration_values_for_ordinal(defaults, 2) == (
+        "13800000001",
+        defaults.chinese_address + "2",
+    )
+    assert registration_values_for_ordinal(defaults, 1000) == (
+        "13800000999",
+        defaults.chinese_address + "1000",
+    )
+
+
+def test_registration_ranges_fail_before_reusing_an_exhausted_value():
+    defaults = RegistrationDefaults(
+        contact_phone="13800000000",
+        contact_phone_end="13800000001",
+        chinese_address="固定地址1111",
+        address_suffix_start=1,
+        address_suffix_end=2,
+    )
+
+    with pytest.raises(AutomationError, match="联系电话区间不足"):
+        registration_values_for_ordinal(defaults, 3)
+
+
+def test_empty_phone_end_keeps_legacy_fixed_phone_but_numbers_addresses():
+    defaults = RegistrationDefaults(
+        contact_phone="13800000000",
+        chinese_address="固定地址1111",
+        address_suffix_start=1,
+        address_suffix_end=1000,
+    )
+
+    assert registration_values_for_ordinal(defaults, 23) == (
+        "13800000000",
+        "固定地址111123",
+    )
 
 
 def test_continuous_runner_waits_for_each_completed_item_before_next():

@@ -35,6 +35,7 @@ from .config import (
     FREECARD_APPLICATION_URL,
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
+    RegistrationDefaults,
     app_config_dir,
 )
 from .proxy import (
@@ -179,6 +180,39 @@ def application_target(config: AppConfig) -> int:
         return 1
 
 
+def registration_values_for_ordinal(
+    defaults: RegistrationDefaults,
+    ordinal: int,
+) -> tuple[str, str]:
+    """返回当前批次序号对应的联系电话和带尾号收货地址。"""
+    position = max(1, int(ordinal))
+    phone = defaults.contact_phone.strip()
+    phone_end = defaults.contact_phone_end.strip()
+    if phone_end:
+        if not re.fullmatch(r"1\d{10}", phone) or not re.fullmatch(
+            r"1\d{10}", phone_end
+        ):
+            raise AutomationError("联系电话区间应为 11 位中国手机号码")
+        phone_value = int(phone) + position - 1
+        if phone_value > int(phone_end) or len(str(phone_value)) != 11:
+            raise AutomationError(
+                f"联系电话区间不足以生成第 {position} 单"
+            )
+        phone = str(phone_value)
+
+    try:
+        suffix_start = int(defaults.address_suffix_start)
+        suffix_end = int(defaults.address_suffix_end)
+    except (TypeError, ValueError) as exc:
+        raise AutomationError("地址尾号区间应为整数") from exc
+    suffix = suffix_start + position - 1
+    if suffix_start < 1 or suffix_end < suffix_start or suffix > suffix_end:
+        raise AutomationError(
+            f"地址尾号区间不足以生成第 {position} 单"
+        )
+    return phone, f"{defaults.chinese_address.strip()}{suffix}"
+
+
 def is_payment_success_url(value: str) -> bool:
     try:
         path = urlsplit(str(value or "")).path.rstrip("/").lower()
@@ -320,6 +354,7 @@ class CTExcelAutomation:
         worker_slot: int = 1,
         proxy_override: Optional[dict[str, str]] = None,
         browser_start_barrier: Optional[threading.Barrier] = None,
+        batch_ordinal: int = 1,
     ):
         self.config = config
         self.log = log
@@ -335,6 +370,7 @@ class CTExcelAutomation:
             dict(proxy_override) if proxy_override is not None else None
         )
         self.browser_start_barrier = browser_start_barrier
+        self.batch_ordinal = max(1, int(batch_ordinal))
         self.stop_event = threading.Event()
         self.context: Optional[BrowserContext] = None
         self.profile_dir: Optional[Path] = None
@@ -526,13 +562,14 @@ class CTExcelAutomation:
         if not defaults.first_name.strip():
             missing.append("固定名")
         if not defaults.contact_phone.strip():
-            missing.append("固定联系电话")
+            missing.append("联系电话起始号码")
         if not defaults.chinese_address.strip():
             missing.append("固定中国收货地址")
         if missing:
             raise AutomationError("请先填写：" + "、".join(missing))
         if not re.fullmatch(r"1\d{10}", defaults.contact_phone.strip()):
-            raise AutomationError("固定联系电话应为 11 位中国手机号码")
+            raise AutomationError("联系电话起始号码应为 11 位中国手机号码")
+        registration_values_for_ordinal(defaults, self.batch_ordinal)
         if self.config.purchase_route == PURCHASE_ROUTE_FREECARD:
             if not re.fullmatch(
                 r"(?:\+?44)?7\d{9,10}",
@@ -1057,6 +1094,10 @@ class CTExcelAutomation:
     ) -> None:
         self.stage("填写客户资料")
         defaults = self.config.registration
+        contact_phone, chinese_address = registration_values_for_ordinal(
+            defaults,
+            self.batch_ordinal,
+        )
         self._wait_for_page_ready(page, "客户资料表单")
         # 先选择寄送国家，官网才会按中国地址流程初始化后续表单。
         self._select_china(page)
@@ -1081,7 +1122,7 @@ class CTExcelAutomation:
         self._fill_placeholder_input(
             page,
             "请填写联系电话",
-            defaults.contact_phone.strip(),
+            contact_phone,
             "联系电话",
         )
         self._fill_placeholder_input(
@@ -1135,7 +1176,11 @@ class CTExcelAutomation:
         )
         self.log("验证码已自动填入")
 
-        self._smart_fill_address(page, defaults.chinese_address.strip())
+        self._smart_fill_address(page, chinese_address)
+        self.log(
+            f"本单使用联系电话 {contact_phone}，地址尾号 "
+            f"{defaults.address_suffix_start + self.batch_ordinal - 1}"
+        )
         self._ensure_marketing_off(page)
         self._click_button(page, "同意提交")
         if self.config.purchase_route == PURCHASE_ROUTE_FREECARD:
@@ -1804,6 +1849,7 @@ class CTExcelBatchAutomation:
             worker_slot=worker_slot,
             proxy_override=proxy_override,
             browser_start_barrier=browser_start_barrier,
+            batch_ordinal=ordinal,
         )
         with self.sessions_lock:
             self.sessions[worker_slot] = session
@@ -1963,6 +2009,10 @@ class CTExcelBatchAutomation:
 
     def run(self) -> AutomationBatchResult:
         total = application_target(self.config)
+        # 启动前一次性校验完整区间，避免运行到中途才发现尾号不足。
+        defaults = self.config.registration
+        if defaults.contact_phone.strip() and defaults.chinese_address.strip():
+            registration_values_for_ordinal(defaults, total)
         completed = min(self.completed_before, total)
         if completed >= total:
             return AutomationBatchResult(
