@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import __version__
 from .api import AdminApi
 from .automation import (
     AutomationBatchResult,
@@ -141,7 +142,7 @@ class MainWindow(QMainWindow):
         self.batch_target_count = 1
         self.batch_resume_pending = False
         self.batch_signature: Optional[tuple[object, ...]] = None
-        self.setWindowTitle("CTExcel 申请工作台")
+        self.setWindowTitle(f"CTExcel 申请工作台 v{__version__}")
         self.resize(1120, 760)
         self.setMinimumSize(900, 650)
         self._build_ui()
