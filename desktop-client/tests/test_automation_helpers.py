@@ -31,12 +31,14 @@ from ctexcel_client.automation import (
     is_payment_success_url,
     is_wechat_payment_url,
     payment_page_has_expected_amount,
+    payment_page_content_is_ready,
     page_progress_fingerprint,
     page_url_matches_path,
     price_is_expected,
     proxy_browser_error_reason,
     browser_startup_snapshot_is_blank,
     tunnel_browser_start_delay,
+    verification_cooldown_message,
 )
 from ctexcel_client.config import (
     AppConfig,
@@ -392,6 +394,181 @@ def test_payment_popup_is_selected_instead_of_waiting_on_confirmation_page():
 
     assert selected is popup
     assert any("新窗口" in message for message in messages)
+
+
+def test_payment_terms_wait_for_vue_binding_before_next_click(monkeypatch):
+    state = {
+        "checked": False,
+        "vue_bound": False,
+        "dialog_visible": True,
+        "clicks": 0,
+    }
+
+    class FakeCheckbox:
+        def count(self):
+            return 1
+
+        def evaluate(self, script):
+            if "root.click" in script:
+                state["checked"] = True
+                return True
+            if "requestAnimationFrame" in script:
+                state["vue_bound"] = state["checked"]
+                return state["vue_bound"]
+            raise AssertionError(script)
+
+        def is_checked(self):
+            return state["checked"]
+
+    class FakeSubmit:
+        def click(self, **_kwargs):
+            state["clicks"] += 1
+            if state["vue_bound"]:
+                state["dialog_visible"] = False
+
+    class FakeDialog:
+        checkbox = FakeCheckbox()
+        submit = FakeSubmit()
+
+        def get_by_role(self, role, **_kwargs):
+            return self.checkbox if role == "checkbox" else self.submit
+
+        def is_visible(self):
+            return state["dialog_visible"]
+
+    class FakePage:
+        url = "https://example.test/freecard/activityPageconfirm"
+
+    messages = []
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_visible_locator",
+        lambda locator, _label: locator,
+    )
+
+    runner._submit_payment_terms(FakePage(), FakeDialog())
+
+    assert state == {
+        "checked": True,
+        "vue_bound": True,
+        "dialog_visible": False,
+        "clicks": 1,
+    }
+    assert any("完成页面状态同步" in item for item in messages)
+    assert any("付款订单正在生成" in item for item in messages)
+
+
+def test_payment_terms_retry_next_when_first_click_is_ignored(monkeypatch):
+    state = {"checked": False, "dialog_visible": True, "clicks": 0}
+    clock = {"value": 0.0}
+
+    class FakeCheckbox:
+        def count(self):
+            return 1
+
+        def evaluate(self, script):
+            if "root.click" in script:
+                state["checked"] = True
+                return True
+            if "requestAnimationFrame" in script:
+                return state["checked"]
+            raise AssertionError(script)
+
+        def is_checked(self):
+            return state["checked"]
+
+    class FakeSubmit:
+        def click(self, **_kwargs):
+            state["clicks"] += 1
+            if state["clicks"] == 2:
+                state["dialog_visible"] = False
+
+    class FakeDialog:
+        checkbox = FakeCheckbox()
+        submit = FakeSubmit()
+
+        def get_by_role(self, role, **_kwargs):
+            return self.checkbox if role == "checkbox" else self.submit
+
+        def is_visible(self):
+            return state["dialog_visible"]
+
+    class FakePage:
+        url = "https://example.test/freecard/activityPageconfirm"
+
+    messages = []
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_interruptibly",
+        lambda seconds: clock.__setitem__(
+            "value", clock["value"] + seconds
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_visible_locator",
+        lambda locator, _label: locator,
+    )
+
+    runner._submit_payment_terms(FakePage(), FakeDialog())
+
+    assert state["clicks"] == 2
+    assert state["dialog_visible"] is False
+    assert any("自动重试" in item for item in messages)
+
+
+def test_same_url_wechat_qr_content_is_accepted(monkeypatch):
+    body_text = (
+        "请使用微信扫描二维码以完成支付 ¥9.11(1GBP) "
+        "订单号码：ORDERSUK202608010000000001"
+    )
+    assert payment_page_content_is_ready(body_text)
+
+    class FakeBody:
+        def inner_text(self, **_kwargs):
+            return body_text
+
+    class FakePage:
+        url = "https://example.test/freecard/activityPageconfirm"
+
+        def is_closed(self):
+            return False
+
+        def locator(self, selector):
+            assert selector == "body"
+            return FakeBody()
+
+    page = FakePage()
+    messages = []
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    runner.context = SimpleNamespace(pages=[page])
+
+    selected = runner._wait_for_wechat_payment_page(page)
+
+    assert selected is page
+    assert any("无需等待网址跳转" in item for item in messages)
 
 
 def test_proxy_browser_error_skips_manual_hold_but_normal_error_preserves(
@@ -1141,24 +1318,28 @@ def test_batch_assigns_distinct_unpaid_customers_before_creating_new(
             return [
                 {
                     "customer_id": 4,
+                    "email": "pending-4@example.test",
                     "order_number": "ORDER-PAID",
                     "payment_succeeded_at": "2026-08-01T00:10:00Z",
                     "registration_confirmed_at": None,
                 },
                 {
                     "customer_id": 3,
+                    "email": "pending-3@example.test",
                     "order_number": "ORDER-UNPAID",
                     "payment_succeeded_at": None,
                     "registration_confirmed_at": None,
                 },
                 {
                     "customer_id": 2,
+                    "email": "pending-2@example.test",
                     "order_number": "ORDER-CONFIRMED",
                     "payment_succeeded_at": None,
                     "registration_confirmed_at": None,
                 },
                 {
                     "customer_id": 1,
+                    "email": "pending-1@example.test",
                     "order_number": None,
                     "payment_succeeded_at": None,
                     "registration_confirmed_at": None,
@@ -1186,11 +1367,82 @@ def test_batch_assigns_distinct_unpaid_customers_before_creating_new(
 
     assert runner.resume_assignment_supported is True
     assert runner.resume_customer_ids_by_ordinal == {1: 1, 2: 3}
+    assert runner.resume_customer_emails_by_ordinal == {
+        1: "pending-1@example.test",
+        2: "pending-3@example.test",
+    }
     assert sync_calls == [2, 3]
     assert any("不同的未成功付款客户" in item for item in messages)
 
 
-def test_old_api_forces_serial_reuse_instead_of_parallel_empty_accounts(
+def test_legacy_preassigned_customer_skips_ambiguous_create_endpoint(
+    monkeypatch,
+):
+    create_calls = []
+
+    class FakeAdminApi:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def connect(self):
+            return {"ok": True, "api_version": 7}
+
+        def create_ctexcel_customer(self, **kwargs):
+            create_calls.append(kwargs)
+            raise AssertionError("客户端已预分配客户时不应调用旧建档接口")
+
+    class FakeRoute:
+        proxy = None
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(automation_module, "AdminApi", FakeAdminApi)
+    customer_events = []
+    runner = CTExcelAutomation(
+        AppConfig(
+            registration=RegistrationDefaults(
+                last_name="朱",
+                first_name="先生",
+                contact_phone="18170908000",
+                chinese_address="测试省测试市测试区测试地址",
+            )
+        ),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=customer_events.append,
+        resume_customer_id=701,
+        resume_customer_email="pending-701@example.test",
+    )
+    monkeypatch.setattr(
+        runner,
+        "_prepare_browser_route",
+        lambda **_kwargs: FakeRoute(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_browser",
+        lambda _api, customer_id, email, **_kwargs: AutomationResult(
+            customer_id=customer_id,
+            email=email,
+        ),
+    )
+
+    result = runner.run()
+
+    assert create_calls == []
+    assert result.customer_id == 701
+    assert result.email == "pending-701@example.test"
+    assert customer_events[0]["customer_id"] == 701
+
+
+def test_old_api_preassigns_distinct_pending_customers_and_keeps_parallel(
     monkeypatch,
 ):
     class FakeAdminApi:
@@ -1206,6 +1458,18 @@ def test_old_api_forces_serial_reuse_instead_of_parallel_empty_accounts(
         def connect(self):
             return {"ok": True, "api_version": 7}
 
+        def pending_customers(self):
+            return [
+                {
+                    "customer_id": customer_id,
+                    "email": f"pending-{customer_id}@example.test",
+                    "order_number": None,
+                    "payment_succeeded_at": None,
+                    "registration_confirmed_at": None,
+                }
+                for customer_id in range(101, 109)
+            ]
+
     monkeypatch.setattr(automation_module, "AdminApi", FakeAdminApi)
     messages = []
     runner = CTExcelBatchAutomation(
@@ -1220,28 +1484,34 @@ def test_old_api_forces_serial_reuse_instead_of_parallel_empty_accounts(
         item_started=lambda *_args: None,
         item_completed=lambda *_args: None,
     )
-    serial_calls = []
-
-    def run_serial(**kwargs):
-        serial_calls.append(kwargs)
-        return "serial-result"
-
-    monkeypatch.setattr(runner, "_run_serial", run_serial)
+    parallel_calls = []
     monkeypatch.setattr(
         runner,
-        "_run_parallel",
+        "_run_serial",
         lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("旧 API 不应启动并发建档")
+            AssertionError("旧 API 有不同待完成客户时不应降为单线程")
         ),
     )
 
+    def run_parallel(**kwargs):
+        parallel_calls.append(kwargs)
+        return "parallel-result"
+
+    monkeypatch.setattr(runner, "_run_parallel", run_parallel)
+
     result = runner.run()
 
-    assert result == "serial-result"
-    assert serial_calls == [{"total": 8, "completed": 0}]
-    assert runner.legacy_api_serial_required is True
-    assert any("自动改为单线程逐个复用" in item for item in messages)
-    assert any("已暂停配置的 5 线程并发" in item for item in messages)
+    assert result == "parallel-result"
+    assert parallel_calls == [{"total": 8, "completed": 0, "workers": 5}]
+    assert runner.legacy_api_client_assignment is True
+    assert runner.resume_customer_ids_by_ordinal == {
+        ordinal: 100 + ordinal for ordinal in range(1, 9)
+    }
+    assert runner.resume_customer_emails_by_ordinal[1] == (
+        "pending-101@example.test"
+    )
+    assert any("继续保留配置的并发数" in item for item in messages)
+    assert any("继续使用 5 个浏览器线程" in item for item in messages)
 
 
 def test_qg_allocator_retries_duplicate_ip_and_assigns_unique_nodes(
@@ -1776,6 +2046,162 @@ def test_verification_freshness_accepts_new_message_after_request():
 
     assert fresh[0] is True
     assert fresh[1] == "验证码邮件属于本次请求"
+
+
+def test_verification_cooldown_notice_is_recognized():
+    assert verification_cooldown_message(
+        "提示：180秒之内不要重复操作哦~"
+    ) == "180秒之内不要重复操作"
+    assert verification_cooldown_message("验证码发送成功") == ""
+
+
+def test_verification_cooldown_waits_for_delayed_proxy_feedback(monkeypatch):
+    clock = {"value": 0.0}
+    evaluations = {"count": 0}
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    class FakePage:
+        def evaluate(self, _script):
+            evaluations["count"] += 1
+            if clock["value"] >= 2.0:
+                return "180秒之内不要重复操作哦~"
+            return ""
+
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_interruptibly",
+        lambda seconds: clock.__setitem__(
+            "value", clock["value"] + seconds
+        ),
+    )
+
+    notice = runner._visible_verification_cooldown(FakePage())
+
+    assert notice == "180秒之内不要重复操作"
+    assert clock["value"] >= 2.0
+    assert evaluations["count"] > 1
+
+
+def test_verification_feedback_success_does_not_add_five_second_delay(
+    monkeypatch,
+):
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    class FakePage:
+        def evaluate(self, _script):
+            return "验证码发送成功"
+
+    monkeypatch.setattr(
+        runner,
+        "_wait_interruptibly",
+        lambda _seconds: (_ for _ in ()).throw(
+            AssertionError("成功反馈出现后不应继续等待")
+        ),
+    )
+
+    assert runner._visible_verification_cooldown(FakePage()) == ""
+
+
+def test_browser_retry_reuses_cached_verification_without_resending(
+    monkeypatch,
+):
+    messages = []
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    runner.cached_verification_customer_id = 701
+    runner.cached_verification_code = "123456"
+    runner.cached_verification_at = 100.0
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: 120.0,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_click_visible_text",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("缓存验证码有效时不应再次点击获取验证码")
+        ),
+    )
+
+    code = runner._obtain_verification_code(
+        object(),
+        object(),
+        701,
+    )
+
+    assert code == "123456"
+    assert any("跳过 180 秒内的重复发送" in item for item in messages)
+
+
+def test_cooldown_reuses_existing_mail_instead_of_waiting_for_new_one(
+    monkeypatch,
+):
+    class FakeApi:
+        def verification_code(self, customer_id):
+            assert customer_id == 702
+            return {
+                "found": True,
+                "code": "654321",
+                "message_id": "existing-message",
+                "received_at": "2026-08-01T02:00:00Z",
+            }
+
+    messages = []
+    clicks = []
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_click_visible_text",
+        lambda _page, text: clicks.append(text),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_visible_verification_cooldown",
+        lambda _page: "180秒之内不要重复操作",
+    )
+    monkeypatch.setattr(
+        runner,
+        "_poll_verification_code",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("冷却期不应等待一封不会出现的新邮件")
+        ),
+    )
+
+    code = runner._obtain_verification_code(
+        object(),
+        FakeApi(),
+        702,
+    )
+
+    assert code == "654321"
+    assert clicks == ["获取验证码"]
+    assert runner.cached_verification_code == "654321"
+    assert any("冷却期验证码已复用" in item for item in messages)
 
 
 def test_coupon_rejection_is_reported_instead_of_looking_like_missing_input():

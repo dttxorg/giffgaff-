@@ -63,6 +63,10 @@ PAGE_READY_STABLE_SECONDS = 0.35
 PAGE_PROGRESS_POLL_SECONDS = 0.2
 PAGE_CLICK_RETRY_SECONDS = 2.0
 PAGE_CLICK_TIMEOUT_MS = 5_000
+PAYMENT_TERMS_BIND_TIMEOUT_MS = 1_500
+PAYMENT_TERMS_CLOSE_WAIT_SECONDS = 2.0
+VERIFICATION_CODE_CACHE_SECONDS = 180
+VERIFICATION_FEEDBACK_TIMEOUT_SECONDS = 5.0
 TUNNEL_BROWSER_STAGGER_SECONDS = 5
 TUNNEL_BROWSER_STAGGER_MAX_SECONDS = 20
 PURCHASE_LIMIT_MARKERS = (
@@ -222,6 +226,25 @@ ORDER_PATTERN = re.compile(
     r"\b(?:ORDER\d{12,}|ORDERSUK\d{12,})\b",
     re.I,
 )
+
+
+def payment_page_content_is_ready(page_text: str) -> bool:
+    """Recognize a rendered WeChat QR page even if the SPA URL is unchanged."""
+    text = str(page_text or "")
+    compact = re.sub(r"\s+", "", text).lower()
+    has_qr_prompt = any(
+        marker in compact
+        for marker in (
+            "请使用微信扫描二维码",
+            "扫描二维码以完成支付",
+            "微信付款二维码",
+            "wechatqrcode",
+            "scanqrcode",
+        )
+    )
+    return has_qr_prompt and bool(ORDER_PATTERN.search(text))
+
+
 PAGE_PROGRESS_SNAPSHOT_SCRIPT = """() => {
   const visible = element => {
     if (!element || element.hidden) return false;
@@ -580,6 +603,20 @@ def assess_verification_freshness(
     return True, "验证码邮件属于本次请求", received_at
 
 
+def verification_cooldown_message(value: Any) -> str:
+    """Return the site's resend-cooldown notice, if present."""
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    markers = (
+        "180秒之内不要重复操作",
+        "180秒内不要重复操作",
+        "180秒之内请勿重复操作",
+        "180秒内请勿重复操作",
+    )
+    return next((marker for marker in markers if marker in text), "")
+
+
 class CTExcelAutomation:
     """CTExcel 购买流程。
 
@@ -597,6 +634,7 @@ class CTExcelAutomation:
         request_key: str = "",
         reuse_pending_customer: bool = True,
         resume_customer_id: Optional[int] = None,
+        resume_customer_email: str = "",
         worker_slot: int = 1,
         proxy_override: Optional[dict[str, str]] = None,
         proxy_provider: Optional[Callable[[], dict[str, str]]] = None,
@@ -617,6 +655,7 @@ class CTExcelAutomation:
             if resume_customer_id is not None
             else None
         )
+        self.resume_customer_email = str(resume_customer_email or "").strip()
         self.worker_slot = max(1, int(worker_slot))
         self.proxy_override = (
             dict(proxy_override) if proxy_override is not None else None
@@ -629,6 +668,9 @@ class CTExcelAutomation:
         self.profile_dir: Optional[Path] = None
         self.network_events: list[str] = []
         self.payment_qr_reached = False
+        self.cached_verification_customer_id: Optional[int] = None
+        self.cached_verification_code = ""
+        self.cached_verification_at = 0.0
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -666,14 +708,26 @@ class CTExcelAutomation:
                     and self.resume_customer_id is None
                 ):
                     self._refresh_pending_customers(api)
-                created = api.create_ctexcel_customer(
-                    reuse_pending=self.reuse_pending_customer,
-                    allow_new_after_checkpoint=(
-                        self.config.continuous_enabled
-                    ),
-                    resume_customer_id=self.resume_customer_id,
-                    request_key=self.request_key,
-                )
+                if self.resume_customer_id and self.resume_customer_email:
+                    created = {
+                        "customer_id": self.resume_customer_id,
+                        "email": self.resume_customer_email,
+                        "reused": True,
+                        "client_preassigned": True,
+                    }
+                    self.log(
+                        "已使用批次启动前分配的待完成客户，"
+                        "跳过旧 API 的重复复用入口"
+                    )
+                else:
+                    created = api.create_ctexcel_customer(
+                        reuse_pending=self.reuse_pending_customer,
+                        allow_new_after_checkpoint=(
+                            self.config.continuous_enabled
+                        ),
+                        resume_customer_id=self.resume_customer_id,
+                        request_key=self.request_key,
+                    )
                 customer_id = int(created["customer_id"])
                 email = str(created["email"])
                 task = {
@@ -1800,33 +1854,10 @@ class CTExcelAutomation:
             ),
         )
 
-        baseline: dict[str, Any] = {}
-        try:
-            baseline = api.verification_code(customer_id)
-        except ApiError as exc:
-            self.log(f"验证码发送前邮箱基线读取暂未完成：{exc}")
-        baseline_message_id = str(baseline.get("message_id") or "").strip()
-        baseline_received_at = parse_message_timestamp(baseline.get("received_at"))
-        if baseline_message_id:
-            baseline_text = f"邮件 {baseline_message_id}"
-            if baseline_received_at:
-                baseline_text += f"，{self._format_mail_time(baseline_received_at)}"
-            self.log(f"已记录验证码发送前基线：{baseline_text}")
-
-        requested_at = datetime.now(timezone.utc)
-        self._click_visible_text(page, "获取验证码")
-        self.log(
-            "验证码已请求，等待新邮件；请求时间："
-            f"{self._format_mail_time(requested_at)}"
-        )
-        self._wait_interruptibly(
-            max(3, int(self.config.verification_min_wait_seconds))
-        )
-        code = self._poll_verification_code(
+        code = self._obtain_verification_code(
+            page,
             api,
             customer_id,
-            baseline_message_id=baseline_message_id,
-            requested_at=requested_at,
         )
         self._fill_placeholder_input(
             page,
@@ -1894,6 +1925,139 @@ class CTExcelAutomation:
         )
         field.fill(value)
         return field
+
+    def _visible_verification_cooldown(self, page: Page) -> str:
+        """Inspect short-lived Element Plus alerts after requesting a code."""
+        deadline = time.monotonic() + VERIFICATION_FEEDBACK_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            self._check_stop()
+            text = ""
+            with contextlib.suppress(Exception):
+                text = str(
+                    page.evaluate(
+                        """() => Array.from(document.querySelectorAll(
+                          '.el-message, .el-notification, [role="alert"]'
+                        )).filter(node => {
+                          const style = getComputedStyle(node);
+                          const rect = node.getBoundingClientRect();
+                          return style.display !== 'none'
+                            && style.visibility !== 'hidden'
+                            && rect.width > 0
+                            && rect.height > 0;
+                        }).map(node => node.innerText || node.textContent || '')
+                          .join(' | ')"""
+                    )
+                    or ""
+                )
+            notice = verification_cooldown_message(text)
+            if notice:
+                return notice
+            if any(
+                marker in text
+                for marker in (
+                    "验证码发送成功",
+                    "验证码已发送",
+                    "邮件发送成功",
+                )
+            ):
+                return ""
+            self._wait_interruptibly(0.1)
+        return ""
+
+    @staticmethod
+    def _verification_code_from_result(result: dict[str, Any]) -> str:
+        code = str(result.get("code") or "").strip()
+        if result.get("found") and re.fullmatch(r"\d{6}", code):
+            return code
+        return ""
+
+    def _cache_verification_code(
+        self,
+        customer_id: int,
+        code: str,
+    ) -> None:
+        self.cached_verification_customer_id = int(customer_id)
+        self.cached_verification_code = str(code)
+        self.cached_verification_at = time.monotonic()
+
+    def _obtain_verification_code(
+        self,
+        page: Page,
+        api: AdminApi,
+        customer_id: int,
+    ) -> str:
+        cache_age = time.monotonic() - self.cached_verification_at
+        if (
+            self.cached_verification_customer_id == int(customer_id)
+            and re.fullmatch(r"\d{6}", self.cached_verification_code)
+            and 0 <= cache_age < VERIFICATION_CODE_CACHE_SECONDS
+        ):
+            self.log(
+                "浏览器重试继续使用本单已核验验证码，"
+                "跳过 180 秒内的重复发送"
+            )
+            return self.cached_verification_code
+
+        baseline: dict[str, Any] = {}
+        try:
+            baseline = api.verification_code(customer_id)
+        except ApiError as exc:
+            self.log(f"验证码发送前邮箱基线读取暂未完成：{exc}")
+        baseline_message_id = str(
+            baseline.get("message_id") or ""
+        ).strip()
+        baseline_received_at = parse_message_timestamp(
+            baseline.get("received_at")
+        )
+        if baseline_message_id:
+            baseline_text = f"邮件 {baseline_message_id}"
+            if baseline_received_at:
+                baseline_text += (
+                    f"，{self._format_mail_time(baseline_received_at)}"
+                )
+            self.log(f"已记录验证码发送前基线：{baseline_text}")
+
+        requested_at = datetime.now(timezone.utc)
+        self._click_visible_text(page, "获取验证码")
+        cooldown = self._visible_verification_cooldown(page)
+        if cooldown:
+            self.log(
+                f"检测到网站验证码冷却提示：{cooldown}；"
+                "立即复用该客户邮箱中最近一次验证码"
+            )
+            code = self._verification_code_from_result(baseline)
+            if not code:
+                try:
+                    latest = api.verification_code(customer_id)
+                except ApiError as exc:
+                    raise AutomationError(
+                        "验证码处于 180 秒冷却期，读取最近验证码失败："
+                        f"{exc}"
+                    ) from exc
+                code = self._verification_code_from_result(latest)
+            if not code:
+                raise AutomationError(
+                    "验证码处于 180 秒冷却期，但邮箱中没有可复用验证码"
+                )
+            self._cache_verification_code(customer_id, code)
+            self.log("冷却期验证码已复用，不再等待新邮件")
+            return code
+
+        self.log(
+            "验证码已请求，等待新邮件；请求时间："
+            f"{self._format_mail_time(requested_at)}"
+        )
+        self._wait_interruptibly(
+            max(3, int(self.config.verification_min_wait_seconds))
+        )
+        code = self._poll_verification_code(
+            api,
+            customer_id,
+            baseline_message_id=baseline_message_id,
+            requested_at=requested_at,
+        )
+        self._cache_verification_code(customer_id, code)
+        return code
 
     def _poll_verification_code(
         self,
@@ -2219,20 +2383,8 @@ class CTExcelAutomation:
         self._click_button(page, "确认支付")
         dialogs = page.get_by_role("dialog")
         dialog = self._visible_locator(dialogs, "支付条款弹窗")
-        checkbox = dialog.get_by_role("checkbox")
-        if checkbox.count() != 1:
-            raise AutomationError("支付条款复选框数量异常")
-        checkbox.evaluate(
-            """input => {
-              if (!input.checked) {
-                const root = input.closest('.el-checkbox') || input.parentElement;
-                if (root) root.click();
-              }
-            }"""
-        )
-        if not checkbox.is_checked():
-            raise AutomationError("支付条款没有成功勾选")
-        dialog.get_by_role("button", name="下一步", exact=True).click()
+        self.log("支付条款弹窗已打开")
+        self._submit_payment_terms(page, dialog)
         payment_page = self._wait_for_wechat_payment_page(page)
         payment_page.wait_for_function(
             "() => document.body && document.body.innerText.includes('订单号码')",
@@ -2271,6 +2423,102 @@ class CTExcelAutomation:
             "transaction_amount": expected,
         }
 
+    def _sync_payment_terms_checkbox(self, checkbox: Locator) -> None:
+        """Wait until Element Plus and Vue both observe the checked value."""
+        checked = checkbox.evaluate(
+            """input => {
+              if (!input.checked) {
+                const root = input.closest('.el-checkbox') || input.parentElement;
+                if (root) root.click();
+              }
+              return Boolean(input.checked);
+            }"""
+        )
+        if not checked or not checkbox.is_checked():
+            raise AutomationError("支付条款没有成功勾选")
+        bound = checkbox.evaluate(
+            f"""input => new Promise(resolve => {{
+              const started = performance.now();
+              const root = input.closest('.el-checkbox');
+              const tick = () => {{
+                const visualChecked = !root
+                  || root.classList.contains('is-checked');
+                if (input.checked && visualChecked) {{
+                  resolve(true);
+                  return;
+                }}
+                if (performance.now() - started
+                    >= {PAYMENT_TERMS_BIND_TIMEOUT_MS}) {{
+                  resolve(false);
+                  return;
+                }}
+                requestAnimationFrame(tick);
+              }};
+              requestAnimationFrame(tick);
+            }})"""
+        )
+        if not bound:
+            raise AutomationError("支付条款虽已勾选，但页面状态没有完成同步")
+
+    def _submit_payment_terms(self, page: Page, dialog: Locator) -> None:
+        checkbox = dialog.get_by_role("checkbox")
+        if checkbox.count() != 1:
+            raise AutomationError("支付条款复选框数量异常")
+        self._sync_payment_terms_checkbox(checkbox)
+        self.log("支付条款已勾选并完成页面状态同步")
+        submit = self._visible_locator(
+            dialog.get_by_role("button", name="下一步", exact=True),
+            "支付条款弹窗中的下一步",
+        )
+        for attempt in range(2):
+            try:
+                submit.click(
+                    no_wait_after=True,
+                    timeout=min(
+                        PAGE_CLICK_TIMEOUT_MS,
+                        self._automation_step_timeout_ms(),
+                    ),
+                )
+            except PlaywrightTimeoutError:
+                self.log("支付条款“下一步”点击未及时返回，检查弹窗状态")
+            self.log(
+                "支付条款“下一步”已点击"
+                + ("（自动重试）" if attempt else "")
+            )
+            deadline = time.monotonic() + PAYMENT_TERMS_CLOSE_WAIT_SECONDS
+            while time.monotonic() < deadline:
+                self._check_stop()
+                try:
+                    if not dialog.is_visible():
+                        self.log("支付条款弹窗已关闭，付款订单正在生成")
+                        return
+                except Exception:
+                    self.log("支付条款弹窗已卸载，付款订单正在生成")
+                    return
+                if is_wechat_payment_url(
+                    getattr(page, "url", ""),
+                    self.config.purchase_route,
+                ):
+                    return
+                self._wait_interruptibly(0.1)
+            if attempt == 0:
+                self.log(
+                    "支付条款弹窗仍在，重新同步勾选状态并重试“下一步”"
+                )
+                self._sync_payment_terms_checkbox(checkbox)
+                with contextlib.suppress(Exception):
+                    submit = self._visible_locator(
+                        dialog.get_by_role(
+                            "button",
+                            name="下一步",
+                            exact=True,
+                        ),
+                        "支付条款弹窗中的下一步",
+                    )
+        raise RetryableStalledPageError(
+            "支付条款弹窗连续两次点击“下一步”后仍未关闭"
+        )
+
     def _wait_for_wechat_payment_page(self, source_page: Page) -> Page:
         """Follow a same-tab redirect or the new tab used by some site builds."""
         timeout_ms = min(
@@ -2307,6 +2555,15 @@ class CTExcelAutomation:
                             )
                         else:
                             self.log("已进入微信支付页")
+                        return candidate
+                    page_text = candidate.locator("body").inner_text(
+                        timeout=500
+                    )
+                    if payment_page_content_is_ready(page_text):
+                        self.log(
+                            "微信支付二维码已在当前页面渲染，"
+                            "无需等待网址跳转"
+                        )
                         return candidate
                 except Exception:
                     continue
@@ -2603,8 +2860,9 @@ class CTExcelBatchAutomation:
         self.qg_proxy_lock = threading.Lock()
         self.qg_proxy_ips: set[str] = set()
         self.resume_customer_ids_by_ordinal: dict[int, int] = {}
+        self.resume_customer_emails_by_ordinal: dict[int, str] = {}
         self.resume_assignment_supported = False
-        self.legacy_api_serial_required = False
+        self.legacy_api_client_assignment = False
 
     def _prepare_resume_customer_ids(
         self,
@@ -2614,8 +2872,9 @@ class CTExcelBatchAutomation:
     ) -> None:
         """Assign distinct unfinished customers before any proxy is acquired."""
         self.resume_customer_ids_by_ordinal = {}
+        self.resume_customer_emails_by_ordinal = {}
         self.resume_assignment_supported = False
-        self.legacy_api_serial_required = False
+        self.legacy_api_client_assignment = False
         if self.automation_factory is not CTExcelAutomation:
             return
         self.stage("优先整理未完成客户")
@@ -2628,16 +2887,15 @@ class CTExcelBatchAutomation:
             status = api.connect()
             api_version = int(status.get("api_version") or 0)
             if api_version < 8:
-                self.legacy_api_serial_required = True
+                self.legacy_api_client_assignment = True
                 self.log(
-                    "客户管理 API 版本较旧；为防止并发线程"
-                    "重复复用或新建空邮箱，本轮自动改为单线程逐个复用"
+                    "客户管理 API 版本较旧；改由客户端启动前为各线程"
+                    "分配不同待完成客户，继续保留配置的并发数"
                 )
-                return
             self.resume_assignment_supported = True
             pending = api.pending_customers()
             needed = max(0, int(total) - int(first_ordinal) + 1)
-            resumable: list[int] = []
+            resumable: list[tuple[int, str]] = []
             for customer in sorted(
                 pending,
                 key=lambda item: int(item.get("customer_id") or 0),
@@ -2645,7 +2903,8 @@ class CTExcelBatchAutomation:
                 if len(resumable) >= needed:
                     break
                 customer_id = int(customer.get("customer_id") or 0)
-                if not customer_id:
+                email = str(customer.get("email") or "").strip()
+                if not customer_id or not email:
                     continue
                 if (
                     str(
@@ -2671,10 +2930,17 @@ class CTExcelBatchAutomation:
                                 f"客户 #{customer_id} 已确认注册成功，跳过复用"
                             )
                             continue
-                resumable.append(customer_id)
+                resumable.append((customer_id, email))
             self.resume_customer_ids_by_ordinal = {
                 ordinal: customer_id
-                for ordinal, customer_id in zip(
+                for ordinal, (customer_id, _email) in zip(
+                    range(first_ordinal, total + 1),
+                    resumable,
+                )
+            }
+            self.resume_customer_emails_by_ordinal = {
+                ordinal: email
+                for ordinal, (_customer_id, email) in zip(
                     range(first_ordinal, total + 1),
                     resumable,
                 )
@@ -2682,7 +2948,8 @@ class CTExcelBatchAutomation:
         if resumable:
             self.log(
                 f"已按创建顺序为前 {len(resumable)} 单分配不同的"
-                "未成功付款客户；这些客户完成前不新建档案"
+                "未成功付款客户；已分配线程不再新建档案，"
+                "队列不足的剩余任务才按需新建"
             )
         else:
             self.log("没有可复用的未完成客户，后续按需新建")
@@ -2716,6 +2983,7 @@ class CTExcelBatchAutomation:
         worker_slot: int,
         reuse_pending_customer: bool,
         resume_customer_id: Optional[int] = None,
+        resume_customer_email: str = "",
         browser_start_barrier: Optional[threading.Barrier] = None,
     ) -> AutomationResult:
         prefix = (
@@ -2778,6 +3046,7 @@ class CTExcelBatchAutomation:
             ),
             reuse_pending_customer=reuse_pending_customer,
             resume_customer_id=resume_customer_id,
+            resume_customer_email=resume_customer_email,
             worker_slot=worker_slot,
             proxy_override=proxy_override,
             proxy_provider=proxy_provider,
@@ -2824,6 +3093,11 @@ class CTExcelBatchAutomation:
                     else True
                 ),
                 resume_customer_id=resume_customer_id,
+                resume_customer_email=(
+                    self.resume_customer_emails_by_ordinal.get(ordinal, "")
+                    if self.legacy_api_client_assignment
+                    else ""
+                ),
             )
             completed += 1
             self.item_completed(last_result, completed, total)
@@ -2887,6 +3161,11 @@ class CTExcelBatchAutomation:
                 ),
                 resume_customer_id=(
                     self.resume_customer_ids_by_ordinal.get(ordinal)
+                ),
+                resume_customer_email=(
+                    self.resume_customer_emails_by_ordinal.get(ordinal, "")
+                    if self.legacy_api_client_assignment
+                    else ""
                 ),
                 browser_start_barrier=(
                     browser_start_barrier
@@ -2979,12 +3258,11 @@ class CTExcelBatchAutomation:
             if self.config.continuous_enabled
             else 1
         )
-        if self.legacy_api_serial_required and workers > 1:
+        if self.legacy_api_client_assignment and workers > 1:
             self.log(
-                f"已暂停配置的 {workers} 线程并发；"
-                "等服务端升级到 API v8 后会自动恢复并发"
+                f"旧 API 的待完成客户已在客户端侧去重分配；"
+                f"本轮继续使用 {workers} 个浏览器线程"
             )
-            workers = 1
         if workers <= 1:
             return self._run_serial(
                 total=total,
