@@ -70,7 +70,7 @@ def test_client_status_uses_bearer_password_without_hidden_entry_cookie(client_a
     assert response.status_code == 200
     assert response.json() == {
         "ok": True,
-        "api_version": 5,
+        "api_version": 6,
         "ctexcel_customer_count": 0,
         "pending_customer_count": 0,
     }
@@ -213,6 +213,61 @@ def test_continuous_client_can_create_after_paid_pending_customer(client_api):
     assert response.json()["reused"] is False
     assert response.json()["customer_id"] != paid_pending_id
     assert response.json()["email"] == "next-batch@example.test"
+
+
+def test_client_does_not_reuse_customer_with_confirmation_email(client_api):
+    client, db_path = client_api
+    with sqlite3.connect(db_path) as connection:
+        confirmed_id = connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date,
+                ctexcel_registration_confirmed_at)
+               VALUES ('ctexcel', 'confirmed@example.test', '2026-07-31',
+                       '2026-07-31T07:05:00Z')"""
+        ).lastrowid
+        connection.commit()
+
+    email_mock = AsyncMock(
+        return_value={
+            "email": "next-registration@example.test",
+            "email_account_id": "next-registration-mail",
+            "email_provider_id": None,
+            "email_provider_domain": None,
+            "share_link": "",
+            "is_email_auto": True,
+        }
+    )
+    with patch.object(
+        main,
+        "_generate_email_account",
+        new=email_mock,
+    ), patch.object(
+        main,
+        "regenerate_identity",
+        new=AsyncMock(),
+    ):
+        response = client.post(
+            "/api/ctexcel-client/customers",
+            headers=AUTH_HEADERS,
+            json={"reuse_pending": True},
+        )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["reused"] is False
+    assert response.json()["customer_id"] != confirmed_id
+    assert response.json()["email"] == "next-registration@example.test"
+
+    pending = client.get(
+        "/api/ctexcel-client/customers/pending",
+        headers=AUTH_HEADERS,
+    ).json()["customers"]
+    confirmed = next(
+        item for item in pending
+        if item["customer_id"] == confirmed_id
+    )
+    assert confirmed["registration_confirmed_at"] == (
+        "2026-07-31T07:05:00Z"
+    )
 
 
 def test_client_verification_endpoint_is_scoped_to_ctexcel(client_api):

@@ -2104,6 +2104,10 @@
               <code id="d-ctexcel-referral-code">—</code>
               <button type="button" class="small blue" onclick="copyElText('d-ctexcel-referral-code', '已复制推荐码')">复制</button>
             </div>
+            <div class="registration-quick-item">
+              <span>注册确认</span>
+              <code id="d-ctexcel-registration-status">待扫描</code>
+            </div>
           </div>
           <div class="code-meta" id="d-ctexcel-meta">点击扫描，或刷新验证码时自动同步。</div>
         </div>
@@ -3473,6 +3477,9 @@ function buildCustomerRow(c, index) {
     if (c.ctexcel_order_number && c.phone_number) {
       syncBadge.className = 'badge badge-activation-done';
       syncBadge.textContent = '✓ 已同步';
+    } else if (c.ctexcel_registration_confirmed_at) {
+      syncBadge.className = 'badge badge-activation-done';
+      syncBadge.textContent = '✓ 注册成功';
     } else if (c.ctexcel_last_checked_at) {
       syncBadge.className = 'badge badge-warning';
       syncBadge.textContent = '待补全';
@@ -3967,9 +3974,15 @@ function renderCTExcelOrderBox(c) {
     ? `£ ${c.ctexcel_transaction_amount}`
     : '—';
   $('d-ctexcel-referral-code').textContent = c.ctexcel_referral_code || '—';
+  $('d-ctexcel-registration-status').textContent =
+    c.ctexcel_registration_confirmed_at
+      ? `已确认 · ${formatShortDate(c.ctexcel_registration_confirmed_at)}`
+      : '待扫描';
   const readable = hasReadableInbox(c);
   $('d-ctexcel-refresh').disabled = !readable;
-  $('d-ctexcel-meta').textContent = c.ctexcel_last_checked_at
+  $('d-ctexcel-meta').textContent = c.ctexcel_registration_confirmed_at
+    ? `已收到“【CTExcel】您的订单已确认！”邮件；该账号不会再次用于注册。`
+    : c.ctexcel_last_checked_at
     ? `最近扫描：${formatShortDate(c.ctexcel_last_checked_at)}`
     : (readable ? '打开详情后会自动扫描；也可以手动刷新。' : '该客户没有可读取的托管邮箱账户。');
 }

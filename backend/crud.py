@@ -375,6 +375,7 @@ async def save_ctexcel_order_info(
     transaction_amount: Optional[str],
     referral_code: Optional[str],
     referral_link: Optional[str],
+    registration_confirmed_at: Optional[str],
     checked_at: str,
 ) -> bool:
     """保存 CTExcel 订单邮件中解析出的资料；空字段保留现有值。"""
@@ -386,6 +387,8 @@ async def save_ctexcel_order_info(
                    ctexcel_transaction_amount = COALESCE(?, ctexcel_transaction_amount),
                    ctexcel_referral_code = COALESCE(?, ctexcel_referral_code),
                    ctexcel_referral_link = COALESCE(?, ctexcel_referral_link),
+                   ctexcel_registration_confirmed_at =
+                       COALESCE(?, ctexcel_registration_confirmed_at),
                    ctexcel_last_checked_at = ?
                WHERE id = ? AND product_type = 'ctexcel'""",
             (
@@ -394,6 +397,7 @@ async def save_ctexcel_order_info(
                 normalize_optional_text(transaction_amount),
                 normalize_optional_text(referral_code),
                 normalize_optional_text(referral_link),
+                normalize_optional_text(registration_confirmed_at),
                 checked_at,
                 customer_id,
             ),

@@ -721,6 +721,18 @@ def _extract_ctexcel_order_info(message: dict) -> dict:
     }
 
 
+def _is_ctexcel_registration_confirmation(message: dict) -> bool:
+    """识别 £1 领卡流程的订单确认主题，避免重复提交同一邮箱。"""
+    subject = html.unescape(
+        _first_text(message, "subject") or ""
+    )
+    normalized = re.sub(r"\s+", "", subject).casefold()
+    return (
+        "ctexcel" in normalized
+        and "您的订单已确认" in normalized
+    )
+
+
 def _merge_default_label_templates(templates: list[dict]) -> list[dict]:
     merged = deepcopy(templates)
     existing_ids = {tpl.get("id") for tpl in merged if isinstance(tpl, dict)}
@@ -1251,6 +1263,9 @@ async def list_customers(search: str = ""):
         ctexcel_referral_code=r.get("ctexcel_referral_code"),
         ctexcel_referral_link=r.get("ctexcel_referral_link"),
         ctexcel_last_checked_at=r.get("ctexcel_last_checked_at"),
+        ctexcel_registration_confirmed_at=r.get(
+            "ctexcel_registration_confirmed_at"
+        ),
         payment_changed_at=r.get("payment_changed_at"),
         payment_updated_at=r.get("payment_updated_at"),
         payment_last_checked_at=r.get("payment_last_checked_at"),
@@ -1299,6 +1314,9 @@ async def get_customer_detail(customer_id: int):
         ctexcel_referral_code=c.get("ctexcel_referral_code"),
         ctexcel_referral_link=c.get("ctexcel_referral_link"),
         ctexcel_last_checked_at=c.get("ctexcel_last_checked_at"),
+        ctexcel_registration_confirmed_at=c.get(
+            "ctexcel_registration_confirmed_at"
+        ),
         payment_changed_at=c.get("payment_changed_at"),
         payment_updated_at=c.get("payment_updated_at"),
         payment_last_checked_at=c.get("payment_last_checked_at"),
@@ -1879,6 +1897,7 @@ async def _list_pending_ctexcel_client_customers(limit: int = 100) -> list[dict]
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall(
             """SELECT id, email, phone_number, ctexcel_order_number,
+                      ctexcel_registration_confirmed_at,
                       ctexcel_last_checked_at, created_at
                FROM customers
                WHERE product_type = 'ctexcel'
@@ -1893,6 +1912,9 @@ async def _list_pending_ctexcel_client_customers(limit: int = 100) -> list[dict]
             "email": row["email"],
             "phone_number": row["phone_number"],
             "order_number": row["ctexcel_order_number"],
+            "registration_confirmed_at": row[
+                "ctexcel_registration_confirmed_at"
+            ],
             "last_checked_at": row["ctexcel_last_checked_at"],
             "created_at": row["created_at"],
         }
@@ -1919,7 +1941,7 @@ async def get_ctexcel_client_status(request: Request, response: Response):
     pending = int(rows[0][1] or 0) if rows else 0
     return {
         "ok": True,
-        "api_version": 5,
+        "api_version": 6,
         "ctexcel_customer_count": total,
         "pending_customer_count": pending,
     }
@@ -1949,10 +1971,17 @@ async def create_ctexcel_client_customer(
     """优先复用中断客户，否则创建 CTExcel 客户和专属托管邮箱。"""
     _require_ctexcel_client(request)
     pending = await _list_pending_ctexcel_client_customers()
+    unfinished_pending = [
+        customer
+        for customer in pending
+        if not normalize_optional_text(
+            customer.get("registration_confirmed_at")
+        )
+    ]
     resumable = next(
         (
             customer
-            for customer in pending
+            for customer in unfinished_pending
             if not normalize_optional_text(customer.get("order_number"))
         ),
         None,
@@ -1967,7 +1996,10 @@ async def create_ctexcel_client_customer(
         }
     if (
         data.reuse_pending
-        and pending
+        and any(
+            normalize_optional_text(customer.get("order_number"))
+            for customer in unfinished_pending
+        )
         and not data.allow_new_after_checkpoint
     ):
         raise HTTPException(
@@ -2118,6 +2150,10 @@ async def _sync_ctexcel_order_info(
             "referral_link": None,
         }
         matched_message: dict = {}
+        confirmation_message: dict = {}
+        registration_confirmed_at = normalize_optional_text(
+            c.get("ctexcel_registration_confirmed_at")
+        )
         checked_count = 0
         detail_miss_count = 0
 
@@ -2125,7 +2161,17 @@ async def _sync_ctexcel_order_info(
             message_id = _message_id(summary)
             detail = {}
             summary_info = _extract_ctexcel_order_info(summary)
-            if message_id and not (summary_info.get("phone_number") and summary_info.get("order_number")):
+            confirmation_detected = (
+                _is_ctexcel_registration_confirmation(summary)
+            )
+            if (
+                message_id
+                and not confirmation_detected
+                and not (
+                    summary_info.get("phone_number")
+                    and summary_info.get("order_number")
+                )
+            ):
                 try:
                     detail = _message_detail_payload(
                         await asyncio.to_thread(
@@ -2140,8 +2186,24 @@ async def _sync_ctexcel_order_info(
                     detail_miss_count += 1
             message = {**summary, **detail}
             checked_count += 1
+            confirmation_detected = (
+                confirmation_detected
+                or _is_ctexcel_registration_confirmation(message)
+            )
+            if confirmation_detected:
+                if not confirmation_message:
+                    confirmation_message = message
+                if not registration_confirmed_at:
+                    registration_confirmed_at = (
+                        _message_received_at(message)
+                        or _message_sent_at(message)
+                        or _utc_now()
+                    )
             parsed = _extract_ctexcel_order_info(message)
-            if any(parsed.values()) and not matched_message:
+            if (
+                (any(parsed.values()) or confirmation_detected)
+                and not matched_message
+            ):
                 matched_message = message
             for key in found:
                 if not found[key] and parsed.get(key):
@@ -2159,6 +2221,7 @@ async def _sync_ctexcel_order_info(
             transaction_amount=found["transaction_amount"],
             referral_code=found["referral_code"],
             referral_link=found["referral_link"],
+            registration_confirmed_at=registration_confirmed_at,
             checked_at=checked_at,
         )
         if not persisted:
@@ -2171,20 +2234,32 @@ async def _sync_ctexcel_order_info(
             "referral_code": found["referral_code"] or c.get("ctexcel_referral_code"),
             "referral_link": found["referral_link"] or c.get("ctexcel_referral_link"),
         }
-        has_core_info = bool(output["phone_number"] or output["order_number"])
+        registration_confirmed = bool(registration_confirmed_at)
+        has_core_info = bool(
+            output["phone_number"]
+            or output["order_number"]
+            or registration_confirmed
+        )
         detail_text = (
             "已从 CTExcel 订单邮件同步手机号码和订单资料"
             if found["phone_number"] and found["order_number"]
             else (
-                "已读取邮件，但只提取到部分 CTExcel 订单资料"
-                if any(found.values())
-                else "没有找到包含 CTExcel 手机号码和订单号的邮件"
+                "已确认该邮箱完成 CTExcel 注册；等待订单号和手机号同步"
+                if registration_confirmed
+                and not (output["phone_number"] or output["order_number"])
+                else (
+                    "已读取邮件，但只提取到部分 CTExcel 订单资料"
+                    if any(found.values())
+                    else "没有找到 CTExcel 订单确认邮件或号码资料"
+                )
             )
         )
         if detail_miss_count:
             detail_text += f"；{detail_miss_count} 封邮件详情已失效"
         return CTExcelOrderInfoOut(
             found=has_core_info,
+            registration_confirmed=registration_confirmed,
+            registration_confirmed_at=registration_confirmed_at,
             **output,
             message_id=_message_id(matched_message) or None,
             subject=_first_text(matched_message, "subject") or None,

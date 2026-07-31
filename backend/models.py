@@ -79,6 +79,7 @@ class CustomerOut(BaseModel):
     ctexcel_referral_code: Optional[str] = None
     ctexcel_referral_link: Optional[str] = None
     ctexcel_last_checked_at: Optional[str] = None
+    ctexcel_registration_confirmed_at: Optional[str] = None
     payment_changed_at: Optional[str] = None
     payment_updated_at: Optional[str] = None
     payment_last_checked_at: Optional[str] = None
@@ -121,6 +122,7 @@ class CustomerDetail(BaseModel):
     ctexcel_referral_code: Optional[str] = None
     ctexcel_referral_link: Optional[str] = None
     ctexcel_last_checked_at: Optional[str] = None
+    ctexcel_registration_confirmed_at: Optional[str] = None
     payment_changed_at: Optional[str] = None
     payment_updated_at: Optional[str] = None
     payment_last_checked_at: Optional[str] = None
@@ -221,6 +223,8 @@ class PaymentInfoEmailOut(BaseModel):
 
 class CTExcelOrderInfoOut(BaseModel):
     found: bool = False
+    registration_confirmed: bool = False
+    registration_confirmed_at: Optional[str] = None
     phone_number: Optional[str] = None
     order_number: Optional[str] = None
     transaction_amount: Optional[str] = None

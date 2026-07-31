@@ -600,14 +600,34 @@ class CTExcelAutomation:
         if not pending:
             self.log("没有无手机号的待完成客户，将新建客户")
             return
-        scan_targets = pending
+        confirmed_pending = [
+            customer
+            for customer in pending
+            if str(
+                customer.get("registration_confirmed_at") or ""
+            ).strip()
+        ]
+        if confirmed_pending:
+            self.log(
+                f"{len(confirmed_pending)} 个账号已有订单确认邮件，"
+                "不会再次提交注册"
+            )
+        scan_targets = [
+            customer
+            for customer in pending
+            if not str(
+                customer.get("registration_confirmed_at") or ""
+            ).strip()
+        ]
         if self.config.continuous_enabled:
             scan_targets = [
                 customer
-                for customer in pending
+                for customer in scan_targets
                 if not str(customer.get("order_number") or "").strip()
             ]
-            paid_pending = len(pending) - len(scan_targets)
+            paid_pending = len(pending) - len(
+                scan_targets
+            ) - len(confirmed_pending)
             if paid_pending:
                 self.log(
                     f"{paid_pending} 个已生成订单的客户由服务器后台同步，"
@@ -620,6 +640,7 @@ class CTExcelAutomation:
             "先扫描订单邮件"
         )
         synced_count = 0
+        confirmed_count = 0
         for customer in scan_targets[:20]:
             self._check_stop()
             customer_id = int(customer.get("customer_id") or 0)
@@ -633,8 +654,19 @@ class CTExcelAutomation:
             if str(result.get("phone_number") or "").strip():
                 synced_count += 1
                 self.log(f"客户 #{customer_id} 已从订单邮件同步手机号")
+            if result.get("registration_confirmed"):
+                confirmed_count += 1
+                self.log(
+                    f"客户 #{customer_id} 已收到“【CTExcel】"
+                    "您的订单已确认！”邮件，标记为注册成功并跳过复用"
+                )
         if synced_count:
             self.log(f"本轮已补全 {synced_count} 个客户的手机号")
+        if confirmed_count:
+            self.log(
+                f"本轮确认 {confirmed_count} 个账号已经注册成功，"
+                "后续申请将使用新客户邮箱"
+            )
 
     def _validate_registration_defaults(self) -> None:
         defaults = self.config.registration

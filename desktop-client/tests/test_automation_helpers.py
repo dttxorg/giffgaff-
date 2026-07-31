@@ -648,3 +648,40 @@ def test_coupon_rejection_is_reported_instead_of_looking_like_missing_input():
         "提示：优惠券不存在或已过期"
     ) == "优惠券不存在或已过期"
     assert coupon_rejection_message("订单金额：£5.95") == ""
+
+
+def test_pending_customer_confirmation_email_prevents_reuse():
+    messages = []
+
+    class FakeApi:
+        def pending_customers(self):
+            return [
+                {
+                    "customer_id": 488,
+                    "email": "confirmed@example.test",
+                    "phone_number": None,
+                    "order_number": None,
+                    "registration_confirmed_at": None,
+                }
+            ]
+
+        def sync_order_info(self, customer_id):
+            assert customer_id == 488
+            return {
+                "found": True,
+                "registration_confirmed": True,
+                "registration_confirmed_at": "2026-07-31T07:05:00Z",
+                "phone_number": None,
+                "order_number": None,
+            }
+
+    automation = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _message: None,
+        customer_created=lambda _payload: None,
+    )
+    automation._refresh_pending_customers(FakeApi())
+
+    assert any("标记为注册成功并跳过复用" in item for item in messages)
+    assert any("后续申请将使用新客户邮箱" in item for item in messages)

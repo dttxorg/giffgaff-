@@ -245,6 +245,64 @@ def test_ctexcel_freecard_order_email_parses_new_order_and_payment_amount():
     assert parsed["phone_number"] == "07942946765"
 
 
+def test_ctexcel_confirmation_subject_marks_registration_success(
+    ctexcel_client,
+):
+    client, db_path = ctexcel_client
+    customer_id = _insert_ctexcel_customer(db_path)
+    provider = MagicMock(name="confirmation-provider")
+    provider.get_email_messages.return_value = {
+        "messages": [
+            {
+                "id": "confirmation-mail",
+                "subject": "【CTExcel】您的订单已确认！",
+                "fromAddress": "service@ctexcel.example",
+                "receivedAt": 1785481500000,
+            }
+        ]
+    }
+    provider.get_message.return_value = {
+        "message": {
+            "text": "感谢您领取中国电信CTExcel英国卡，您的订单已经确认。"
+        }
+    }
+
+    with patch.object(
+        main,
+        "_resolve_inbox_provider",
+        new=AsyncMock(return_value=("mail-account-1", provider)),
+    ):
+        response = client.get(
+            f"/api/customers/{customer_id}/ctexcel-order-info"
+        )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["found"] is True
+    assert data["registration_confirmed"] is True
+    assert data["registration_confirmed_at"]
+    assert data["order_number"] is None
+    assert data["phone_number"] is None
+    assert data["subject"] == "【CTExcel】您的订单已确认！"
+    provider.get_message.assert_not_called()
+    with sqlite3.connect(db_path) as connection:
+        confirmed_at = connection.execute(
+            """SELECT ctexcel_registration_confirmed_at
+               FROM customers WHERE id = ?""",
+            (customer_id,),
+        ).fetchone()[0]
+    assert confirmed_at == data["registration_confirmed_at"]
+
+
+def test_ctexcel_confirmation_subject_match_is_specific():
+    assert main._is_ctexcel_registration_confirmation(
+        {"subject": "【CTExcel】您的订单已确认！"}
+    )
+    assert not main._is_ctexcel_registration_confirmation(
+        {"subject": "【CTExcel】您的邮箱验证码"}
+    )
+
+
 def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     client, db_path = ctexcel_client
     customer_id = _insert_ctexcel_customer(db_path)

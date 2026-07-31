@@ -46,6 +46,7 @@ async def init_db():
                 ctexcel_referral_code TEXT,
                 ctexcel_referral_link TEXT,
                 ctexcel_last_checked_at TEXT,
+                ctexcel_registration_confirmed_at TEXT,
                 activation_error TEXT,
                 activated_at TEXT,
                 automation_lock_owner TEXT,
@@ -82,6 +83,12 @@ async def init_db():
         await _ensure_column(db, "customers", "ctexcel_referral_code", "TEXT")
         await _ensure_column(db, "customers", "ctexcel_referral_link", "TEXT")
         await _ensure_column(db, "customers", "ctexcel_last_checked_at", "TEXT")
+        await _ensure_column(
+            db,
+            "customers",
+            "ctexcel_registration_confirmed_at",
+            "TEXT",
+        )
         await _ensure_column(
             db, "customers", "public_version", "INTEGER NOT NULL DEFAULT 1"
         )
@@ -224,6 +231,7 @@ async def _ensure_nullable_phone_number(db: aiosqlite.Connection):
             ctexcel_referral_code TEXT,
             ctexcel_referral_link TEXT,
             ctexcel_last_checked_at TEXT,
+            ctexcel_registration_confirmed_at TEXT,
             activation_error TEXT,
             activated_at TEXT,
             automation_lock_owner TEXT,
