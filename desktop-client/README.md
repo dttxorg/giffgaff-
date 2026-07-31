@@ -158,8 +158,8 @@ GitHub Actions 的 `windows-client.yml` 也会生成同名构建产物。
 https://share.proxy.qg.net/get?num=1&distinct=true
 ```
 
-在界面中单独填写产品 `key`；Windows 会用 DPAPI 加密保存，日志与接口错误中
-均不会输出该值。地区、排除地区和运营商筛选可继续追加到提取接口 URL，例如：
+界面只有一个“完整提取链接”输入框，直接粘贴服务商控制台生成的整条 URL，
+其中可以包含 `key`、地区、运营商和输出格式等全部参数。例如：
 
 ```text
 https://share.proxy.qg.net/get?area=350500,330700&area_ex=440100&isp=1&num=1&distinct=true
@@ -172,8 +172,9 @@ https://share.proxy.qg.net/get?num=1&area=360000&isp=0&format=txt&seq=\r\n&disti
 ```
 
 `format=txt` 响应按首行 `HOST:PORT` 解析；默认 JSON 响应仍按
-`data[0].server` 解析。链接中的 `key` 会在保存配置时自动拆出并加密，URL
-本身不会保留 Key 明文。
+`data[0].server` 解析。保存时客户端会在内部把完整链接中的 `key` 拆出并用
+Windows DPAPI 加密；再次打开设置时会自动还原成一条完整链接，不需要第二个
+Key 输入框。
 
 客户端从响应 `data[0].server` 读取实际代理入口，不会把 `proxy_ip` 当作连接
 地址。`code` 非 `SUCCESS` 时会显示对应错误说明和 `request_id`，便于定位
