@@ -55,6 +55,68 @@ LogCallback = Callable[[str], None]
 StageCallback = Callable[[str], None]
 CustomerCallback = Callable[[dict[str, Any]], None]
 
+STALE_BROWSER_PROFILE_SECONDS = 24 * 60 * 60
+PURCHASE_LIMIT_MARKERS = (
+    "purchase limit",
+    "purchase_limit",
+    "buy limit",
+    "购买上限",
+    "购买限制",
+    "购买次数",
+    "超出限额",
+    "达到上限",
+)
+
+
+def cleanup_stale_browser_profiles(
+    profile_root: Path,
+    *,
+    now: Optional[float] = None,
+    stale_after_seconds: int = STALE_BROWSER_PROFILE_SECONDS,
+) -> int:
+    """Remove abandoned per-order profiles without touching active runs."""
+    current_time = time.time() if now is None else float(now)
+    removed = 0
+    for candidate in profile_root.glob("order-*"):
+        try:
+            if not candidate.is_dir():
+                continue
+            age = current_time - candidate.stat().st_mtime
+            if age < max(60, int(stale_after_seconds)):
+                continue
+            shutil.rmtree(candidate)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def remove_browser_profile(profile_dir: Path) -> bool:
+    """Retry removal because Chrome may release Windows files slightly late."""
+    for attempt in range(4):
+        try:
+            shutil.rmtree(profile_dir)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if attempt >= 3:
+                return False
+            time.sleep(0.25 * (attempt + 1))
+    return False
+
+
+def diagnostic_response_excerpt(text: str, *, limit: int = 1600) -> str:
+    """Compact response bodies and redact common credential-shaped fields."""
+    compact = " ".join(str(text or "").split())
+    compact = re.sub(
+        r"(?i)(auth(?:key|pwd)|password|token|authorization)"
+        r"([\s\"'=:\\]+)([^\s,;\"'}]+)",
+        r"\1\2<redacted>",
+        compact,
+    )
+    return compact[: max(100, int(limit))]
+
 ORDER_PATTERN = re.compile(
     r"\b(?:ORDER\d{12,}|ORDERSUK\d{12,})\b",
     re.I,
@@ -594,6 +656,9 @@ class CTExcelAutomation:
         with sync_playwright() as playwright:
             profile_root = Path(app_config_dir()) / "browser-runs"
             profile_root.mkdir(parents=True, exist_ok=True)
+            stale_count = cleanup_stale_browser_profiles(profile_root)
+            if stale_count:
+                self.log(f"已清理 {stale_count} 个异常中断遗留的浏览器目录")
             self.profile_dir = Path(
                 tempfile.mkdtemp(
                     prefix="order-",
@@ -629,6 +694,8 @@ class CTExcelAutomation:
                 str(self.profile_dir),
                 **launch_options,
             )
+            with contextlib.suppress(Exception):
+                self.context.clear_cookies()
             self.context.add_init_script(
                 """
                 Object.defineProperty(
@@ -646,6 +713,18 @@ class CTExcelAutomation:
             page: Optional[Page] = None
             try:
                 page = self.context.pages[0] if self.context.pages else self.context.new_page()
+                with contextlib.suppress(Exception):
+                    page.evaluate(
+                        """() => {
+                          localStorage.clear();
+                          sessionStorage.clear();
+                          if ('caches' in window) {
+                            caches.keys().then(keys =>
+                              Promise.all(keys.map(key => caches.delete(key)))
+                            );
+                          }
+                        }"""
+                    )
                 self._attach_page_diagnostics(page)
                 page.set_default_timeout(max(1000, int(self.config.step_timeout_ms)))
                 page.set_default_navigation_timeout(
@@ -717,8 +796,10 @@ class CTExcelAutomation:
                     self.context.close()
                 self.context = None
                 if self.profile_dir:
-                    with contextlib.suppress(Exception):
-                        shutil.rmtree(self.profile_dir)
+                    if not remove_browser_profile(self.profile_dir):
+                        self.log(
+                            "浏览器目录仍被系统占用；下次启动会自动清理"
+                        )
                 self.profile_dir = None
 
     def _record_network_event(self, message: str) -> None:
@@ -752,11 +833,19 @@ class CTExcelAutomation:
                 if response is None:
                     return
                 status = int(response.status)
-                if status >= 400:
+                body = ""
+                with contextlib.suppress(Exception):
+                    body = diagnostic_response_excerpt(response.text())
+                has_limit_marker = any(
+                    marker in body.lower()
+                    for marker in PURCHASE_LIMIT_MARKERS
+                )
+                if status >= 400 or has_limit_marker:
+                    suffix = f" · BODY {body}" if body else ""
                     self._record_network_event(
                         f"HTTP {status} "
                         f"{getattr(request, 'method', 'GET')} "
-                        f"{parsed.path}"
+                        f"{parsed.path}{suffix}"
                     )
 
         def on_page_error(error: Any) -> None:

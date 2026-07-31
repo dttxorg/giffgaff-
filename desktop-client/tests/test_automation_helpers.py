@@ -1,6 +1,7 @@
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -17,7 +18,9 @@ from ctexcel_client.automation import (
     application_target,
     registration_values_for_ordinal,
     assess_verification_freshness,
+    cleanup_stale_browser_profiles,
     coupon_rejection_message,
+    diagnostic_response_excerpt,
     normalize_money,
     parse_message_timestamp,
     is_payment_success_url,
@@ -115,9 +118,85 @@ def test_browser_profile_is_isolated_and_automation_banner_is_removed():
     assert '"--no-sandbox"' in source
     assert "--disable-blink-features=AutomationControlled" in source
     assert "Navigator.prototype" in source
-    assert "shutil.rmtree(self.profile_dir)" in source
+    assert "cleanup_stale_browser_profiles(profile_root)" in source
+    assert "remove_browser_profile(self.profile_dir)" in source
+    assert "self.context.clear_cookies()" in source
+    assert "localStorage.clear()" in source
     assert "requestfinished" in source
+    assert "response.text()" in source
+    assert "PURCHASE_LIMIT_MARKERS" in source
     assert "error-{stamp}-network.txt" in source
+
+
+def test_stale_browser_profile_cleanup_preserves_recent_runs(tmp_path: Path):
+    old_profile = tmp_path / "order-old"
+    recent_profile = tmp_path / "order-recent"
+    unrelated = tmp_path / "manual-profile"
+    old_profile.mkdir()
+    recent_profile.mkdir()
+    unrelated.mkdir()
+    now = 1_800_000_000.0
+    os.utime(old_profile, (now - 90_000, now - 90_000))
+    os.utime(recent_profile, (now - 60, now - 60))
+    os.utime(unrelated, (now - 90_000, now - 90_000))
+
+    removed = cleanup_stale_browser_profiles(tmp_path, now=now)
+
+    assert removed == 1
+    assert not old_profile.exists()
+    assert recent_profile.exists()
+    assert unrelated.exists()
+
+
+def test_diagnostic_response_excerpt_redacts_credentials():
+    excerpt = diagnostic_response_excerpt(
+        '{"purchase_limit":true,"AuthPwd":"secret-value",'
+        '"message":"购买上限"}'
+    )
+
+    assert "purchase_limit" in excerpt
+    assert "购买上限" in excerpt
+    assert "secret-value" not in excerpt
+    assert "<redacted>" in excerpt
+
+
+def test_network_diagnostics_capture_purchase_limit_response_body():
+    callbacks = {}
+
+    class FakePage:
+        def on(self, name, callback):
+            callbacks[name] = callback
+
+    class FakeResponse:
+        status = 200
+
+        def text(self):
+            return (
+                '{"message":"购买上限","AuthKey":"private-key"}'
+            )
+
+    class FakeRequest:
+        url = "https://www.ctexcel.com/api/order/submit"
+        method = "POST"
+        failure = ""
+
+        def response(self):
+            return FakeResponse()
+
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    runner._attach_page_diagnostics(FakePage())
+    callbacks["requestfinished"](FakeRequest())
+
+    assert len(runner.network_events) == 1
+    assert "HTTP 200 POST /api/order/submit" in runner.network_events[0]
+    assert "购买上限" in runner.network_events[0]
+    assert "private-key" not in runner.network_events[0]
+    assert "<redacted>" in runner.network_events[0]
 
 
 def test_application_flow_has_no_phone_capture_or_gate():

@@ -38,7 +38,7 @@ class TelegramNotifier:
             timeout=timeout,
             transport=transport,
             proxy=proxy_url,
-            headers={"User-Agent": "CTExcelApplyClient/2.4.5"},
+            headers={"User-Agent": "CTExcelApplyClient/2.5.0"},
         )
 
     @staticmethod
