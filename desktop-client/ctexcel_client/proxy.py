@@ -107,7 +107,7 @@ def detect_public_ip(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.4.1",
+                "User-Agent": "CTExcelApplyClient/2.4.2",
             },
         ) as client:
             for endpoint in PUBLIC_IP_ENDPOINTS:
@@ -342,7 +342,7 @@ def fetch_proxy_from_api(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.4.1",
+                "User-Agent": "CTExcelApplyClient/2.4.2",
             },
         ) as client:
             response = client.get(url)
@@ -762,9 +762,11 @@ def prepare_proxy(
     resolved_proxy: Optional[dict[str, str]] = None,
 ) -> PreparedProxy:
     """提取、检测公网 IP，并在创建客户前验证代理。"""
+    api_mode = config.mode.strip().lower() == "api"
+    qg_api = api_mode and is_qg_proxy_api_url(config.api_url)
     public_ip = ""
     public_ip_error = ""
-    if config.mode.strip().lower() == "api":
+    if api_mode and not qg_api:
         try:
             public_ip = detect_public_ip()
         except ProxyError as exc:
@@ -780,7 +782,16 @@ def prepare_proxy(
             probe_proxy_endpoint(playwright_proxy)
     except ProxyError as exc:
         details = [str(exc)]
-        if config.mode.strip().lower() == "api":
+        if qg_api:
+            details.extend(
+                [
+                    "",
+                    "该完整提取链接不使用客户端公网 IP 白名单。",
+                    "请确认代理协议与所购产品一致、节点仍在有效期内，"
+                    "然后重新提取测试。",
+                ]
+            )
+        elif api_mode:
             details.extend(
                 [
                     "",
