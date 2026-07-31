@@ -107,9 +107,9 @@ Cloudflare 重试，也会取得该线程原来的客户，不会把多个线程
 3. 附带线程号、客户编号、专属邮箱、订单号和付款金额。
 4. 继续保留浏览器并等待人工付款，Telegram 推送异常不影响订单流程。
 
-配置浏览器代理时，Telegram 推送复用该线程的 HTTP / SOCKS5 代理。Bot Token
-与客户端连接口令一样使用 Windows DPAPI 加密保存，仓库和配置文件中不出现
-Token 明文。
+Telegram Bot 始终使用本机直连，并关闭 `HTTP_PROXY` / `HTTPS_PROXY` 等系统
+代理环境继承；青果代理只作用于 CTExcel 注册浏览器。Bot Token 与客户端连接
+口令一样使用 Windows DPAPI 加密保存，仓库和配置文件中不出现 Token 明文。
 
 ## 开发运行
 

@@ -995,15 +995,10 @@ class MainWindow(QMainWindow):
             chat_id=self.telegram_chat_id.text().strip(),
         )
         self.telegram_test_btn.setEnabled(False)
-        self.telegram_status.setText("正在发送 Telegram 测试消息……")
-        proxy_config = self.collect_config().proxy
+        self.telegram_status.setText("正在通过直连发送 Telegram 测试消息……")
 
         def run_test() -> dict:
-            prepared = prepare_proxy(proxy_config)
-            with TelegramNotifier(
-                config,
-                proxy=prepared.playwright_proxy,
-            ) as notifier:
+            with TelegramNotifier(config) as notifier:
                 return notifier.send_test()
 
         self.telegram_worker = ApiWorker(run_test)

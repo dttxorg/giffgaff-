@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
@@ -28,45 +27,15 @@ class TelegramNotifier:
         *,
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
-        proxy: dict[str, str] | None = None,
     ):
         validate_telegram_config(config)
         self.token = config.bot_token.strip()
         self.chat_id = config.chat_id.strip()
-        proxy_url = self._proxy_url(proxy)
         self.client = httpx.Client(
             timeout=timeout,
             transport=transport,
-            proxy=proxy_url,
-            headers={"User-Agent": "CTExcelApplyClient/2.5.2"},
-        )
-
-    @staticmethod
-    def _proxy_url(proxy: dict[str, str] | None) -> str | None:
-        if not proxy:
-            return None
-        server = str(proxy.get("server") or "").strip()
-        if not server:
-            return None
-        username = str(proxy.get("username") or "")
-        password = str(proxy.get("password") or "")
-        if not username:
-            return server
-        parsed = urlsplit(server)
-        host = parsed.hostname or ""
-        if parsed.port:
-            host += f":{parsed.port}"
-        auth = quote(username, safe="")
-        if password:
-            auth += ":" + quote(password, safe="")
-        return urlunsplit(
-            (
-                parsed.scheme,
-                f"{auth}@{host}",
-                parsed.path,
-                parsed.query,
-                parsed.fragment,
-            )
+            trust_env=False,
+            headers={"User-Agent": "CTExcelApplyClient/2.5.3"},
         )
 
     def close(self) -> None:

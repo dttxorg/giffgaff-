@@ -475,20 +475,20 @@ class CTExcelAutomation:
         self._validate_registration_defaults()
         self.stage("准备浏览器代理")
         route = BrowserProxyRoute(proxy=None)
-        notification_proxy: Optional[dict[str, str]] = None
+        browser_upstream_proxy: Optional[dict[str, str]] = None
         try:
             prepared_proxy = prepare_proxy(
                 self.config.proxy,
                 resolved_proxy=self.proxy_override,
             )
-            notification_proxy = prepared_proxy.playwright_proxy
+            browser_upstream_proxy = prepared_proxy.playwright_proxy
             if prepared_proxy.public_ip:
                 self.log(
                     f"当前出口公网 IP：{prepared_proxy.public_ip}"
                 )
             elif prepared_proxy.public_ip_error:
                 self.log(prepared_proxy.public_ip_error)
-            if notification_proxy:
+            if browser_upstream_proxy:
                 source = {
                     "api": "动态提取",
                     "tunnel": "青果隧道",
@@ -496,9 +496,9 @@ class CTExcelAutomation:
                 }.get(self.config.proxy.mode, "固定配置")
                 self.log(
                     f"{source}代理已就绪："
-                    f"{masked_proxy_label(notification_proxy)}"
+                    f"{masked_proxy_label(browser_upstream_proxy)}"
                 )
-                route = browser_compatible_proxy(notification_proxy)
+                route = browser_compatible_proxy(browser_upstream_proxy)
                 if route.bridge:
                     probe_proxy_endpoint(route.proxy or {})
                     self.log(
@@ -556,7 +556,6 @@ class CTExcelAutomation:
                     customer_id,
                     email,
                     browser_proxy=route.proxy,
-                    notification_proxy=notification_proxy,
                 )
         finally:
             route.close()
@@ -672,7 +671,6 @@ class CTExcelAutomation:
         email: str,
         *,
         browser_proxy: Optional[dict[str, str]],
-        notification_proxy: Optional[dict[str, str]],
     ) -> AutomationResult:
         self.stage("启动浏览器")
         with sync_playwright() as playwright:
@@ -788,7 +786,6 @@ class CTExcelAutomation:
                     customer_id=customer_id,
                     email=email,
                     pending_order=pending,
-                    browser_proxy=notification_proxy,
                 )
                 result = self._wait_for_payment_success(
                     page,
@@ -1797,7 +1794,6 @@ class CTExcelAutomation:
         customer_id: int,
         email: str,
         pending_order: dict[str, str],
-        browser_proxy: Optional[dict[str, str]],
     ) -> None:
         if not self.config.telegram.enabled:
             return
@@ -1816,16 +1812,14 @@ class CTExcelAutomation:
                 f"订单：{order_number}\n"
                 f"金额：£{amount}"
             )
-            with TelegramNotifier(
-                self.config.telegram,
-                proxy=browser_proxy,
-            ) as notifier:
+            with TelegramNotifier(self.config.telegram) as notifier:
                 notifier.send_payment_qr(
                     image,
                     caption=caption,
                 )
             self.log(
-                f"微信付款二维码已发送到 Telegram：{order_number}"
+                "微信付款二维码已通过直连发送到 Telegram："
+                f"{order_number}"
             )
         except TelegramError as exc:
             self.log(f"Telegram 二维码推送失败：{exc}")

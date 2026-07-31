@@ -82,14 +82,26 @@ def test_telegram_config_validation_rejects_incomplete_values():
         )
 
 
-def test_telegram_proxy_reuses_browser_proxy_credentials():
-    assert TelegramNotifier._proxy_url(
-        {
-            "server": "socks5://proxy.example.test:1080",
-            "username": "user name",
-            "password": "p@ss:word",
-        }
-    ) == (
-        "socks5://user%20name:p%40ss%3Aword"
-        "@proxy.example.test:1080"
+def test_telegram_notifier_forces_direct_network(monkeypatch):
+    captured = {}
+
+    class DummyClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("ctexcel_client.telegram.httpx.Client", DummyClient)
+
+    notifier = TelegramNotifier(
+        TelegramConfig(
+            enabled=True,
+            bot_token=TOKEN,
+            chat_id="-1001234567890",
+        )
     )
+    notifier.close()
+
+    assert captured["trust_env"] is False
+    assert "proxy" not in captured
