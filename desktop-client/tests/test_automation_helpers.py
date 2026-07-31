@@ -72,6 +72,68 @@ def test_both_purchase_routes_recognize_their_success_page():
     )
 
 
+def test_success_page_ignores_loading_overlay_and_saves_phone():
+    class FakeBody:
+        def inner_text(self):
+            return """
+            订购成功
+            订单号码：ORDERSUK2026073106180627794025
+            手机号码：447434000172
+            手机号码金额：£ 0.00
+            """
+
+    class FakePage:
+        url = "https://www.ctexcel.com/freecard/activityPageSuccess"
+
+        def wait_for_function(self, script, timeout):
+            assert "phone" in script
+            assert timeout == 120000
+
+        def locator(self, selector):
+            assert selector == "body"
+            return FakeBody()
+
+    class FakeApi:
+        def __init__(self):
+            self.saved = None
+
+        def save_payment_checkpoint(self, customer_id, **fields):
+            self.saved = (customer_id, fields)
+            return {"ok": True}
+
+    messages = []
+    api = FakeApi()
+    automation = CTExcelAutomation(
+        AppConfig(),
+        log=messages.append,
+        stage=lambda _message: None,
+        customer_created=lambda _payload: None,
+    )
+
+    result = automation._wait_for_payment_success(
+        FakePage(),
+        api=api,
+        customer_id=480,
+        email="customer@example.test",
+        pending_order={
+            "order_number": "ORDERSUK2026073106180627794025",
+            "transaction_amount": "1.00",
+        },
+    )
+
+    assert result.phone_number == "447434000172"
+    assert result.transaction_amount == "1.00"
+    assert api.saved == (
+        480,
+        {
+            "order_number": "ORDERSUK2026073106180627794025",
+            "transaction_amount": "1.00",
+            "phone_number": "447434000172",
+        },
+    )
+    assert any("忽略该页面持续显示的 Loading 遮罩" in item for item in messages)
+
+
 def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     source = (
         Path(__file__).resolve().parents[1]

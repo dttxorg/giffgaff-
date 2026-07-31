@@ -407,17 +407,20 @@ async def save_ctexcel_payment_checkpoint(
     *,
     order_number: Optional[str],
     transaction_amount: str,
+    phone_number: Optional[str] = None,
 ) -> bool:
-    """保存桌面客户端已生成的支付订单号和应付英镑金额。"""
+    """保存支付页订单资料；成功页可同时补全手机号码。"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
             """UPDATE customers
                SET ctexcel_order_number = COALESCE(?, ctexcel_order_number),
-                   ctexcel_transaction_amount = ?
+                   ctexcel_transaction_amount = ?,
+                   phone_number = COALESCE(?, phone_number)
                WHERE id = ? AND product_type = 'ctexcel'""",
             (
                 normalize_optional_text(order_number),
                 normalize_optional_text(transaction_amount),
+                normalize_optional_text(phone_number),
                 customer_id,
             ),
         )

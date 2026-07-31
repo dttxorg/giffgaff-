@@ -1919,7 +1919,7 @@ async def get_ctexcel_client_status(request: Request, response: Response):
     pending = int(rows[0][1] or 0) if rows else 0
     return {
         "ok": True,
-        "api_version": 4,
+        "api_version": 5,
         "ctexcel_customer_count": total,
         "pending_customer_count": pending,
     }
@@ -2041,11 +2041,20 @@ async def save_ctexcel_client_payment_checkpoint(
         order_number = order_number.upper()
         if not re.fullmatch(r"[A-Z0-9-]{8,80}", order_number):
             raise HTTPException(status_code=400, detail="CTExcel 订单号格式错误")
+    phone_number = normalize_optional_text(data.phone_number)
+    if phone_number:
+        phone_number = re.sub(r"[\s()-]+", "", phone_number)
+        if not re.fullmatch(r"(?:\+?44|0)7\d{9}", phone_number):
+            raise HTTPException(
+                status_code=400,
+                detail="CTExcel 手机号码格式错误",
+            )
     normalized_amount = f"{amount:.2f}"
     saved = await save_ctexcel_payment_checkpoint(
         customer_id,
         order_number=order_number,
         transaction_amount=normalized_amount,
+        phone_number=phone_number,
     )
     if not saved:
         raise HTTPException(status_code=404, detail="CTExcel 客户不存在")
@@ -2054,6 +2063,7 @@ async def save_ctexcel_client_payment_checkpoint(
         "customer_id": customer_id,
         "order_number": order_number or customer.get("ctexcel_order_number"),
         "transaction_amount": normalized_amount,
+        "phone_number": phone_number or customer.get("phone_number"),
     }
 
 

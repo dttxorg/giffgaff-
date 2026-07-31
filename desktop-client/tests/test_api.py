@@ -19,7 +19,7 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
                 200,
                 json={
                     "ok": True,
-                    "api_version": 4,
+                    "api_version": 5,
                     "ctexcel_customer_count": 3,
                     "pending_customer_count": 1,
                 },

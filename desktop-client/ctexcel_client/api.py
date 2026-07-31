@@ -23,7 +23,7 @@ class AdminApi:
         self.server_url = server_url.strip().rstrip("/")
         self.app_password = app_password.strip()
         headers = {
-            "User-Agent": "CTExcelApplyClient/2.2.1",
+            "User-Agent": "CTExcelApplyClient/2.2.2",
             "Accept": "application/json",
         }
         if self.app_password:
@@ -161,17 +161,21 @@ class AdminApi:
         *,
         order_number: str,
         transaction_amount: str,
+        phone_number: str = "",
     ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "order_number": str(order_number or "").strip() or None,
+            "transaction_amount": str(transaction_amount or "").strip(),
+        }
+        if str(phone_number or "").strip():
+            body["phone_number"] = str(phone_number).strip()
         data = self._request(
             "POST",
             (
                 "/api/ctexcel-client/customers/"
                 f"{int(customer_id)}/payment-checkpoint"
             ),
-            json_body={
-                "order_number": str(order_number or "").strip() or None,
-                "transaction_amount": str(transaction_amount or "").strip(),
-            },
+            json_body=body,
         )
         if not isinstance(data, dict) or not data.get("ok"):
             raise ApiError("CTExcel 付款金额回写接口返回格式错误")

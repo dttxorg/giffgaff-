@@ -477,7 +477,7 @@ class MainWindow(QMainWindow):
         steps.setSpacing(8)
         steps.addWidget(self._step("01", "服务器建档", "生成客户与专属邮箱"))
         steps.addWidget(self._step("02", "自动填写", "套餐、验证码与地址"))
-        steps.addWidget(self._step("03", "邮件归档", "同步订单号与手机号"))
+        steps.addWidget(self._step("03", "成功页回填", "保存订单号与手机号"))
         layout.addLayout(steps)
 
         batch_panel = QFrame()
@@ -568,7 +568,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(customer_panel)
 
         note = QLabel(
-            "支付成功即完成客户端流程。订单号、手机号、金额和推荐信息由服务器后台从专属邮箱自动写入。"
+            "支付成功页会直接回写订单号、手机号和金额；"
+            "推荐信息由服务器后台从专属邮箱继续补全。"
         )
         note.setObjectName("inlineNote")
         note.setWordWrap(True)

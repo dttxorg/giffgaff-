@@ -445,6 +445,7 @@ class CTExcelAutomation:
                 )
                 result = self._wait_for_payment_success(
                     page,
+                    api=api,
                     customer_id=customer_id,
                     email=email,
                     pending_order=pending,
@@ -474,9 +475,10 @@ class CTExcelAutomation:
                             or result.transaction_amount
                         )
                 self.log(
-                    "支付成功；客户管理后台将根据专属邮箱自动同步订单号和手机号码"
+                    "支付成功；成功页手机号码已写入客户管理，"
+                    "服务器后台将继续同步邮件中的补充资料"
                 )
-                page.wait_for_timeout(5000)
+                self._wait_interruptibly(2)
                 return result
             except Exception as exc:
                 if page is not None:
@@ -1224,6 +1226,7 @@ class CTExcelAutomation:
         self,
         page: Page,
         *,
+        api: AdminApi,
         customer_id: int,
         email: str,
         pending_order: dict[str, str],
@@ -1235,12 +1238,17 @@ class CTExcelAutomation:
         while time.monotonic() < deadline:
             self._check_stop()
             if is_payment_success_url(page.url):
-                self._wait_for_page_ready(page, "支付成功页")
+                self.log(
+                    "已进入支付成功页，直接读取订单正文；"
+                    "忽略该页面持续显示的 Loading 遮罩"
+                )
                 page.wait_for_function(
                     """() => {
                       const text = document.body?.innerText || '';
-                      return text.includes('订购成功')
+                      const success = text.includes('订购成功')
                         || text.includes('支付成功');
+                      const phone = /(?:\\+?44|0)7\\d{9}/.test(text);
+                      return success && phone;
                     }""",
                     timeout=self.config.page_timeout_ms,
                 )
@@ -1249,15 +1257,32 @@ class CTExcelAutomation:
                     parsed["order_number"]
                     or pending_order.get("order_number", "")
                 )
+                phone_number = parsed["phone_number"]
+                if not phone_number:
+                    raise AutomationError(
+                        "支付成功页没有识别到 CTExcel 手机号码"
+                    )
+                transaction_amount = (
+                    parsed["transaction_amount"]
+                    or pending_order.get("transaction_amount", "")
+                )
+                api.save_payment_checkpoint(
+                    customer_id,
+                    order_number=order_number,
+                    transaction_amount=transaction_amount,
+                    phone_number=phone_number,
+                )
+                self.log(
+                    "成功页资料已写入客户管理："
+                    f"{order_number} / {phone_number} / "
+                    f"£{transaction_amount}"
+                )
                 return AutomationResult(
                     customer_id=customer_id,
                     email=email,
                     order_number=order_number,
-                    phone_number=parsed["phone_number"],
-                    transaction_amount=(
-                        parsed["transaction_amount"]
-                        or pending_order.get("transaction_amount", "")
-                    ),
+                    phone_number=phone_number,
+                    transaction_amount=transaction_amount,
                 )
             page.wait_for_timeout(1000)
         raise AutomationError("等待人工支付完成超时，可在客户端重新载入该客户继续")
