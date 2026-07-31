@@ -211,35 +211,16 @@ def test_authenticated_socks_bridge_is_preflighted_before_customer_creation(
     assert events == ["bridge-probe", "closed"]
 
 
-def test_browser_proxy_exit_ip_is_read_from_the_real_page():
-    class FakeBody:
-        def inner_text(self, timeout):
-            assert timeout == 5000
-            return "fl=123\nip=8.8.4.4\nloc=GB"
+def test_browser_launch_skips_external_ip_detection():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ctexcel_client"
+        / "automation.py"
+    ).read_text(encoding="utf-8")
 
-    class FakePage:
-        def __init__(self):
-            self.urls = []
-
-        def goto(self, url, *, wait_until, timeout):
-            self.urls.append(url)
-            assert wait_until == "domcontentloaded"
-            assert timeout == 20000
-
-        def locator(self, selector):
-            assert selector == "body"
-            return FakeBody()
-
-    runner = CTExcelAutomation(
-        AppConfig(),
-        log=lambda _message: None,
-        stage=lambda _stage: None,
-        customer_created=lambda _payload: None,
-    )
-    page = FakePage()
-
-    assert runner._detect_browser_proxy_exit_ip(page) == "8.8.4.4"
-    assert page.urls == ["https://1.1.1.1/cdn-cgi/trace"]
+    assert "api.ipify.org" not in source
+    assert "1.1.1.1/cdn-cgi/trace" not in source
+    assert "跳过第三方 IP 检测并直接进入注册" in source
 
 
 def test_stopping_a_worker_releases_the_initial_browser_barrier():

@@ -10,7 +10,6 @@ from concurrent.futures import (
     wait,
 )
 import contextlib
-import ipaddress
 from pathlib import Path
 import re
 import shutil
@@ -657,14 +656,10 @@ class CTExcelAutomation:
                     max(5000, int(self.config.page_timeout_ms))
                 )
                 if browser_proxy:
-                    exit_ip = self._detect_browser_proxy_exit_ip(page)
-                    if exit_ip:
-                        self.log(f"浏览器实际代理出口 IP：{exit_ip}")
-                    else:
-                        self.log(
-                            "浏览器代理已通过 CTExcel 端口预检；"
-                            "公网 IP 检测站未返回可识别地址"
-                        )
+                    self.log(
+                        "青果代理已通过 CTExcel 端口预检；"
+                        "跳过第三方 IP 检测并直接进入注册"
+                    )
                 if self.browser_start_barrier is not None:
                     self.stage("等待并发窗口就绪")
                     self.log("浏览器已就绪，等待首批并发窗口")
@@ -723,39 +718,6 @@ class CTExcelAutomation:
                     with contextlib.suppress(Exception):
                         shutil.rmtree(self.profile_dir)
                 self.profile_dir = None
-
-    def _detect_browser_proxy_exit_ip(self, page: Page) -> str:
-        """由真实 Chrome/Edge 页面访问 IP 检测站，验证代理已装载。"""
-        endpoints = (
-            "https://1.1.1.1/cdn-cgi/trace",
-            "https://api.ipify.org?format=json",
-        )
-        for endpoint in endpoints:
-            self._check_stop()
-            try:
-                page.goto(
-                    endpoint,
-                    wait_until="domcontentloaded",
-                    timeout=min(20_000, int(self.config.page_timeout_ms)),
-                )
-                text = page.locator("body").inner_text(timeout=5000)
-            except Exception:
-                continue
-            candidates = re.findall(
-                r"(?<![0-9A-Fa-f:.])(?:"
-                r"(?:\d{1,3}\.){3}\d{1,3}"
-                r"|[0-9A-Fa-f:]{3,}"
-                r")(?![0-9A-Fa-f:.])",
-                text or "",
-            )
-            for candidate in candidates:
-                try:
-                    address = ipaddress.ip_address(candidate)
-                except ValueError:
-                    continue
-                if address.is_global:
-                    return str(address)
-        return ""
 
     def _record_network_event(self, message: str) -> None:
         self.network_events.append(message)
