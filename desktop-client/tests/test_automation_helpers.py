@@ -74,7 +74,7 @@ def test_both_purchase_routes_recognize_their_success_page():
 
 def test_success_page_ignores_loading_overlay_and_saves_phone():
     class FakeBody:
-        def inner_text(self):
+        def inner_text(self, **_kwargs):
             return """
             订购成功
             订单号码：ORDERSUK2026073106180627794025
@@ -84,6 +84,9 @@ def test_success_page_ignores_loading_overlay_and_saves_phone():
 
     class FakePage:
         url = "https://www.ctexcel.com/freecard/activityPageSuccess"
+
+        def is_closed(self):
+            return False
 
         def wait_for_function(self, script, timeout):
             assert "phone" in script
@@ -132,6 +135,66 @@ def test_success_page_ignores_loading_overlay_and_saves_phone():
         },
     )
     assert any("忽略该页面持续显示的 Loading 遮罩" in item for item in messages)
+
+
+def test_browser_profile_is_isolated_and_automation_banner_is_removed():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ctexcel_client"
+        / "automation.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'tempfile.mkdtemp(' in source
+    assert '"ignore_default_args": ["--enable-automation"]' in source
+    assert "--disable-blink-features=AutomationControlled" in source
+    assert "Navigator.prototype" in source
+    assert "shutil.rmtree(self.profile_dir)" in source
+    assert "requestfinished" in source
+    assert "error-{stamp}-network.txt" in source
+
+
+def test_success_page_phone_can_be_captured_from_finished_api_response():
+    handlers = {}
+
+    class FakePage:
+        url = "https://www.ctexcel.com/freecard/activityPageSuccess"
+
+        def on(self, name, handler):
+            handlers[name] = handler
+
+    class FakeResponse:
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        def text(self):
+            return (
+                '{"orderNo":"ORDERSUK2026073106180627794025",'
+                '"phoneNumber":"447434000172"}'
+            )
+
+    class FakeRequest:
+        url = "https://www.ctexcel.com/api/freecard/order/detail"
+        method = "POST"
+        resource_type = "xhr"
+
+        def response(self):
+            return FakeResponse()
+
+    automation = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _message: None,
+        customer_created=lambda _payload: None,
+    )
+    automation._attach_page_diagnostics(FakePage())
+
+    handlers["requestfinished"](FakeRequest())
+
+    assert (
+        automation.captured_order_number
+        == "ORDERSUK2026073106180627794025"
+    )
+    assert automation.captured_phone_number == "447434000172"
 
 
 def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():

@@ -6,7 +6,9 @@ from decimal import Decimal, InvalidOperation
 import contextlib
 from pathlib import Path
 import re
+import shutil
 import threading
+import tempfile
 import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
@@ -257,6 +259,10 @@ class CTExcelAutomation:
         self.customer_created = customer_created
         self.stop_event = threading.Event()
         self.context: Optional[BrowserContext] = None
+        self.profile_dir: Optional[Path] = None
+        self.network_events: list[str] = []
+        self.captured_order_number = ""
+        self.captured_phone_number = ""
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -410,10 +416,25 @@ class CTExcelAutomation:
     ) -> AutomationResult:
         self.stage("启动浏览器")
         with sync_playwright() as playwright:
+            profile_root = Path(app_config_dir()) / "browser-runs"
+            profile_root.mkdir(parents=True, exist_ok=True)
+            self.profile_dir = Path(
+                tempfile.mkdtemp(
+                    prefix="order-",
+                    dir=str(profile_root),
+                )
+            )
             launch_options: dict[str, Any] = {
                 "headless": bool(self.config.headless),
                 # 该流程用于逐单人工支付；保留可观察的操作节奏，避免连续快速点击。
                 "slow_mo": max(800, int(self.config.slow_mo_ms)),
+                # 去掉 Chrome 的自动测试横幅和最明显的 webdriver 标记。
+                "ignore_default_args": ["--enable-automation"],
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
             }
             channel = (self.config.browser_channel or "").strip().lower()
             if channel and channel != "chromium":
@@ -421,12 +442,26 @@ class CTExcelAutomation:
             if browser_proxy:
                 launch_options["proxy"] = browser_proxy
             self.context = playwright.chromium.launch_persistent_context(
-                self.config.user_data_dir,
+                str(self.profile_dir),
                 **launch_options,
+            )
+            self.context.add_init_script(
+                """
+                Object.defineProperty(
+                  Navigator.prototype,
+                  'webdriver',
+                  {get: () => undefined, configurable: true}
+                );
+                """
+            )
+            self.log(
+                "已启用浏览器兼容模式：每单使用独立临时配置，"
+                "并移除 Chrome/Edge 的自动测试标记"
             )
             page: Optional[Page] = None
             try:
                 page = self.context.pages[0] if self.context.pages else self.context.new_page()
+                self._attach_page_diagnostics(page)
                 page.set_default_timeout(max(1000, int(self.config.step_timeout_ms)))
                 page.set_default_navigation_timeout(
                     max(5000, int(self.config.page_timeout_ms))
@@ -488,6 +523,87 @@ class CTExcelAutomation:
                 with contextlib.suppress(Exception):
                     self.context.close()
                 self.context = None
+                if self.profile_dir:
+                    with contextlib.suppress(Exception):
+                        shutil.rmtree(self.profile_dir)
+                self.profile_dir = None
+
+    def _record_network_event(self, message: str) -> None:
+        self.network_events.append(message)
+        if len(self.network_events) > 200:
+            del self.network_events[:-200]
+
+    def _attach_page_diagnostics(self, page: Page) -> None:
+        self.network_events = []
+        self.captured_order_number = ""
+        self.captured_phone_number = ""
+
+        def on_request_failed(request: Any) -> None:
+            parsed = urlsplit(str(getattr(request, "url", "") or ""))
+            if not (parsed.hostname or "").lower().endswith(
+                "ctexcel.com"
+            ):
+                return
+            failure = str(getattr(request, "failure", "") or "unknown")
+            self._record_network_event(
+                f"FAILED {getattr(request, 'method', 'GET')} "
+                f"{parsed.path} · {failure}"
+            )
+
+        def on_request_finished(request: Any) -> None:
+            parsed = urlsplit(str(getattr(request, "url", "") or ""))
+            if not (parsed.hostname or "").lower().endswith(
+                "ctexcel.com"
+            ):
+                return
+            with contextlib.suppress(Exception):
+                response = request.response()
+                if response is None:
+                    return
+                status = int(response.status)
+                resource_type = str(
+                    getattr(request, "resource_type", "") or ""
+                )
+                if status >= 400:
+                    self._record_network_event(
+                        f"HTTP {status} "
+                        f"{getattr(request, 'method', 'GET')} "
+                        f"{parsed.path}"
+                    )
+                if not is_payment_success_url(page.url):
+                    return
+                if resource_type not in {"xhr", "fetch"}:
+                    return
+                content_type = str(
+                    response.headers.get("content-type", "")
+                ).lower()
+                if not any(
+                    marker in content_type
+                    for marker in ("json", "text", "javascript")
+                ):
+                    return
+                body = response.text()
+                order = ORDER_PATTERN.search(body)
+                phone = PHONE_PATTERN.search(body)
+                if order:
+                    self.captured_order_number = order.group(0).upper()
+                if phone:
+                    self.captured_phone_number = phone.group(0)
+                if order or phone:
+                    self._record_network_event(
+                        f"CAPTURED {status} {parsed.path} · "
+                        f"order={'yes' if order else 'no'} · "
+                        f"phone={'yes' if phone else 'no'}"
+                    )
+
+        def on_page_error(error: Any) -> None:
+            self._record_network_event(
+                "PAGE_ERROR " + str(error).replace("\n", " ")[:500]
+            )
+
+        page.on("requestfailed", on_request_failed)
+        page.on("requestfinished", on_request_finished)
+        page.on("pageerror", on_page_error)
 
     def _preserve_error_page(self, page: Page, exc: Exception) -> None:
         """保存错误现场，并在可视模式下短暂保留浏览器供人工检查。"""
@@ -496,14 +612,22 @@ class CTExcelAutomation:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         screenshot_path = diagnostics / f"error-{stamp}.png"
         html_path = diagnostics / f"error-{stamp}.html"
+        network_path = diagnostics / f"error-{stamp}-network.txt"
         with contextlib.suppress(Exception):
             page.screenshot(path=str(screenshot_path), full_page=True)
         with contextlib.suppress(Exception):
             html_path.write_text(page.content(), encoding="utf-8")
+        with contextlib.suppress(Exception):
+            network_path.write_text(
+                "\n".join(self.network_events) or "No captured events",
+                encoding="utf-8",
+            )
 
         self.stage("错误现场已保留")
         self.log(f"流程错误：{exc}")
-        self.log(f"诊断文件：{diagnostics}")
+        self.log(
+            f"诊断文件：{diagnostics}（截图、HTML、network.txt）"
+        )
         hold_seconds = max(0, int(self.config.error_browser_hold_seconds))
         if self.config.headless or hold_seconds == 0:
             return
@@ -1239,28 +1363,59 @@ class CTExcelAutomation:
             self._check_stop()
             if is_payment_success_url(page.url):
                 self.log(
-                    "已进入支付成功页，直接读取订单正文；"
+                    "已进入支付成功页，正在从页面正文和订单接口读取手机号；"
                     "忽略该页面持续显示的 Loading 遮罩"
                 )
-                page.wait_for_function(
-                    """() => {
-                      const text = document.body?.innerText || '';
-                      const success = text.includes('订购成功')
-                        || text.includes('支付成功');
-                      const phone = /(?:\\+?44|0)7\\d{9}/.test(text);
-                      return success && phone;
-                    }""",
-                    timeout=self.config.page_timeout_ms,
+                detail_deadline = min(
+                    deadline,
+                    time.monotonic() + 90,
                 )
-                parsed = parse_success_text(page.locator("body").inner_text())
+                parsed = {
+                    "order_number": "",
+                    "phone_number": "",
+                    "transaction_amount": "",
+                }
+                while time.monotonic() < detail_deadline:
+                    self._check_stop()
+                    if page.is_closed():
+                        raise AutomationError(
+                            "支付成功页已关闭，尚未完成手机号回写"
+                        )
+                    with contextlib.suppress(Exception):
+                        parsed = parse_success_text(
+                            page.locator("body").inner_text(timeout=3000)
+                        )
+                    if (
+                        parsed["phone_number"]
+                        or self.captured_phone_number
+                    ):
+                        break
+                    self._wait_interruptibly(1)
                 order_number = (
                     parsed["order_number"]
+                    or self.captured_order_number
                     or pending_order.get("order_number", "")
                 )
-                phone_number = parsed["phone_number"]
+                phone_number = (
+                    parsed["phone_number"]
+                    or self.captured_phone_number
+                )
                 if not phone_number:
+                    recent_failures = [
+                        item
+                        for item in self.network_events
+                        if item.startswith(
+                            ("HTTP ", "FAILED ", "PAGE_ERROR ")
+                        )
+                    ][-3:]
+                    detail = (
+                        "；".join(recent_failures)
+                        if recent_failures
+                        else "订单详情接口未返回手机号"
+                    )
                     raise AutomationError(
-                        "支付成功页没有识别到 CTExcel 手机号码"
+                        "支付成功页在 90 秒内没有返回 CTExcel 手机号码"
+                        f"：{detail}"
                     )
                 transaction_amount = (
                     parsed["transaction_amount"]
