@@ -6,8 +6,11 @@ import pytest
 from ctexcel_client.config import DEFAULT_PROXY_API_URL, ProxyConfig
 from ctexcel_client.proxy import (
     ProxyError,
+    ProxyPoolRotator,
+    browser_compatible_proxy,
     detect_public_ip,
     masked_proxy_label,
+    parse_proxy_list,
     parse_proxy_payload,
     prepare_proxy,
     probe_proxy_endpoint,
@@ -49,6 +52,74 @@ def test_proxy_parser_accepts_credentials_and_json_payloads():
         "username": "proxy-user",
         "password": "proxy-password",
     }
+
+
+def test_proxy_pool_parses_many_lines_deduplicates_and_rotates():
+    payload = "\n".join(
+        (
+            "proxy-a.example.test:3010:user-a:pass-a",
+            "proxy-a.example.test:3010:user-a:pass-a",
+            "proxy-b.example.test:3011:user-b:pass-b",
+            "proxy-c.example.test:3012:user-c:pass-c",
+        )
+    )
+    parsed = parse_proxy_list(payload)
+    assert len(parsed) == 3
+
+    rotator = ProxyPoolRotator(
+        ProxyConfig(
+            mode="pool",
+            pool=payload,
+            pool_uses_min=5,
+            pool_uses_max=8,
+        ),
+        randint=lambda _minimum, _maximum: 5,
+    )
+    leases = [rotator.next() for _ in range(11)]
+
+    assert [lease.pool_index for lease in leases] == [
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        2,
+        2,
+        3,
+    ]
+    assert leases[0].use_number == 1
+    assert leases[4].use_number == 5
+    assert leases[5].use_number == 1
+
+
+def test_authenticated_socks5_is_bridged_for_chromium_without_credentials():
+    route = browser_compatible_proxy(
+        {
+            "server": "socks5://proxy.example.test:3010",
+            "username": "proxy-user",
+            "password": "proxy-password",
+        }
+    )
+    try:
+        assert route.bridge is not None
+        assert route.proxy is not None
+        assert route.proxy["server"].startswith("socks5://127.0.0.1:")
+        assert "username" not in route.proxy
+        assert "password" not in route.proxy
+    finally:
+        route.close()
+
+
+def test_proxy_pool_reports_the_bad_line_without_echoing_other_credentials():
+    with pytest.raises(ProxyError, match="第 2 行") as exc_info:
+        parse_proxy_list(
+            "proxy.example.test:3010:user:secret\nnot-a-proxy"
+        )
+
+    assert "secret" not in str(exc_info.value)
 
 
 def test_dynamic_proxy_api_is_resolved_for_each_request():

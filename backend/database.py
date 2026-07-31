@@ -47,6 +47,7 @@ async def init_db():
                 ctexcel_referral_link TEXT,
                 ctexcel_last_checked_at TEXT,
                 ctexcel_registration_confirmed_at TEXT,
+                ctexcel_client_request_key TEXT,
                 activation_error TEXT,
                 activated_at TEXT,
                 automation_lock_owner TEXT,
@@ -90,6 +91,18 @@ async def init_db():
             "TEXT",
         )
         await _ensure_column(
+            db,
+            "customers",
+            "ctexcel_client_request_key",
+            "TEXT",
+        )
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ix_customers_ctexcel_client_request_key "
+            "ON customers(ctexcel_client_request_key) "
+            "WHERE ctexcel_client_request_key IS NOT NULL"
+        )
+        await _ensure_column(
             db, "customers", "public_version", "INTEGER NOT NULL DEFAULT 1"
         )
         await _ensure_column(
@@ -116,10 +129,16 @@ async def init_db():
         await _ensure_activation_status_values(db)
         await _ensure_nullable_phone_number(db)
         # 旧版 phone_number NOT NULL 表重建时 SQLite 会随旧表删除索引，
-        # 因此在迁移后再次确保公开 Token 唯一索引存在。
+        # 因此在迁移后再次确保两个唯一索引存在。
         await db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_customers_public_token "
             "ON customers(public_token) WHERE public_token IS NOT NULL"
+        )
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ix_customers_ctexcel_client_request_key "
+            "ON customers(ctexcel_client_request_key) "
+            "WHERE ctexcel_client_request_key IS NOT NULL"
         )
         await db.execute("""
             CREATE TABLE IF NOT EXISTS sim_codes (
@@ -232,6 +251,7 @@ async def _ensure_nullable_phone_number(db: aiosqlite.Connection):
             ctexcel_referral_link TEXT,
             ctexcel_last_checked_at TEXT,
             ctexcel_registration_confirmed_at TEXT,
+            ctexcel_client_request_key TEXT,
             activation_error TEXT,
             activated_at TEXT,
             automation_lock_owner TEXT,

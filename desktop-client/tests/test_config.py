@@ -8,6 +8,7 @@ from ctexcel_client.config import (
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
     RegistrationDefaults,
+    TelegramConfig,
     load_config,
     save_config,
 )
@@ -29,6 +30,10 @@ def test_client_ui_uses_scoped_api_without_hidden_entry_field():
     assert "£1 路线推荐人号码" in source
     assert '"连续申请"' in source
     assert '"目标数量"' in source
+    assert '"并发线程"' in source
+    assert "self.continuous_workers.setRange(1, 10)" in source
+    assert '"Telegram 付款提醒"' in source
+    assert '"测试推送"' in source
 
 
 def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
@@ -36,7 +41,13 @@ def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
     config = AppConfig(
         app_password="super-secret-password",
         remember_credentials=True,
-        proxy=ProxyConfig(password="super-secret-proxy-password"),
+        proxy=ProxyConfig(
+            password="super-secret-proxy-password",
+            pool=(
+                "proxy.example.test:3010:"
+                "super-secret-pool-user:super-secret-pool-password"
+            ),
+        ),
         registration=RegistrationDefaults(
             last_name="Fixed",
             first_name="Name",
@@ -50,11 +61,14 @@ def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
     raw = target.read_text(encoding="utf-8")
     assert "super-secret-password" not in raw
     assert "super-secret-proxy-password" not in raw
+    assert "super-secret-pool-user" not in raw
+    assert "super-secret-pool-password" not in raw
     assert "fixed shipping address" in raw
     if os.name == "nt":
         loaded = load_config(target)
         assert loaded.app_password == "super-secret-password"
         assert loaded.proxy.password == "super-secret-proxy-password"
+        assert "super-secret-pool-user" in loaded.proxy.pool
 
 
 def test_proxy_ui_exposes_fixed_and_dynamic_socks5_modes():
@@ -65,11 +79,15 @@ def test_proxy_ui_exposes_fixed_and_dynamic_socks5_modes():
     ).read_text(encoding="utf-8")
 
     assert '"粘贴单条代理", "custom"' in source
+    assert '"批量代理池", "pool"' in source
     assert '"API 动态提取", "api"' in source
     assert '"SOCKS5", "socks5"' in source
     assert "提取并测试" in source
     assert "hostname:port:username:password" in source
     assert "从剪贴板导入" in source
+    assert "粘贴代理池" in source
+    assert "self.proxy_pool_uses_min.setValue(5)" in source
+    assert "self.proxy_pool_uses_max.setValue(8)" in source
     assert "当前出口公网 IP" in source
     assert "background-color: #ffffff" in source
     assert "Qt.TextSelectableByMouse" in source
@@ -104,6 +122,12 @@ def test_non_secret_registration_defaults_round_trip(tmp_path: Path):
         purchase_route=PURCHASE_ROUTE_50GB,
         continuous_enabled=True,
         continuous_count=100,
+        continuous_workers=6,
+        telegram=TelegramConfig(
+            enabled=True,
+            bot_token="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcd",
+            chat_id="-1001234567890",
+        ),
         registration=RegistrationDefaults(
             last_name="Fixed",
             first_name="Name",
@@ -123,6 +147,13 @@ def test_non_secret_registration_defaults_round_trip(tmp_path: Path):
     assert loaded.purchase_route == PURCHASE_ROUTE_50GB
     assert loaded.continuous_enabled is True
     assert loaded.continuous_count == 100
+    assert loaded.continuous_workers == 6
+    assert (
+        "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcd"
+        not in target.read_text(encoding="utf-8")
+    )
+    assert loaded.telegram.enabled is True
+    assert loaded.telegram.chat_id == "-1001234567890"
     assert loaded.app_password == ""
 
 
@@ -145,6 +176,7 @@ def test_invalid_continuous_values_are_bounded(tmp_path: Path):
         {
           "continuous_enabled": true,
           "continuous_count": 50000,
+          "continuous_workers": 50,
           "continuous_interval_seconds": -3
         }
         """,
@@ -155,4 +187,5 @@ def test_invalid_continuous_values_are_bounded(tmp_path: Path):
 
     assert loaded.continuous_enabled is True
     assert loaded.continuous_count == 1000
+    assert loaded.continuous_workers == 10
     assert loaded.continuous_interval_seconds == 0

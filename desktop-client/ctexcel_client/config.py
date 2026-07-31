@@ -141,6 +141,9 @@ def unprotect_secret(value: str) -> str:
 class ProxyConfig:
     mode: str = "none"
     proxy_type: str = "socks5"
+    pool: str = ""
+    pool_uses_min: int = 5
+    pool_uses_max: int = 8
     host: str = ""
     port: str = ""
     username: str = ""
@@ -186,6 +189,13 @@ class RegistrationDefaults:
 
 
 @dataclass
+class TelegramConfig:
+    enabled: bool = False
+    bot_token: str = ""
+    chat_id: str = ""
+
+
+@dataclass
 class AppConfig:
     server_url: str = "https://gg.6667766.xyz"
     app_password: str = ""
@@ -193,6 +203,7 @@ class AppConfig:
     purchase_route: str = PURCHASE_ROUTE_FREECARD
     continuous_enabled: bool = False
     continuous_count: int = 100
+    continuous_workers: int = 1
     continuous_interval_seconds: int = 3
     application_url: str = DEFAULT_APPLICATION_URL
     browser_channel: str = "msedge"
@@ -207,6 +218,7 @@ class AppConfig:
     order_sync_timeout_seconds: int = 180
     error_browser_hold_seconds: int = 180
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
     registration: RegistrationDefaults = field(default_factory=RegistrationDefaults)
 
 
@@ -216,7 +228,7 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
         key: value
         for key, value in proxy_raw.items()
         if key in ProxyConfig.__dataclass_fields__
-        and key != "password"
+        and key not in {"password", "pool"}
     }
     proxy_values["password"] = unprotect_secret(
         str(proxy_raw.get("password_protected") or "")
@@ -224,6 +236,24 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
     # 兼容曾经写入明文 password 的内部开发配置，下一次保存会自动迁移。
     if not proxy_values["password"]:
         proxy_values["password"] = str(proxy_raw.get("password") or "")
+    proxy_values["pool"] = unprotect_secret(
+        str(proxy_raw.get("pool_protected") or "")
+    )
+    if not proxy_values["pool"]:
+        proxy_values["pool"] = str(proxy_raw.get("pool") or "")
+    for key, default in (("pool_uses_min", 5), ("pool_uses_max", 8)):
+        try:
+            proxy_values[key] = min(
+                100,
+                max(1, int(proxy_values.get(key, default))),
+            )
+        except (TypeError, ValueError):
+            proxy_values[key] = default
+    if proxy_values["pool_uses_min"] > proxy_values["pool_uses_max"]:
+        proxy_values["pool_uses_min"], proxy_values["pool_uses_max"] = (
+            proxy_values["pool_uses_max"],
+            proxy_values["pool_uses_min"],
+        )
     proxy = ProxyConfig(**proxy_values)
     # 2.0.6 以前保存过 HTTP 时，Cliproxy 白名单接口会被错误地按 HTTP 使用。
     if proxy.mode == "api" and is_cliproxy_whitelist_url(proxy.api_url):
@@ -240,11 +270,31 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
             if key in RegistrationDefaults.__dataclass_fields__
         }
     )
+    telegram_raw = (
+        raw.get("telegram")
+        if isinstance(raw.get("telegram"), dict)
+        else {}
+    )
+    telegram_token = unprotect_secret(
+        str(telegram_raw.get("bot_token_protected") or "")
+    )
+    if not telegram_token:
+        telegram_token = str(telegram_raw.get("bot_token") or "")
+    telegram = TelegramConfig(
+        enabled=bool(telegram_raw.get("enabled", False)),
+        bot_token=telegram_token,
+        chat_id=str(telegram_raw.get("chat_id") or ""),
+    )
     values = {
         key: value
         for key, value in raw.items()
         if key in AppConfig.__dataclass_fields__
-        and key not in {"proxy", "registration", "app_password"}
+        and key not in {
+            "proxy",
+            "telegram",
+            "registration",
+            "app_password",
+        }
     }
     if values.get("purchase_route") not in PURCHASE_ROUTES:
         values["purchase_route"] = PURCHASE_ROUTE_FREECARD
@@ -255,6 +305,13 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
         )
     except (TypeError, ValueError):
         values["continuous_count"] = 100
+    try:
+        values["continuous_workers"] = min(
+            10,
+            max(1, int(values.get("continuous_workers", 1))),
+        )
+    except (TypeError, ValueError):
+        values["continuous_workers"] = 1
     try:
         values["continuous_interval_seconds"] = min(
             60,
@@ -268,6 +325,7 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
     return AppConfig(
         **values,
         proxy=proxy,
+        telegram=telegram,
         registration=registration,
     )
 
@@ -292,12 +350,25 @@ def save_config(config: AppConfig, path: Optional[Path] = None) -> None:
     raw.pop("app_password", None)
     proxy_raw = raw.get("proxy") if isinstance(raw.get("proxy"), dict) else {}
     proxy_raw.pop("password", None)
+    proxy_raw.pop("pool", None)
+    telegram_raw = (
+        raw.get("telegram")
+        if isinstance(raw.get("telegram"), dict)
+        else {}
+    )
+    telegram_raw.pop("bot_token", None)
     if config.remember_credentials:
         raw["app_password_protected"] = protect_secret(config.app_password)
         proxy_raw["password_protected"] = protect_secret(config.proxy.password)
+        proxy_raw["pool_protected"] = protect_secret(config.proxy.pool)
+        telegram_raw["bot_token_protected"] = protect_secret(
+            config.telegram.bot_token
+        )
     else:
         raw["app_password_protected"] = ""
         proxy_raw["password_protected"] = ""
+        proxy_raw["pool_protected"] = ""
+        telegram_raw["bot_token_protected"] = ""
     target.write_text(
         json.dumps(raw, ensure_ascii=False, indent=2),
         encoding="utf-8",

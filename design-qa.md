@@ -119,3 +119,24 @@ No actionable P0, P1, or P2 issue remains.
 - Browser console: zero error-level entries after list, detail, public page, mobile and mode-switch checks.
 
 final result: passed
+
+## CTExcel Windows client v2.3.8 verification
+
+- Desktop `1440 × 1000`: the proxy-pool mode exposes a full-width multiline
+  paste target, one-click clipboard import, SOCKS5 protocol selection and the
+  5–8-use rotation controls without clipping or horizontal overflow.
+- The lower settings view keeps Telegram Bot Token, Chat ID and test delivery in
+  one compact card above the fixed registration data; all labels and controls
+  remain readable against the light surface.
+- Authenticated SOCKS5 nodes are exposed to Chrome/Edge through a loopback-only
+  unauthenticated bridge, while the bridge authenticates to the upstream node.
+- Continuous application supports 1–10 isolated browser workers, idempotent
+  customer allocation and a shared thread-safe proxy-pool rotation counter.
+- Each payment page sends the detected WeChat QR image (or a viewport fallback)
+  to the configured Telegram bot without blocking payment completion.
+- Evidence: `/tmp/ctexcel-v238-proxy-pool.png` and
+  `/tmp/ctexcel-v238-settings-bottom.png`.
+- Client tests, 242 backend tests, 15 Worker tests, Python compilation and diff
+  checks pass.
+
+final result: passed

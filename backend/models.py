@@ -154,6 +154,13 @@ class CTExcelClientCustomerCreate(BaseModel):
     reuse_pending: bool = True
     # 连续申请时，已有订单号但尚待邮件同步手机号的客户不阻塞下一单。
     allow_new_after_checkpoint: bool = False
+    # 客户端为每个并发申请生成唯一键；请求重试时返回同一客户。
+    request_key: Optional[str] = Field(
+        default=None,
+        min_length=16,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
 
 
 class CTExcelPaymentCheckpointRequest(BaseModel):

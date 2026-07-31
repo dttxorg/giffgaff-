@@ -1,6 +1,8 @@
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import threading
+import time
 
 from ctexcel_client.automation import (
     AutomationResult,
@@ -99,7 +101,8 @@ def test_browser_profile_is_isolated_and_automation_banner_is_removed():
     ).read_text(encoding="utf-8")
 
     assert 'tempfile.mkdtemp(' in source
-    assert '"ignore_default_args": ["--enable-automation"]' in source
+    assert '"--enable-automation"' in source
+    assert '"--no-sandbox"' in source
     assert "--disable-blink-features=AutomationControlled" in source
     assert "Navigator.prototype" in source
     assert "shutil.rmtree(self.profile_dir)" in source
@@ -133,7 +136,9 @@ def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     ).read_text(encoding="utf-8")
 
     assert '"实体SIM卡",\n            exact=False' in source
-    assert "button.uc-deny-button" in source
+    assert "全部拒绝" in source
+    assert ".uc-deny-button" in source
+    assert "已自动拒绝非必要 Cookie" in source
     assert 'page.locator(".el-switch")' in source
     assert "'.el-loading-mask'" in source
     assert "Loading 遮罩持续未消失" in source
@@ -257,6 +262,77 @@ def test_continuous_runner_resumes_after_completed_items():
 
     assert started == [(3, 3)]
     assert result.completed_count == 3
+
+
+def test_continuous_runner_supports_ten_safe_parallel_workers():
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+    created = 0
+    request_keys = []
+    reuse_flags = []
+    worker_slots = []
+    completed_ordinals = []
+
+    class FakeAutomation:
+        def __init__(
+            self,
+            _config,
+            *,
+            request_key,
+            reuse_pending_customer,
+            worker_slot,
+            **_callbacks,
+        ):
+            nonlocal created
+            with state_lock:
+                created += 1
+                self.customer_id = created
+                request_keys.append(request_key)
+                reuse_flags.append(reuse_pending_customer)
+                worker_slots.append(worker_slot)
+
+        def run(self):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.04)
+            with state_lock:
+                active -= 1
+            return AutomationResult(
+                customer_id=self.customer_id,
+                email=f"parallel-{self.customer_id}@example.test",
+            )
+
+        def stop(self):
+            pass
+
+    runner = CTExcelBatchAutomation(
+        AppConfig(
+            continuous_enabled=True,
+            continuous_count=12,
+            continuous_workers=10,
+            continuous_interval_seconds=0,
+        ),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+        item_started=lambda *_args: None,
+        item_completed=lambda result, _completed, _total: (
+            completed_ordinals.append(result.batch_ordinal)
+        ),
+        automation_factory=FakeAutomation,
+    )
+
+    result = runner.run()
+
+    assert result.completed_count == 12
+    assert max_active == 10
+    assert len(set(request_keys)) == 12
+    assert reuse_flags.count(True) == 1
+    assert set(worker_slots) == set(range(1, 11))
+    assert sorted(completed_ordinals) == list(range(1, 13))
 
 
 def test_loading_overlay_waits_until_the_page_is_stably_ready():

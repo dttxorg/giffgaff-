@@ -70,7 +70,7 @@ def test_client_status_uses_bearer_password_without_hidden_entry_cookie(client_a
     assert response.status_code == 200
     assert response.json() == {
         "ok": True,
-        "api_version": 6,
+        "api_version": 7,
         "ctexcel_customer_count": 0,
         "pending_customer_count": 0,
     }
@@ -160,6 +160,61 @@ def test_client_api_creates_ctexcel_customer_and_dedicated_email(client_api):
     assert pending.status_code == 200
     assert pending.json()["count"] == 1
     assert pending.json()["customers"][0]["customer_id"] == data["customer_id"]
+
+
+def test_client_customer_request_key_is_idempotent(client_api):
+    client, db_path = client_api
+    email_mock = AsyncMock(
+        return_value={
+            "email": "parallel@example.test",
+            "email_account_id": "parallel-mail",
+            "email_provider_id": None,
+            "email_provider_domain": None,
+            "share_link": "",
+            "is_email_auto": True,
+        }
+    )
+    payload = {
+        "reuse_pending": False,
+        "allow_new_after_checkpoint": True,
+        "request_key": "batch_parallel_1234567890",
+    }
+    with patch.object(
+        main,
+        "_generate_email_account",
+        new=email_mock,
+    ), patch.object(
+        main,
+        "regenerate_identity",
+        new=AsyncMock(),
+    ):
+        first = client.post(
+            "/api/ctexcel-client/customers",
+            headers=AUTH_HEADERS,
+            json=payload,
+        )
+        replay = client.post(
+            "/api/ctexcel-client/customers",
+            headers=AUTH_HEADERS,
+            json=payload,
+        )
+
+    assert first.status_code == 201, first.text
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["customer_id"] == first.json()["customer_id"]
+    assert replay.json()["idempotent_replay"] is True
+    email_mock.assert_awaited_once()
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            """SELECT id, ctexcel_client_request_key
+               FROM customers WHERE product_type = 'ctexcel'"""
+        ).fetchall()
+    assert rows == [
+        (
+            first.json()["customer_id"],
+            "batch_parallel_1234567890",
+        )
+    ]
 
 
 def test_continuous_client_can_create_after_paid_pending_customer(client_api):

@@ -395,6 +395,7 @@ def _customer_payload(row) -> dict:
     customer.pop("initial_password", None)
     customer.pop("automation_lock_owner", None)
     customer.pop("automation_locked_at", None)
+    customer.pop("ctexcel_client_request_key", None)
     return customer
 
 
@@ -1925,6 +1926,52 @@ async def _list_pending_ctexcel_client_customers(limit: int = 100) -> list[dict]
     ]
 
 
+async def _get_ctexcel_client_customer_by_request_key(
+    request_key: str,
+) -> Optional[dict]:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await fetch_one(
+            db,
+            """SELECT id, email, phone_number, ctexcel_order_number,
+                      ctexcel_registration_confirmed_at,
+                      ctexcel_last_checked_at, created_at
+               FROM customers
+               WHERE product_type = 'ctexcel'
+                 AND ctexcel_client_request_key = ?""",
+            (request_key,),
+        )
+    if not row:
+        return None
+    return {
+        "customer_id": int(row["id"]),
+        "email": row["email"],
+        "phone_number": row["phone_number"],
+        "order_number": row["ctexcel_order_number"],
+        "registration_confirmed_at": row[
+            "ctexcel_registration_confirmed_at"
+        ],
+        "last_checked_at": row["ctexcel_last_checked_at"],
+        "created_at": row["created_at"],
+    }
+
+
+async def _save_ctexcel_client_request_key(
+    customer_id: int,
+    request_key: Optional[str],
+) -> None:
+    if not request_key:
+        return
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            """UPDATE customers
+               SET ctexcel_client_request_key = ?
+               WHERE id = ? AND product_type = 'ctexcel'""",
+            (request_key, customer_id),
+        )
+        await db.commit()
+
+
 @app.get("/api/ctexcel-client/status")
 async def get_ctexcel_client_status(request: Request, response: Response):
     """桌面客户端连通性检查；只返回 CTExcel 范围内的非敏感状态。"""
@@ -1944,7 +1991,7 @@ async def get_ctexcel_client_status(request: Request, response: Response):
     pending = int(rows[0][1] or 0) if rows else 0
     return {
         "ok": True,
-        "api_version": 6,
+        "api_version": 7,
         "ctexcel_customer_count": total,
         "pending_customer_count": pending,
     }
@@ -1973,6 +2020,19 @@ async def create_ctexcel_client_customer(
 ):
     """优先复用中断客户，否则创建 CTExcel 客户和专属托管邮箱。"""
     _require_ctexcel_client(request)
+    request_key = normalize_optional_text(data.request_key)
+    if request_key:
+        existing = await _get_ctexcel_client_customer_by_request_key(
+            request_key
+        )
+        if existing:
+            return {
+                **existing,
+                "product_type": "ctexcel",
+                "sim_activation_code": None,
+                "reused": True,
+                "idempotent_replay": True,
+            }
     pending = await _list_pending_ctexcel_client_customers()
     unfinished_pending = [
         customer
@@ -1990,6 +2050,10 @@ async def create_ctexcel_client_customer(
         None,
     )
     if data.reuse_pending and resumable:
+        await _save_ctexcel_client_request_key(
+            int(resumable["customer_id"]),
+            request_key,
+        )
         return {
             **resumable,
             "product_type": "ctexcel",
@@ -2022,6 +2086,10 @@ async def create_ctexcel_client_customer(
                 activation_date=datetime.date.today(),
                 use_sim_code=False,
             )
+        )
+        await _save_ctexcel_client_request_key(
+            int(created["customer_id"]),
+            request_key,
         )
         return {
             **created,

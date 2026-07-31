@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 from dataclasses import dataclass
 import ipaddress
 import json
+import random
 import re
+import select
 import socket
+import socketserver
 import ssl
 import struct
+import threading
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
 
@@ -25,6 +30,15 @@ class PreparedProxy:
     playwright_proxy: Optional[dict[str, str]]
     public_ip: str = ""
     public_ip_error: str = ""
+
+
+@dataclass(frozen=True)
+class ProxyPoolLease:
+    proxy: dict[str, str]
+    pool_index: int
+    pool_size: int
+    use_number: int
+    use_limit: int
 
 
 PUBLIC_IP_ENDPOINTS = (
@@ -79,7 +93,7 @@ def detect_public_ip(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.3.7",
+                "User-Agent": "CTExcelApplyClient/2.3.8",
             },
         ) as client:
             for endpoint in PUBLIC_IP_ENDPOINTS:
@@ -205,6 +219,89 @@ def parse_proxy_payload(
     return result
 
 
+def parse_proxy_list(
+    payload: str,
+    *,
+    default_scheme: str = "socks5",
+) -> list[dict[str, str]]:
+    """Parse a newline-delimited proxy pool and remove exact duplicates."""
+    lines = [
+        line.strip()
+        for line in str(payload or "").replace("\r", "\n").split("\n")
+        if line.strip()
+    ]
+    if not lines:
+        raise ProxyError("代理池为空，请每行粘贴一个代理")
+    proxies: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    errors: list[str] = []
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            proxy = parse_proxy_payload(
+                line,
+                default_scheme=default_scheme,
+            )
+        except ProxyError as exc:
+            errors.append(f"第 {line_number} 行：{exc}")
+            continue
+        key = (
+            str(proxy.get("server") or ""),
+            str(proxy.get("username") or ""),
+            str(proxy.get("password") or ""),
+        )
+        if key not in seen:
+            proxies.append(proxy)
+            seen.add(key)
+    if errors:
+        preview = "\n".join(errors[:5])
+        suffix = f"\n其余 {len(errors) - 5} 行同样有误" if len(errors) > 5 else ""
+        raise ProxyError(f"代理池有 {len(errors)} 行格式错误：\n{preview}{suffix}")
+    if not proxies:
+        raise ProxyError("代理池没有可用代理")
+    return proxies
+
+
+class ProxyPoolRotator:
+    """Thread-safe sequential pool; each node is leased 5–8 times by default."""
+
+    def __init__(
+        self,
+        config: ProxyConfig,
+        *,
+        randint: Any = random.randint,
+    ):
+        self.proxies = parse_proxy_list(
+            config.pool,
+            default_scheme=config.effective_proxy_type(),
+        )
+        self.uses_min = min(100, max(1, int(config.pool_uses_min)))
+        self.uses_max = min(100, max(1, int(config.pool_uses_max)))
+        if self.uses_min > self.uses_max:
+            self.uses_min, self.uses_max = self.uses_max, self.uses_min
+        self.randint = randint
+        self.lock = threading.Lock()
+        self.index = 0
+        self.use_number = 0
+        self.use_limit = int(self.randint(self.uses_min, self.uses_max))
+
+    def next(self) -> ProxyPoolLease:
+        with self.lock:
+            if self.use_number >= self.use_limit:
+                self.index = (self.index + 1) % len(self.proxies)
+                self.use_number = 0
+                self.use_limit = int(
+                    self.randint(self.uses_min, self.uses_max)
+                )
+            self.use_number += 1
+            return ProxyPoolLease(
+                proxy=dict(self.proxies[self.index]),
+                pool_index=self.index + 1,
+                pool_size=len(self.proxies),
+                use_number=self.use_number,
+                use_limit=self.use_limit,
+            )
+
+
 def fetch_proxy_from_api(
     config: ProxyConfig,
     *,
@@ -221,7 +318,7 @@ def fetch_proxy_from_api(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.3.7",
+                "User-Agent": "CTExcelApplyClient/2.3.8",
             },
         ) as client:
             response = client.get(url)
@@ -252,6 +349,11 @@ def resolve_proxy(
         return None
     if mode == "api":
         return fetch_proxy_from_api(config, transport=transport)
+    if mode == "pool":
+        return parse_proxy_list(
+            config.pool,
+            default_scheme=config.effective_proxy_type(),
+        )[0]
     if mode != "custom":
         raise ProxyError(f"未知代理模式：{config.mode}")
     result = config.playwright_proxy()
@@ -421,7 +523,192 @@ def probe_proxy_endpoint(
         raise ProxyError("代理服务器连接或协议握手失败") from exc
 
 
-def prepare_proxy(config: ProxyConfig) -> PreparedProxy:
+def _read_socks_address(sock: socket.socket, address_type: int) -> bytes:
+    if address_type == 1:
+        return _recv_exact(sock, 4)
+    if address_type == 3:
+        length = _recv_exact(sock, 1)
+        return length + _recv_exact(sock, length[0])
+    if address_type == 4:
+        return _recv_exact(sock, 16)
+    raise ProxyError("SOCKS5 请求的地址格式不受支持")
+
+
+def _connect_authenticated_socks5(
+    upstream: socket.socket,
+    proxy: dict[str, str],
+    address_type: int,
+    encoded_address: bytes,
+    encoded_port: bytes,
+) -> bytes:
+    username = str(proxy.get("username") or "")
+    password = str(proxy.get("password") or "")
+    methods = b"\x00\x02" if username else b"\x00"
+    upstream.sendall(b"\x05" + bytes([len(methods)]) + methods)
+    version, method = _recv_exact(upstream, 2)
+    if version != 5 or method == 0xFF:
+        raise ProxyError("SOCKS5 上游代理拒绝认证")
+    if method == 2:
+        user_bytes = username.encode("utf-8")
+        pass_bytes = password.encode("utf-8")
+        if not user_bytes or len(user_bytes) > 255 or len(pass_bytes) > 255:
+            raise ProxyError("SOCKS5 上游代理账号密码格式错误")
+        upstream.sendall(
+            b"\x01"
+            + bytes([len(user_bytes)])
+            + user_bytes
+            + bytes([len(pass_bytes)])
+            + pass_bytes
+        )
+        auth_version, auth_status = _recv_exact(upstream, 2)
+        if auth_version != 1 or auth_status != 0:
+            raise ProxyError("SOCKS5 上游代理账号密码验证失败")
+    elif method != 0:
+        raise ProxyError("SOCKS5 上游代理认证方式不受支持")
+
+    upstream.sendall(
+        b"\x05\x01\x00"
+        + bytes([address_type])
+        + encoded_address
+        + encoded_port
+    )
+    header = _recv_exact(upstream, 4)
+    if header[0] != 5 or header[1] != 0:
+        raise ProxyError(
+            f"SOCKS5 上游代理连接目标失败（代码 {header[1]}）"
+        )
+    bound_address = _read_socks_address(upstream, header[3])
+    bound_port = _recv_exact(upstream, 2)
+    return header + bound_address + bound_port
+
+
+def _relay_sockets(left: socket.socket, right: socket.socket) -> None:
+    sockets = [left, right]
+    while True:
+        readable, _, _ = select.select(sockets, [], [], 30)
+        if not readable:
+            continue
+        for source in readable:
+            data = source.recv(65536)
+            if not data:
+                return
+            destination = right if source is left else left
+            destination.sendall(data)
+
+
+class _ThreadingTCPServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+class AuthenticatedSocks5Bridge:
+    """Expose an unauthenticated loopback SOCKS5 endpoint for Chromium.
+
+    Chromium/Playwright rejects SOCKS5 username/password fields. The bridge is
+    local-only and performs username/password authentication against the real
+    upstream node before relaying traffic.
+    """
+
+    def __init__(self, upstream_proxy: dict[str, str]):
+        parsed = urlsplit(str(upstream_proxy.get("server") or ""))
+        if parsed.scheme != "socks5" or not parsed.hostname or not parsed.port:
+            raise ProxyError("SOCKS5 本地桥接的上游地址无效")
+        self.upstream_proxy = dict(upstream_proxy)
+        self.host = parsed.hostname
+        self.port = parsed.port
+        bridge = self
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                client = self.request
+                client.settimeout(30)
+                try:
+                    version, method_count = _recv_exact(client, 2)
+                    if version != 5:
+                        return
+                    _recv_exact(client, method_count)
+                    client.sendall(b"\x05\x00")
+                    version, command, _reserved, address_type = _recv_exact(
+                        client,
+                        4,
+                    )
+                    if version != 5 or command != 1:
+                        client.sendall(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
+                        return
+                    address = _read_socks_address(client, address_type)
+                    port = _recv_exact(client, 2)
+                    with socket.create_connection(
+                        (bridge.host, bridge.port),
+                        timeout=15,
+                    ) as upstream:
+                        upstream.settimeout(30)
+                        reply = _connect_authenticated_socks5(
+                            upstream,
+                            bridge.upstream_proxy,
+                            address_type,
+                            address,
+                            port,
+                        )
+                        client.sendall(reply)
+                        client.settimeout(None)
+                        upstream.settimeout(None)
+                        _relay_sockets(client, upstream)
+                except (OSError, ProxyError):
+                    with contextlib.suppress(OSError):
+                        client.sendall(
+                            b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00"
+                        )
+
+        self.server = _ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            name="ctexcel-socks5-bridge",
+            daemon=True,
+        )
+        self.thread.start()
+
+    @property
+    def playwright_proxy(self) -> dict[str, str]:
+        port = int(self.server.server_address[1])
+        return {"server": f"socks5://127.0.0.1:{port}"}
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+
+@dataclass
+class BrowserProxyRoute:
+    proxy: Optional[dict[str, str]]
+    bridge: Optional[AuthenticatedSocks5Bridge] = None
+
+    def close(self) -> None:
+        if self.bridge:
+            self.bridge.close()
+            self.bridge = None
+
+
+def browser_compatible_proxy(
+    proxy: Optional[dict[str, str]],
+) -> BrowserProxyRoute:
+    if not proxy:
+        return BrowserProxyRoute(proxy=None)
+    parsed = urlsplit(str(proxy.get("server") or ""))
+    if parsed.scheme == "socks5" and proxy.get("username"):
+        bridge = AuthenticatedSocks5Bridge(proxy)
+        return BrowserProxyRoute(
+            proxy=bridge.playwright_proxy,
+            bridge=bridge,
+        )
+    return BrowserProxyRoute(proxy=dict(proxy))
+
+
+def prepare_proxy(
+    config: ProxyConfig,
+    *,
+    resolved_proxy: Optional[dict[str, str]] = None,
+) -> PreparedProxy:
     """提取、检测公网 IP，并在创建客户前验证代理。"""
     public_ip = ""
     public_ip_error = ""
@@ -432,7 +719,11 @@ def prepare_proxy(config: ProxyConfig) -> PreparedProxy:
             public_ip_error = str(exc)
 
     try:
-        playwright_proxy = resolve_proxy(config)
+        playwright_proxy = (
+            dict(resolved_proxy)
+            if resolved_proxy is not None
+            else resolve_proxy(config)
+        )
         if playwright_proxy:
             probe_proxy_endpoint(playwright_proxy)
     except ProxyError as exc:

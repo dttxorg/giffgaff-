@@ -19,7 +19,7 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
                 200,
                 json={
                     "ok": True,
-                    "api_version": 6,
+                    "api_version": 7,
                     "ctexcel_customer_count": 3,
                     "pending_customer_count": 1,
                 },
@@ -113,7 +113,7 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
 
     assert status["ctexcel_customer_count"] == 3
     assert status["pending_customer_count"] == 1
-    assert status["api_version"] == 6
+    assert status["api_version"] == 7
     assert pending[0]["customer_id"] == 321
     assert created["email"] == "customer@example.test"
     assert verification["code"] == "123456"
@@ -206,6 +206,7 @@ def test_client_api_retries_cloudflare_5xx_before_creating_customer():
     ) as api:
         created = api.create_ctexcel_customer(
             allow_new_after_checkpoint=True,
+            request_key="batch_retry_1234567890",
         )
 
     assert created["customer_id"] == 489
@@ -214,6 +215,7 @@ def test_client_api_retries_cloudflare_5xx_before_creating_customer():
         {
             "reuse_pending": True,
             "allow_new_after_checkpoint": True,
+            "request_key": "batch_retry_1234567890",
         }
     ] * 3
     assert sleeps == [2.0, 4.0]
@@ -230,7 +232,7 @@ def test_client_api_retries_incomplete_success_response():
                 200,
                 json={
                     "ok": True,
-                    "api_version": 6,
+                    "api_version": 7,
                     "ctexcel_customer_count": 10,
                     "pending_customer_count": 2,
                 },

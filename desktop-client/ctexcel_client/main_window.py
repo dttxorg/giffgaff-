@@ -40,10 +40,12 @@ from .config import (
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
     RegistrationDefaults,
+    TelegramConfig,
     is_cliproxy_whitelist_url,
     load_config,
     save_config,
 )
+from .telegram import TelegramNotifier
 from .proxy import (
     ProxyError,
     masked_proxy_label,
@@ -129,6 +131,7 @@ class MainWindow(QMainWindow):
         self.config = load_config()
         self.api_worker: Optional[ApiWorker] = None
         self.proxy_worker: Optional[ApiWorker] = None
+        self.telegram_worker: Optional[ApiWorker] = None
         self.automation_worker: Optional[AutomationWorker] = None
         self.current_customer: Optional[dict[str, Any]] = None
         self.current_public_ip = ""
@@ -237,6 +240,7 @@ class MainWindow(QMainWindow):
         left.setSpacing(16)
         left.addWidget(self._connection_card())
         left.addWidget(self._proxy_card())
+        left.addWidget(self._telegram_card())
         left.addWidget(self._registration_card())
         left.addStretch(1)
 
@@ -275,7 +279,9 @@ class MainWindow(QMainWindow):
         grid.addWidget(self._field_label("客户端连接口令"), 2, 0)
         grid.addWidget(self.app_password, 3, 0, 1, 2)
 
-        self.remember_credentials = QCheckBox("使用 Windows 加密保存连接口令")
+        self.remember_credentials = QCheckBox(
+            "使用 Windows 加密保存连接口令和 Bot Token"
+        )
         self.test_connection_btn = QPushButton("测试连接")
         self.test_connection_btn.setObjectName("secondaryButton")
         self.test_connection_btn.clicked.connect(self.test_connection)
@@ -292,10 +298,57 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.connection_detail)
         return card
 
+    def _telegram_card(self) -> QFrame:
+        card, layout = self._card(
+            "Telegram 付款提醒",
+            "微信付款页生成后自动截取二维码，并发送到指定 Bot 会话。",
+        )
+        self.telegram_enabled = QCheckBox("启用付款二维码推送")
+        self.telegram_enabled.toggled.connect(
+            self._update_telegram_fields
+        )
+        layout.addWidget(self.telegram_enabled)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        self.telegram_bot_token = QLineEdit()
+        self.telegram_bot_token.setEchoMode(QLineEdit.Password)
+        self.telegram_bot_token.setPlaceholderText(
+            "123456789:AA..."
+        )
+        self.telegram_chat_id = QLineEdit()
+        self.telegram_chat_id.setPlaceholderText(
+            "个人、群组 Chat ID 或 @channel"
+        )
+        self.telegram_bot_token_label = self._field_label("Bot Token")
+        self.telegram_chat_id_label = self._field_label("Chat ID")
+        grid.addWidget(self.telegram_bot_token_label, 0, 0)
+        grid.addWidget(self.telegram_chat_id_label, 0, 1)
+        grid.addWidget(self.telegram_bot_token, 1, 0)
+        grid.addWidget(self.telegram_chat_id, 1, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+
+        row = QHBoxLayout()
+        self.telegram_status = QLabel(
+            "启用后，每个线程会分别发送对应订单的二维码。"
+        )
+        self.telegram_status.setObjectName("inlineNote")
+        self.telegram_status.setWordWrap(True)
+        self.telegram_test_btn = QPushButton("测试推送")
+        self.telegram_test_btn.setObjectName("secondaryButton")
+        self.telegram_test_btn.clicked.connect(self.test_telegram)
+        row.addWidget(self.telegram_status, 1)
+        row.addWidget(self.telegram_test_btn)
+        layout.addLayout(row)
+        return card
+
     def _proxy_card(self) -> QFrame:
         card, layout = self._card(
             "浏览器代理",
-            "支持固定 HTTP / SOCKS5，也可以在每次申请前从 API 动态提取一条代理。",
+            "支持 HTTP / SOCKS5 单条、批量代理池和 API 动态提取。",
         )
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
@@ -304,6 +357,7 @@ class MainWindow(QMainWindow):
         self.proxy_mode = QComboBox()
         self.proxy_mode.addItem("直连", "none")
         self.proxy_mode.addItem("粘贴单条代理", "custom")
+        self.proxy_mode.addItem("批量代理池", "pool")
         self.proxy_mode.addItem("API 动态提取", "api")
         self.proxy_mode.currentIndexChanged.connect(self._update_proxy_fields)
 
@@ -323,6 +377,25 @@ class MainWindow(QMainWindow):
         self.proxy_import_btn = QPushButton("从剪贴板导入")
         self.proxy_import_btn.setObjectName("miniButton")
         self.proxy_import_btn.clicked.connect(self.import_proxy_from_clipboard)
+
+        self.proxy_pool = QPlainTextEdit()
+        self.proxy_pool.setPlaceholderText(
+            "每行一个代理，例如：\n"
+            "hostname:port:username:password\n"
+            "hostname2:port:username:password"
+        )
+        self.proxy_pool.setMinimumHeight(112)
+        self.proxy_pool_import_btn = QPushButton("粘贴代理池")
+        self.proxy_pool_import_btn.setObjectName("miniButton")
+        self.proxy_pool_import_btn.clicked.connect(
+            self.import_proxy_pool_from_clipboard
+        )
+        self.proxy_pool_uses_min = QSpinBox()
+        self.proxy_pool_uses_min.setRange(1, 100)
+        self.proxy_pool_uses_min.setValue(5)
+        self.proxy_pool_uses_max = QSpinBox()
+        self.proxy_pool_uses_max.setRange(1, 100)
+        self.proxy_pool_uses_max.setValue(8)
 
         self.proxy_host = QLineEdit()
         self.proxy_host.setPlaceholderText("代理主机或 IP")
@@ -344,6 +417,11 @@ class MainWindow(QMainWindow):
         self.proxy_import_label = self._field_label(
             "整行代理（推荐，无需逐项填写）"
         )
+        self.proxy_pool_label = self._field_label(
+            "代理池（每行一条，自动去重）"
+        )
+        self.proxy_pool_uses_min_label = self._field_label("每个代理最少使用")
+        self.proxy_pool_uses_max_label = self._field_label("每个代理最多使用")
         self.proxy_host_label = self._field_label("已解析地址")
         self.proxy_port_label = self._field_label("已解析端口")
         self.proxy_username_label = self._field_label("已解析账号")
@@ -360,16 +438,23 @@ class MainWindow(QMainWindow):
         import_row.addWidget(self.proxy_import, 1)
         import_row.addWidget(self.proxy_import_btn)
         grid.addLayout(import_row, 3, 0, 1, 2)
-        grid.addWidget(self.proxy_host_label, 4, 0)
-        grid.addWidget(self.proxy_port_label, 4, 1)
-        grid.addWidget(self.proxy_host, 5, 0)
-        grid.addWidget(self.proxy_port, 5, 1)
-        grid.addWidget(self.proxy_username_label, 6, 0)
-        grid.addWidget(self.proxy_password_label, 6, 1)
-        grid.addWidget(self.proxy_username, 7, 0)
-        grid.addWidget(self.proxy_password, 7, 1)
-        grid.addWidget(self.proxy_api_url_label, 8, 0, 1, 2)
-        grid.addWidget(self.proxy_api_url, 9, 0, 1, 2)
+        grid.addWidget(self.proxy_pool_label, 4, 0, 1, 2)
+        grid.addWidget(self.proxy_pool, 5, 0, 1, 2)
+        grid.addWidget(self.proxy_pool_import_btn, 6, 0, 1, 2)
+        grid.addWidget(self.proxy_pool_uses_min_label, 7, 0)
+        grid.addWidget(self.proxy_pool_uses_max_label, 7, 1)
+        grid.addWidget(self.proxy_pool_uses_min, 8, 0)
+        grid.addWidget(self.proxy_pool_uses_max, 8, 1)
+        grid.addWidget(self.proxy_host_label, 9, 0)
+        grid.addWidget(self.proxy_port_label, 9, 1)
+        grid.addWidget(self.proxy_host, 10, 0)
+        grid.addWidget(self.proxy_port, 10, 1)
+        grid.addWidget(self.proxy_username_label, 11, 0)
+        grid.addWidget(self.proxy_password_label, 11, 1)
+        grid.addWidget(self.proxy_username, 12, 0)
+        grid.addWidget(self.proxy_password, 12, 1)
+        grid.addWidget(self.proxy_api_url_label, 13, 0, 1, 2)
+        grid.addWidget(self.proxy_api_url, 14, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
@@ -410,6 +495,13 @@ class MainWindow(QMainWindow):
                 field.textChanged.connect(self._proxy_fields_changed)
             else:
                 field.currentIndexChanged.connect(self._proxy_fields_changed)
+        self.proxy_pool.textChanged.connect(self._proxy_fields_changed)
+        self.proxy_pool_uses_min.valueChanged.connect(
+            self._proxy_fields_changed
+        )
+        self.proxy_pool_uses_max.valueChanged.connect(
+            self._proxy_fields_changed
+        )
         return card
 
     def _registration_card(self) -> QFrame:
@@ -497,12 +589,23 @@ class MainWindow(QMainWindow):
         self.continuous_count.valueChanged.connect(
             self._update_continuous_controls
         )
+        self.continuous_workers_label = self._field_label("并发线程")
+        self.continuous_workers = QSpinBox()
+        self.continuous_workers.setRange(1, 10)
+        self.continuous_workers.setSuffix(" 个")
+        self.continuous_workers.setFixedWidth(90)
+        self.continuous_workers.valueChanged.connect(
+            self._update_continuous_controls
+        )
         self.batch_status = QLabel("单次申请")
         self.batch_status.setObjectName("batchStatus")
         batch_layout.addWidget(self.continuous_enabled)
         batch_layout.addSpacing(8)
         batch_layout.addWidget(self.continuous_count_label)
         batch_layout.addWidget(self.continuous_count)
+        batch_layout.addSpacing(8)
+        batch_layout.addWidget(self.continuous_workers_label)
+        batch_layout.addWidget(self.continuous_workers)
         batch_layout.addStretch(1)
         batch_layout.addWidget(self.batch_status)
         layout.addWidget(batch_panel)
@@ -602,6 +705,7 @@ class MainWindow(QMainWindow):
         self.purchase_route.setCurrentIndex(max(0, route_index))
         self.continuous_enabled.setChecked(config.continuous_enabled)
         self.continuous_count.setValue(config.continuous_count)
+        self.continuous_workers.setValue(config.continuous_workers)
         self._update_continuous_controls()
         index = self.browser_channel.findText(config.browser_channel)
         self.browser_channel.setCurrentIndex(max(0, index))
@@ -616,8 +720,15 @@ class MainWindow(QMainWindow):
         self.proxy_api_url.setText(config.proxy.api_url)
         self.proxy_api_url.setCursorPosition(0)
         self.proxy_api_url.setToolTip(config.proxy.api_url)
+        self.proxy_pool.setPlainText(config.proxy.pool)
+        self.proxy_pool_uses_min.setValue(config.proxy.pool_uses_min)
+        self.proxy_pool_uses_max.setValue(config.proxy.pool_uses_max)
         self.proxy_import.clear()
+        self.telegram_enabled.setChecked(config.telegram.enabled)
+        self.telegram_bot_token.setText(config.telegram.bot_token)
+        self.telegram_chat_id.setText(config.telegram.chat_id)
         self._update_proxy_fields()
+        self._update_telegram_fields()
 
     def collect_config(self) -> AppConfig:
         registration = RegistrationDefaults(
@@ -636,12 +747,20 @@ class MainWindow(QMainWindow):
         proxy = ProxyConfig(
             mode=str(self.proxy_mode.currentData() or "none"),
             proxy_type=str(self.proxy_type.currentData() or "socks5"),
+            pool=self.proxy_pool.toPlainText().strip(),
+            pool_uses_min=self.proxy_pool_uses_min.value(),
+            pool_uses_max=self.proxy_pool_uses_max.value(),
             host=self.proxy_host.text().strip(),
             port=self.proxy_port.text().strip(),
             username=self.proxy_username.text().strip(),
             password=self.proxy_password.text(),
             api_url=self.proxy_api_url.text().strip(),
             api_timeout_seconds=self.config.proxy.api_timeout_seconds,
+        )
+        telegram = TelegramConfig(
+            enabled=self.telegram_enabled.isChecked(),
+            bot_token=self.telegram_bot_token.text().strip(),
+            chat_id=self.telegram_chat_id.text().strip(),
         )
         return replace(
             self.config,
@@ -654,8 +773,10 @@ class MainWindow(QMainWindow):
             ),
             continuous_enabled=self.continuous_enabled.isChecked(),
             continuous_count=self.continuous_count.value(),
+            continuous_workers=self.continuous_workers.value(),
             browser_channel=self.browser_channel.currentText(),
             proxy=proxy,
+            telegram=telegram,
             registration=registration,
         )
 
@@ -663,13 +784,19 @@ class MainWindow(QMainWindow):
         enabled = self.continuous_enabled.isChecked()
         self.continuous_count_label.setEnabled(enabled)
         self.continuous_count.setEnabled(enabled)
+        self.continuous_workers_label.setEnabled(enabled)
+        self.continuous_workers.setEnabled(enabled)
         target = self.continuous_count.value() if enabled else 1
+        workers = min(
+            target,
+            self.continuous_workers.value() if enabled else 1,
+        )
         if not (
             self.automation_worker
             and self.automation_worker.isRunning()
         ):
             self.batch_status.setText(
-                f"等待开始 · 共 {target} 单"
+                f"等待开始 · 共 {target} 单 · {workers} 线程"
                 if enabled
                 else "单次申请"
             )
@@ -679,20 +806,47 @@ class MainWindow(QMainWindow):
                 "开始连续申请" if enabled else "开始 / 继续申请"
             )
 
+    def _update_telegram_fields(self, *_args: object) -> None:
+        enabled = self.telegram_enabled.isChecked()
+        for widget in (
+            self.telegram_bot_token_label,
+            self.telegram_bot_token,
+            self.telegram_chat_id_label,
+            self.telegram_chat_id,
+            self.telegram_test_btn,
+        ):
+            widget.setEnabled(enabled)
+        self.telegram_status.setText(
+            "付款二维码生成后会自动发送，并附带线程、客户、订单和金额。"
+            if enabled
+            else "Telegram 推送当前未启用。"
+        )
+
     def _update_proxy_fields(self, *_args: object) -> None:
         mode = str(self.proxy_mode.currentData() or "none")
         custom = mode == "custom"
+        pool_mode = mode == "pool"
         api_mode = mode == "api"
         self._sync_proxy_protocol()
 
         for widget in (self.proxy_type_label, self.proxy_type):
-            widget.setVisible(custom or api_mode)
+            widget.setVisible(custom or pool_mode or api_mode)
         for widget in (
             self.proxy_import_label,
             self.proxy_import,
             self.proxy_import_btn,
         ):
             widget.setVisible(custom)
+        for widget in (
+            self.proxy_pool_label,
+            self.proxy_pool,
+            self.proxy_pool_import_btn,
+            self.proxy_pool_uses_min_label,
+            self.proxy_pool_uses_min,
+            self.proxy_pool_uses_max_label,
+            self.proxy_pool_uses_max,
+        ):
+            widget.setVisible(pool_mode)
         for widget in (
             self.proxy_host_label,
             self.proxy_host,
@@ -720,6 +874,12 @@ class MainWindow(QMainWindow):
                 "粘贴整行代理即可自动拆分；启动前会测试访问 CTExcel"
             )
             self.proxy_test_btn.setText("测试代理")
+        elif pool_mode:
+            self.proxy_status.setText(
+                "可一次粘贴几十个代理；每个节点按设定次数使用后"
+                "自动切换到下一个"
+            )
+            self.proxy_test_btn.setText("测试代理池")
         else:
             self.proxy_status.setText(
                 "接口返回的 HOST:PORT:USERNAME:PASSWORD 会自动识别，"
@@ -733,6 +893,49 @@ class MainWindow(QMainWindow):
         self.proxy_api_url.setToolTip(self.proxy_api_url.text().strip())
         if mode != "none":
             self.proxy_status.setText("代理配置已修改，请提取并测试")
+
+    def test_telegram(self) -> None:
+        if self.telegram_worker and self.telegram_worker.isRunning():
+            return
+        config = TelegramConfig(
+            enabled=True,
+            bot_token=self.telegram_bot_token.text().strip(),
+            chat_id=self.telegram_chat_id.text().strip(),
+        )
+        self.telegram_test_btn.setEnabled(False)
+        self.telegram_status.setText("正在发送 Telegram 测试消息……")
+        proxy_config = self.collect_config().proxy
+
+        def run_test() -> dict:
+            prepared = prepare_proxy(proxy_config)
+            with TelegramNotifier(
+                config,
+                proxy=prepared.playwright_proxy,
+            ) as notifier:
+                return notifier.send_test()
+
+        self.telegram_worker = ApiWorker(run_test)
+        self.telegram_worker.succeeded.connect(self._telegram_test_ok)
+        self.telegram_worker.failed.connect(self._telegram_test_failed)
+        self.telegram_worker.finished.connect(
+            lambda: self.telegram_test_btn.setEnabled(
+                self.telegram_enabled.isChecked()
+            )
+        )
+        self.telegram_worker.start()
+
+    def _telegram_test_ok(self, _result: object) -> None:
+        self.telegram_status.setText("Telegram 测试消息已发送")
+        self.log("Telegram Bot 测试推送成功")
+
+    def _telegram_test_failed(self, message: str) -> None:
+        self.telegram_status.setText(f"Telegram 测试失败：{message}")
+        self.log(f"Telegram 测试失败：{message}")
+        self._show_message(
+            QMessageBox.Warning,
+            "Telegram 测试失败",
+            message,
+        )
 
     def _sync_proxy_protocol(self) -> None:
         mode = str(self.proxy_mode.currentData() or "none")
@@ -758,6 +961,21 @@ class MainWindow(QMainWindow):
         value = QGuiApplication.clipboard().text().strip()
         self.proxy_import.setText(value)
         self._apply_proxy_line(show_error=True)
+
+    def import_proxy_pool_from_clipboard(self) -> None:
+        value = QGuiApplication.clipboard().text().strip()
+        if not value:
+            self._show_message(
+                QMessageBox.Warning,
+                "代理池",
+                "剪贴板中没有代理内容。",
+            )
+            return
+        self.proxy_pool.setPlainText(value)
+        count = len([line for line in value.splitlines() if line.strip()])
+        self.proxy_status.setText(
+            f"已粘贴 {count} 行代理，点击“测试代理池”验证"
+        )
 
     def _apply_proxy_line(self, *, show_error: bool = False) -> None:
         value = self.proxy_import.text().strip()
@@ -1007,6 +1225,7 @@ class MainWindow(QMainWindow):
             self.config.continuous_enabled,
             target,
             self.config.purchase_route,
+            self.config.continuous_workers,
         )
         resume = (
             self.batch_resume_pending
@@ -1028,6 +1247,7 @@ class MainWindow(QMainWindow):
             self.log_box.clear()
             self.log(
                 f"开始 CTExcel 申请流程，共 {target} 单；"
+                f"并发 {min(target, self.config.continuous_workers)} 线程；"
                 "优先检查并继续未生成订单的客户"
             )
         else:
@@ -1055,6 +1275,11 @@ class MainWindow(QMainWindow):
         self.purchase_route.setEnabled(False)
         self.continuous_enabled.setEnabled(False)
         self.continuous_count.setEnabled(False)
+        self.continuous_workers.setEnabled(False)
+        self.telegram_enabled.setEnabled(False)
+        self.telegram_bot_token.setEnabled(False)
+        self.telegram_chat_id.setEnabled(False)
+        self.telegram_test_btn.setEnabled(False)
         self.save_btn.setEnabled(False)
         self.automation_worker.start()
 
@@ -1065,8 +1290,13 @@ class MainWindow(QMainWindow):
 
     def on_stage(self, stage: str) -> None:
         self.stage_label.setText(stage)
+        base_stage = (
+            stage.split("：", 1)[1]
+            if stage.startswith("线程 ") and "：" in stage
+            else stage
+        )
         try:
-            index = self.STAGES.index(stage) + 1
+            index = self.STAGES.index(base_stage) + 1
         except ValueError:
             index = self.progress.value()
         self.progress.setValue(index)
@@ -1084,9 +1314,12 @@ class MainWindow(QMainWindow):
 
     def on_item_started(self, ordinal: int, total: int) -> None:
         self.batch_target_count = total
-        self.batch_status.setText(f"正在处理第 {ordinal} / {total} 单")
+        self.batch_status.setText(
+            f"已调度第 {ordinal} / {total} 单 · "
+            f"已完成 {self.batch_completed_count}"
+        )
         self.batch_progress.setRange(0, total)
-        self.batch_progress.setValue(max(0, ordinal - 1))
+        self.batch_progress.setValue(self.batch_completed_count)
 
     def on_item_completed(
         self,
@@ -1106,7 +1339,8 @@ class MainWindow(QMainWindow):
             else f"本轮 {total} 单全部完成"
         )
         self.log(
-            f"第 {ordinal} 单完成：客户 #{payload.customer_id} · "
+            f"第 {payload.batch_ordinal or ordinal} 单完成："
+            f"客户 #{payload.customer_id} · "
             f"{payload.order_number or '订单号等待同步'}"
         )
 
@@ -1182,6 +1416,11 @@ class MainWindow(QMainWindow):
         self.continuous_count.setEnabled(
             self.continuous_enabled.isChecked()
         )
+        self.continuous_workers.setEnabled(
+            self.continuous_enabled.isChecked()
+        )
+        self.telegram_enabled.setEnabled(True)
+        self._update_telegram_fields()
         self.save_btn.setEnabled(True)
 
     def copy_current_email(self) -> None:

@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ThreadPoolExecutor,
+    wait,
+)
 import contextlib
 from pathlib import Path
 import re
@@ -12,6 +18,7 @@ import tempfile
 import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
+import uuid
 
 from playwright.sync_api import (
     BrowserContext,
@@ -31,9 +38,12 @@ from .config import (
 )
 from .proxy import (
     ProxyError,
+    ProxyPoolRotator,
+    browser_compatible_proxy,
     masked_proxy_label,
     prepare_proxy,
 )
+from .telegram import TelegramError, TelegramNotifier
 
 
 LogCallback = Callable[[str], None]
@@ -76,6 +86,8 @@ class AutomationResult:
     order_number: str = ""
     phone_number: str = ""
     transaction_amount: str = ""
+    batch_ordinal: int = 0
+    worker_slot: int = 1
 
 
 @dataclass
@@ -230,11 +242,24 @@ class CTExcelAutomation:
         log: LogCallback,
         stage: StageCallback,
         customer_created: CustomerCallback,
+        request_key: str = "",
+        reuse_pending_customer: bool = True,
+        worker_slot: int = 1,
+        proxy_override: Optional[dict[str, str]] = None,
     ):
         self.config = config
         self.log = log
         self.stage = stage
         self.customer_created = customer_created
+        self.request_key = (
+            str(request_key or "").strip()
+            or uuid.uuid4().hex
+        )
+        self.reuse_pending_customer = bool(reuse_pending_customer)
+        self.worker_slot = max(1, int(worker_slot))
+        self.proxy_override = (
+            dict(proxy_override) if proxy_override is not None else None
+        )
         self.stop_event = threading.Event()
         self.context: Optional[BrowserContext] = None
         self.profile_dir: Optional[Path] = None
@@ -251,7 +276,10 @@ class CTExcelAutomation:
         self._validate_registration_defaults()
         self.stage("准备浏览器代理")
         try:
-            prepared_proxy = prepare_proxy(self.config.proxy)
+            prepared_proxy = prepare_proxy(
+                self.config.proxy,
+                resolved_proxy=self.proxy_override,
+            )
             browser_proxy = prepared_proxy.playwright_proxy
             if prepared_proxy.public_ip:
                 self.log(
@@ -263,7 +291,11 @@ class CTExcelAutomation:
                 source = (
                     "动态提取"
                     if self.config.proxy.mode == "api"
-                    else "固定配置"
+                    else (
+                        "代理池"
+                        if self.config.proxy.mode == "pool"
+                        else "固定配置"
+                    )
                 )
                 self.log(
                     f"{source}代理已就绪：{masked_proxy_label(browser_proxy)}"
@@ -283,11 +315,14 @@ class CTExcelAutomation:
             api.connect()
             self.log("客户管理连接成功")
             self.stage("准备 CTExcel 客户")
-            self._refresh_pending_customers(api)
+            if self.reuse_pending_customer:
+                self._refresh_pending_customers(api)
             created = api.create_ctexcel_customer(
+                reuse_pending=self.reuse_pending_customer,
                 allow_new_after_checkpoint=(
                     self.config.continuous_enabled
                 ),
+                request_key=self.request_key,
             )
             customer_id = int(created["customer_id"])
             email = str(created["email"])
@@ -295,6 +330,7 @@ class CTExcelAutomation:
                 "customer_id": customer_id,
                 "email": email,
                 "product_type": "ctexcel",
+                "worker_slot": self.worker_slot,
             }
             self.customer_created(task)
             if created.get("reused"):
@@ -306,12 +342,22 @@ class CTExcelAutomation:
                     f"已新建 CTExcel 客户 #{customer_id}，专属邮箱：{email}"
                 )
             self._check_stop()
-            return self._run_browser(
-                api,
-                customer_id,
-                email,
-                browser_proxy=browser_proxy,
-            )
+            route = browser_compatible_proxy(browser_proxy)
+            if route.bridge:
+                self.log(
+                    "已启用本地 SOCKS5 认证桥接，"
+                    "Chrome/Edge 将通过上游账号密码代理访问"
+                )
+            try:
+                return self._run_browser(
+                    api,
+                    customer_id,
+                    email,
+                    browser_proxy=route.proxy,
+                    notification_proxy=browser_proxy,
+                )
+            finally:
+                route.close()
 
     def _refresh_pending_customers(self, api: AdminApi) -> None:
         """开始新流程前先扫描无手机号客户，避免重复建立空记录。"""
@@ -423,6 +469,7 @@ class CTExcelAutomation:
         email: str,
         *,
         browser_proxy: Optional[dict[str, str]],
+        notification_proxy: Optional[dict[str, str]],
     ) -> AutomationResult:
         self.stage("启动浏览器")
         with sync_playwright() as playwright:
@@ -439,11 +486,19 @@ class CTExcelAutomation:
                 # 该流程用于逐单人工支付；保留可观察的操作节奏，避免连续快速点击。
                 "slow_mo": max(800, int(self.config.slow_mo_ms)),
                 # 去掉 Chrome 的自动测试横幅和最明显的 webdriver 标记。
-                "ignore_default_args": ["--enable-automation"],
+                "ignore_default_args": [
+                    "--enable-automation",
+                    "--no-sandbox",
+                ],
                 "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--no-first-run",
                     "--no-default-browser-check",
+                    (
+                        "--window-position="
+                        f"{40 * ((self.worker_slot - 1) % 5)},"
+                        f"{35 * ((self.worker_slot - 1) // 5)}"
+                    ),
                 ],
             }
             channel = (self.config.browser_channel or "").strip().lower()
@@ -487,6 +542,13 @@ class CTExcelAutomation:
                     page,
                     api=api,
                     customer_id=customer_id,
+                )
+                self._push_payment_qr(
+                    page,
+                    customer_id=customer_id,
+                    email=email,
+                    pending_order=pending,
+                    browser_proxy=notification_proxy,
                 )
                 result = self._wait_for_payment_success(
                     page,
@@ -762,27 +824,92 @@ class CTExcelAutomation:
         self._wait_for_page_ready(page, "客户资料页")
 
     def _dismiss_cookie_consent(self, page: Page) -> None:
-        """拒绝非必要 Cookie，并移除会拦截页面点击的 Usercentrics 遮罩。"""
-        host = page.locator("#usercentrics-cmp-ui")
+        """拒绝非必要 Cookie，兼容 Usercentrics 新旧版 Shadow DOM。"""
         try:
-            host.wait_for(state="attached", timeout=5000)
+            page.wait_for_function(
+                """() => {
+                  const host = document.querySelector('#usercentrics-cmp-ui');
+                  const text = document.body?.innerText || '';
+                  return Boolean(host)
+                    || (text.includes('隐私设置') && text.includes('全部接受'))
+                    || text.includes('Privacy Settings');
+                }""",
+                timeout=6000,
+            )
         except PlaywrightTimeoutError:
             return
-        deny = page.locator(
-            "#usercentrics-cmp-ui button.uc-deny-button"
+
+        deny = page.get_by_role(
+            "button",
+            name=re.compile(
+                r"^(拒绝|全部拒绝|Reject|Reject all|Deny)$",
+                re.I,
+            ),
         )
         try:
-            if deny.count() and deny.first.is_visible():
-                deny.first.click(timeout=self.config.step_timeout_ms)
-                page.wait_for_function(
-                    """() => {
-                      const host = document.querySelector('#usercentrics-cmp-ui');
-                      const overlay = host?.shadowRoot?.querySelector('.overlay');
-                      return !overlay || !(overlay.offsetWidth || overlay.offsetHeight);
-                    }""",
-                    timeout=self.config.step_timeout_ms,
+            clicked = False
+            for index in range(deny.count()):
+                candidate = deny.nth(index)
+                if candidate.is_visible():
+                    candidate.click(
+                        timeout=self.config.step_timeout_ms,
+                        force=True,
+                    )
+                    clicked = True
+                    break
+            if not clicked:
+                clicked = bool(
+                    page.evaluate(
+                        """() => {
+                          const roots = [document];
+                          for (let i = 0; i < roots.length; i += 1) {
+                            for (const node of roots[i].querySelectorAll('*')) {
+                              if (node.shadowRoot) roots.push(node.shadowRoot);
+                            }
+                          }
+                          const labels = new Set([
+                            '拒绝', '全部拒绝', 'reject', 'reject all', 'deny'
+                          ]);
+                          for (const root of roots) {
+                            for (const node of root.querySelectorAll(
+                              'button, [role="button"], .uc-deny-button'
+                            )) {
+                              const text = String(
+                                node.innerText || node.textContent || ''
+                              ).trim().toLowerCase();
+                              if (labels.has(text)) {
+                                node.click();
+                                return true;
+                              }
+                            }
+                          }
+                          return false;
+                        }"""
+                    )
                 )
-                self.log("已关闭隐私设置遮罩")
+            if not clicked:
+                raise AutomationError("隐私设置弹窗中没有找到拒绝按钮")
+            page.wait_for_function(
+                """() => {
+                  const visible = node => {
+                    if (!node) return false;
+                    const style = getComputedStyle(node);
+                    const rect = node.getBoundingClientRect();
+                    return style.display !== 'none'
+                      && style.visibility !== 'hidden'
+                      && rect.width > 0
+                      && rect.height > 0;
+                  };
+                  const host = document.querySelector('#usercentrics-cmp-ui');
+                  if (!host || !visible(host)) return true;
+                  const overlay = host.shadowRoot?.querySelector(
+                    '.overlay, [role="dialog"]'
+                  );
+                  return !visible(overlay);
+                }""",
+                timeout=self.config.step_timeout_ms,
+            )
+            self.log("已自动拒绝非必要 Cookie 并关闭隐私设置")
         except PlaywrightTimeoutError as exc:
             raise AutomationError("隐私设置遮罩仍在阻挡页面操作") from exc
 
@@ -1317,6 +1444,119 @@ class CTExcelAutomation:
             page.wait_for_timeout(1000)
         raise AutomationError("等待人工支付完成超时，可在客户端重新载入该客户继续")
 
+    def _capture_payment_qr(self, page: Page) -> bytes:
+        deadline = time.monotonic() + min(
+            30,
+            max(5, int(self.config.step_timeout_ms) / 1000),
+        )
+        while time.monotonic() < deadline:
+            self._check_stop()
+            candidates = page.locator("img, canvas, svg")
+            best: Optional[Locator] = None
+            best_score = 0.0
+            for index in range(candidates.count()):
+                candidate = candidates.nth(index)
+                with contextlib.suppress(Exception):
+                    if not candidate.is_visible():
+                        continue
+                    box = candidate.bounding_box()
+                    if not box:
+                        continue
+                    width = float(box.get("width") or 0)
+                    height = float(box.get("height") or 0)
+                    if (
+                        width < 120
+                        or height < 120
+                        or width > 900
+                        or height > 900
+                    ):
+                        continue
+                    ratio = width / height if height else 0
+                    if not 0.72 <= ratio <= 1.38:
+                        continue
+                    marker = str(
+                        candidate.evaluate(
+                            """node => [
+                              node.id || '',
+                              node.className || '',
+                              node.getAttribute?.('src') || '',
+                              node.getAttribute?.('alt') || ''
+                            ].join(' ').toLowerCase()"""
+                        )
+                        or ""
+                    )
+                    score = width * height
+                    if any(
+                        token in marker
+                        for token in (
+                            "qr",
+                            "qrcode",
+                            "wechat",
+                            "weixin",
+                            "wx",
+                            "二维码",
+                            "data:image",
+                        )
+                    ):
+                        score += 1_000_000
+                    if score > best_score:
+                        best = candidate
+                        best_score = score
+            if best is not None:
+                image = best.screenshot(type="png")
+                if image:
+                    return image
+            self._wait_interruptibly(1)
+        self.log(
+            "付款页未识别到独立二维码元素，改为发送当前付款页截图"
+        )
+        return page.screenshot(type="png", full_page=False)
+
+    def _push_payment_qr(
+        self,
+        page: Page,
+        *,
+        customer_id: int,
+        email: str,
+        pending_order: dict[str, str],
+        browser_proxy: Optional[dict[str, str]],
+    ) -> None:
+        if not self.config.telegram.enabled:
+            return
+        try:
+            image = self._capture_payment_qr(page)
+            order_number = str(
+                pending_order.get("order_number") or ""
+            ).strip()
+            amount = str(
+                pending_order.get("transaction_amount") or ""
+            ).strip()
+            caption = (
+                f"CTExcel 微信付款 · 线程 {self.worker_slot}\n"
+                f"客户：#{customer_id}\n"
+                f"邮箱：{email}\n"
+                f"订单：{order_number}\n"
+                f"金额：£{amount}"
+            )
+            with TelegramNotifier(
+                self.config.telegram,
+                proxy=browser_proxy,
+            ) as notifier:
+                notifier.send_payment_qr(
+                    image,
+                    caption=caption,
+                )
+            self.log(
+                f"微信付款二维码已发送到 Telegram：{order_number}"
+            )
+        except TelegramError as exc:
+            self.log(f"Telegram 二维码推送失败：{exc}")
+        except Exception as exc:
+            self.log(
+                "Telegram 二维码截图失败："
+                f"{type(exc).__name__}: {exc}"
+            )
+
     def _visible_locator(self, locator: Locator, label: str) -> Locator:
         deadline = time.monotonic() + max(
             1,
@@ -1355,7 +1595,7 @@ class CTExcelAutomation:
 
 
 class CTExcelBatchAutomation:
-    """顺序运行多单；每单仍在微信二维码处等待人工支付。"""
+    """按配置并发运行多单；每个浏览器独立等待人工微信支付。"""
 
     def __init__(
         self,
@@ -1381,42 +1621,119 @@ class CTExcelBatchAutomation:
         self.automation_factory = automation_factory
         self.stop_event = threading.Event()
         self.session: Optional[CTExcelAutomation] = None
+        self.sessions: dict[int, CTExcelAutomation] = {}
+        self.sessions_lock = threading.Lock()
+        self.proxy_pool = (
+            ProxyPoolRotator(config.proxy)
+            if config.proxy.mode.strip().lower() == "pool"
+            else None
+        )
 
     def stop(self) -> None:
         self.stop_event.set()
-        if self.session:
+        with self.sessions_lock:
+            sessions = list(self.sessions.values())
+        for session in sessions:
+            session.stop()
+        if self.session and self.session not in sessions:
             self.session.stop()
 
-    def run(self) -> AutomationBatchResult:
-        total = application_target(self.config)
-        completed = min(self.completed_before, total)
-        last_result: Optional[AutomationResult] = None
-        if completed >= total:
-            return AutomationBatchResult(
-                completed_count=completed,
-                total_count=total,
+    def _run_item(
+        self,
+        *,
+        ordinal: int,
+        total: int,
+        worker_slot: int,
+        reuse_pending_customer: bool,
+    ) -> AutomationResult:
+        prefix = (
+            f"[线程 {worker_slot} · 第 {ordinal} 单] "
+            if min(total, self.config.continuous_workers) > 1
+            else ""
+        )
+
+        def item_log(message: str) -> None:
+            self.log(prefix + message)
+
+        def item_stage(stage: str) -> None:
+            self.stage(
+                f"线程 {worker_slot}：{stage}"
+                if prefix
+                else stage
             )
 
+        def item_customer(payload: dict[str, Any]) -> None:
+            self.customer_created(
+                {
+                    **payload,
+                    "batch_ordinal": ordinal,
+                    "worker_slot": worker_slot,
+                }
+            )
+
+        proxy_override: Optional[dict[str, str]] = None
+        if self.proxy_pool is not None:
+            lease = self.proxy_pool.next()
+            proxy_override = lease.proxy
+            item_log(
+                "代理池分配："
+                f"节点 {lease.pool_index}/{lease.pool_size}，"
+                f"本节点第 {lease.use_number}/{lease.use_limit} 次使用，"
+                f"{masked_proxy_label(lease.proxy)}"
+            )
+
+        session = self.automation_factory(
+            self.config,
+            log=item_log,
+            stage=item_stage,
+            customer_created=item_customer,
+            request_key=(
+                f"batch-{uuid.uuid4().hex}-{ordinal}"
+            ),
+            reuse_pending_customer=reuse_pending_customer,
+            worker_slot=worker_slot,
+            proxy_override=proxy_override,
+        )
+        with self.sessions_lock:
+            self.sessions[worker_slot] = session
+        if worker_slot == 1:
+            self.session = session
+        try:
+            result = session.run()
+            result.batch_ordinal = ordinal
+            result.worker_slot = worker_slot
+            return result
+        finally:
+            with self.sessions_lock:
+                self.sessions.pop(worker_slot, None)
+            if self.session is session:
+                self.session = None
+
+    def _run_serial(
+        self,
+        *,
+        total: int,
+        completed: int,
+    ) -> AutomationBatchResult:
+        last_result: Optional[AutomationResult] = None
         for ordinal in range(completed + 1, total + 1):
             if self.stop_event.is_set():
                 raise AutomationError("用户已停止连续申请")
             self.item_started(ordinal, total)
             self.log(f"开始第 {ordinal} / {total} 单申请")
-            self.session = self.automation_factory(
-                self.config,
-                log=self.log,
-                stage=self.stage,
-                customer_created=self.customer_created,
+            last_result = self._run_item(
+                ordinal=ordinal,
+                total=total,
+                worker_slot=1,
+                reuse_pending_customer=True,
             )
-            last_result = self.session.run()
-            self.session = None
-            completed = ordinal
-            self.item_completed(last_result, ordinal, total)
-            if ordinal >= total:
+            completed += 1
+            self.item_completed(last_result, completed, total)
+            if completed >= total:
                 break
             self.log(
                 f"第 {ordinal} 单支付完成；"
-                f"{total - ordinal} 单等待继续"
+                f"{total - completed} 单等待继续"
             )
             delay = max(
                 0,
@@ -1424,9 +1741,129 @@ class CTExcelBatchAutomation:
             )
             if self.stop_event.wait(delay):
                 raise AutomationError("用户已停止连续申请")
+        return AutomationBatchResult(
+            completed_count=completed,
+            total_count=total,
+            last_result=last_result,
+        )
+
+    def _run_parallel(
+        self,
+        *,
+        total: int,
+        completed: int,
+        workers: int,
+    ) -> AutomationBatchResult:
+        last_result: Optional[AutomationResult] = None
+        next_ordinal = completed + 1
+        first_ordinal = next_ordinal
+        available_slots = list(range(1, workers + 1))
+        futures: dict[Future[AutomationResult], tuple[int, int]] = {}
+
+        def submit(
+            executor: ThreadPoolExecutor,
+            *,
+            ordinal: int,
+            worker_slot: int,
+        ) -> None:
+            self.item_started(ordinal, total)
+            self.log(
+                f"线程 {worker_slot} 开始第 {ordinal} / {total} 单申请"
+            )
+            future = executor.submit(
+                self._run_item,
+                ordinal=ordinal,
+                total=total,
+                worker_slot=worker_slot,
+                reuse_pending_customer=(ordinal == first_ordinal),
+            )
+            futures[future] = (ordinal, worker_slot)
+
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="ctexcel",
+        ) as executor:
+            while next_ordinal <= total and available_slots:
+                slot = available_slots.pop(0)
+                submit(
+                    executor,
+                    ordinal=next_ordinal,
+                    worker_slot=slot,
+                )
+                next_ordinal += 1
+
+            while futures:
+                if self.stop_event.is_set():
+                    self.stop()
+                    raise AutomationError("用户已停止连续申请")
+                done, _pending = wait(
+                    tuple(futures),
+                    timeout=0.5,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    continue
+                for future in done:
+                    ordinal, slot = futures.pop(future)
+                    try:
+                        last_result = future.result()
+                    except Exception:
+                        self.stop()
+                        for pending in futures:
+                            pending.cancel()
+                        raise
+                    completed += 1
+                    self.item_completed(
+                        last_result,
+                        completed,
+                        total,
+                    )
+                    self.log(
+                        f"线程 {slot} 完成第 {ordinal} 单；"
+                        f"总进度 {completed} / {total}"
+                    )
+                    if next_ordinal <= total:
+                        submit(
+                            executor,
+                            ordinal=next_ordinal,
+                            worker_slot=slot,
+                        )
+                        next_ordinal += 1
+                    else:
+                        available_slots.append(slot)
 
         return AutomationBatchResult(
             completed_count=completed,
             total_count=total,
             last_result=last_result,
+        )
+
+    def run(self) -> AutomationBatchResult:
+        total = application_target(self.config)
+        completed = min(self.completed_before, total)
+        if completed >= total:
+            return AutomationBatchResult(
+                completed_count=completed,
+                total_count=total,
+            )
+        workers = (
+            min(
+                total - completed,
+                max(1, min(10, int(self.config.continuous_workers))),
+            )
+            if self.config.continuous_enabled
+            else 1
+        )
+        if workers <= 1:
+            return self._run_serial(
+                total=total,
+                completed=completed,
+            )
+        self.log(
+            f"并发调度已启动：{workers} 个独立浏览器线程"
+        )
+        return self._run_parallel(
+            total=total,
+            completed=completed,
+            workers=workers,
         )
