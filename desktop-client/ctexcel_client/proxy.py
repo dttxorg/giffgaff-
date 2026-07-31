@@ -107,7 +107,7 @@ def detect_public_ip(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.4.2",
+                "User-Agent": "CTExcelApplyClient/2.4.3",
             },
         ) as client:
             for endpoint in PUBLIC_IP_ENDPOINTS:
@@ -332,7 +332,10 @@ def fetch_proxy_from_api(
         if not api_key:
             raise ProxyError("请填写青果代理 API Key")
         query["key"] = api_key
-        query.setdefault("num", "1")
+        # One short-lived QG node belongs to one browser. Override links copied
+        # with distinct=false so parallel launches cannot intentionally reuse it.
+        query["num"] = "1"
+        query["distinct"] = "true"
         url = urlunsplit(parsed._replace(query=urlencode(query)))
     try:
         with httpx.Client(
@@ -342,7 +345,7 @@ def fetch_proxy_from_api(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.4.2",
+                "User-Agent": "CTExcelApplyClient/2.4.3",
             },
         ) as client:
             response = client.get(url)
@@ -503,19 +506,30 @@ def _probe_http_connect(
         headers.append(f"Proxy-Authorization: Basic {token}")
     sock.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("ascii"))
     response = bytearray()
-    while b"\r\n" not in response and len(response) < 4096:
+    while b"\r\n\r\n" not in response and len(response) < 16384:
         chunk = sock.recv(512)
         if not chunk:
             break
         response.extend(chunk)
-    first_line = bytes(response).split(b"\r\n", 1)[0].decode(
+    raw_response = bytes(response)
+    first_line = raw_response.split(b"\r\n", 1)[0].decode(
         "latin-1",
         "replace",
     )
     if not re.match(r"HTTP/\d(?:\.\d)?\s+200\b", first_line):
-        raise ProxyError(
-            "HTTP 代理拒绝 CONNECT；请检查白名单、账号密码或代理协议"
-        )
+        while len(response) < 16384:
+            chunk = sock.recv(512)
+            if not chunk:
+                break
+            response.extend(chunk)
+        body = bytes(response).partition(b"\r\n\r\n")[2]
+        detail = " ".join(
+            body.decode("utf-8", "replace").split()
+        )[:500]
+        message = f"HTTP 代理 CONNECT 返回 {first_line}"
+        if detail:
+            message += f"：{detail}"
+        raise ProxyError(message)
 
 
 def probe_proxy_endpoint(
@@ -786,9 +800,10 @@ def prepare_proxy(
             details.extend(
                 [
                     "",
-                    "该完整提取链接不使用客户端公网 IP 白名单。",
-                    "请确认代理协议与所购产品一致、节点仍在有效期内，"
-                    "然后重新提取测试。",
+                    "提取接口的 key 只负责获取节点；代理连接另行使用 "
+                    "Authkey / Authpwd。",
+                    "请在 API 动态提取模式填写代理连接账号密码，并确认"
+                    "代理协议与所购产品一致。",
                 ]
             )
         elif api_mode:

@@ -240,7 +240,7 @@ def test_qg_proxy_api_accepts_txt_format_and_preserves_parameters():
     assert calls[0].url.params["isp"] == "0"
     assert calls[0].url.params["format"] == "txt"
     assert calls[0].url.params["seq"] == r"\r\n"
-    assert calls[0].url.params["distinct"] == "false"
+    assert calls[0].url.params["distinct"] == "true"
 
 
 @pytest.mark.parametrize(
@@ -407,7 +407,9 @@ def test_socks5_probe_reports_whitelist_or_auth_rejection(monkeypatch):
 
 
 def test_http_proxy_probe_uses_connect_and_optional_auth(monkeypatch):
-    fake_socket = FakeSocket([b"HTTP/1.1 200 Connection established\r\n"])
+    fake_socket = FakeSocket(
+        [b"HTTP/1.1 200 Connection established\r\n\r\n"]
+    )
     monkeypatch.setattr(
         "ctexcel_client.proxy.socket.create_connection",
         lambda *_args, **_kwargs: fake_socket,
@@ -427,6 +429,28 @@ def test_http_proxy_probe_uses_connect_and_optional_auth(monkeypatch):
     )
     assert "Proxy-Authorization: Basic " in request
     assert "proxy-pass" not in request
+
+
+def test_http_proxy_probe_surfaces_actual_407_detail(monkeypatch):
+    fake_socket = FakeSocket(
+        [
+            b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+            b"Proxy-Authenticate: Basic realm=\"\"\r\n\r\n",
+            b"proxy authorization invalid, client ip 192.0.2.10 "
+            b"authorization failed",
+        ]
+    )
+    monkeypatch.setattr(
+        "ctexcel_client.proxy.socket.create_connection",
+        lambda *_args, **_kwargs: fake_socket,
+    )
+
+    with pytest.raises(ProxyError) as exc_info:
+        probe_proxy_endpoint({"server": "http://203.0.113.43:8080"})
+
+    message = str(exc_info.value)
+    assert "407 Proxy Authentication Required" in message
+    assert "client ip 192.0.2.10 authorization failed" in message
 
 
 def test_proxy_api_http_error_does_not_echo_secret_url():
@@ -476,7 +500,7 @@ def test_prepare_proxy_adds_detected_public_ip_to_whitelist_error(
     assert "已按 SOCKS5 协议验证" in message
 
 
-def test_qg_prepare_proxy_skips_public_ip_and_whitelist_guidance(
+def test_qg_prepare_proxy_explains_separate_connection_credentials(
     monkeypatch,
 ):
     config = ProxyConfig(
@@ -510,7 +534,19 @@ def test_qg_prepare_proxy_skips_public_ip_and_whitelist_guidance(
         prepare_proxy(config)
 
     message = str(exc_info.value)
-    assert "该完整提取链接不使用客户端公网 IP 白名单" in message
-    assert "代理协议与所购产品一致" in message
+    assert "提取接口的 key 只负责获取节点" in message
+    assert "Authkey / Authpwd" in message
     assert "当前出口公网 IP" not in message
     assert "局域网 IP 或服务器 IP" not in message
+
+
+def test_qg_api_uses_http_and_connection_credentials():
+    config = ProxyConfig(
+        mode="api",
+        proxy_type="socks5",
+        api_url=DEFAULT_PROXY_API_URL,
+        username="auth-key",
+        password="auth-password",
+    )
+
+    assert config.effective_proxy_type() == "http"

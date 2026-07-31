@@ -529,6 +529,44 @@ def test_continuous_runner_supports_ten_safe_parallel_workers():
     assert sorted(completed_ordinals) == list(range(1, 13))
 
 
+def test_qg_allocator_retries_duplicate_ip_and_assigns_unique_nodes(
+    monkeypatch,
+):
+    responses = iter(
+        [
+            {"server": "http://198.51.100.1:10001"},
+            {"server": "http://198.51.100.1:10002"},
+            {"server": "http://198.51.100.2:10003"},
+        ]
+    )
+    monkeypatch.setattr(
+        "ctexcel_client.automation.resolve_proxy",
+        lambda _config: next(responses),
+    )
+    config = AppConfig(
+        proxy=ProxyConfig(
+            mode="api",
+            api_url="https://share.proxy.qg.net/get?num=1",
+            api_key="test-key",
+        )
+    )
+    runner = CTExcelBatchAutomation(
+        config,
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+        item_started=lambda *_args: None,
+        item_completed=lambda *_args: None,
+    )
+
+    first = runner._next_unique_qg_proxy()
+    second = runner._next_unique_qg_proxy()
+
+    assert first["server"] == "http://198.51.100.1:10001"
+    assert second["server"] == "http://198.51.100.2:10003"
+    assert runner.qg_proxy_ips == {"198.51.100.1", "198.51.100.2"}
+
+
 def test_loading_overlay_waits_until_the_page_is_stably_ready():
     class FakePage:
         def __init__(self):

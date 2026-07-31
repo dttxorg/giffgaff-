@@ -196,6 +196,8 @@ class ProxyConfig:
     def effective_proxy_type(self) -> str:
         if self.mode == "api" and is_cliproxy_whitelist_url(self.api_url):
             return "socks5"
+        if self.mode == "api" and is_qg_proxy_api_url(self.api_url):
+            return "http"
         return self.proxy_type.strip().lower() or "socks5"
 
     def playwright_proxy(self) -> Optional[dict[str, str]]:

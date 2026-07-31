@@ -44,7 +44,7 @@ def test_client_ui_uses_scoped_api_without_hidden_entry_field():
     assert "self.continuous_workers.setRange(1, 10)" in source
     assert '"Telegram 付款提醒"' in source
     assert '"测试推送"' in source
-    assert __version__ == "2.4.2"
+    assert __version__ == "2.4.3"
     assert 'f"CTExcel 申请工作台 v{__version__}"' in source
 
 
@@ -132,10 +132,10 @@ def test_proxy_ui_exposes_fixed_and_dynamic_socks5_modes():
         / "main_window.py"
     ).read_text(encoding="utf-8")
 
-    assert '"粘贴单条代理", "custom"' in source
-    assert '"批量代理池", "pool"' in source
-    assert '"API 动态提取", "api"' in source
-    assert '"SOCKS5", "socks5"' in source
+    assert '"青果网络 · 每浏览器独立 IP", "api"' in source
+    assert '"粘贴单条代理", "custom"' not in source
+    assert '"批量代理池", "pool"' not in source
+    assert 'self.proxy_type.addItem("HTTP", "http")' in source
     assert "提取并测试" in source
     assert "hostname:port:username:password" in source
     assert "从剪贴板导入" in source
@@ -145,10 +145,13 @@ def test_proxy_ui_exposes_fixed_and_dynamic_socks5_modes():
     assert "当前出口公网 IP" in source
     assert "background-color: #ffffff" in source
     assert "Qt.TextSelectableByMouse" in source
-    assert 'self.proxy_api_url_label = self._field_label("完整提取链接")' in source
+    assert 'self.proxy_api_url_label = self._field_label("青果完整提取链接")' in source
     assert "self.proxy_api_key" not in source
     assert "直接粘贴服务商生成的完整 /get 链接" in source
-    assert "widget.setVisible(api_mode and not qg_api)" in source
+    assert "widget.setVisible(custom or api_mode)" in source
+    assert "Authkey（代理连接账号）" in source
+    assert "Authpwd（代理连接密码）" in source
+    assert 'required_type = "http" if qg_api else "socks5"' in source
     assert is_qg_proxy_api_url(DEFAULT_PROXY_API_URL)
 
 

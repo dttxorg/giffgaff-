@@ -37,6 +37,7 @@ from .config import (
     PURCHASE_ROUTE_FREECARD,
     RegistrationDefaults,
     app_config_dir,
+    is_qg_proxy_api_url,
 )
 from .proxy import (
     BrowserProxyRoute,
@@ -46,6 +47,7 @@ from .proxy import (
     masked_proxy_label,
     prepare_proxy,
     probe_proxy_endpoint,
+    resolve_proxy,
 )
 from .telegram import TelegramError, TelegramNotifier
 
@@ -1782,6 +1784,20 @@ class CTExcelBatchAutomation:
             if config.proxy.mode.strip().lower() == "pool"
             else None
         )
+        self.qg_proxy_lock = threading.Lock()
+        self.qg_proxy_ips: set[str] = set()
+
+    def _next_unique_qg_proxy(self) -> dict[str, str]:
+        """Serialize extraction and never assign one QG IP to two browsers."""
+        with self.qg_proxy_lock:
+            for _attempt in range(6):
+                proxy = resolve_proxy(self.config.proxy)
+                parsed = urlsplit(str(proxy.get("server") or ""))
+                ip = parsed.hostname or ""
+                if ip and ip not in self.qg_proxy_ips:
+                    self.qg_proxy_ips.add(ip)
+                    return proxy
+            raise ProxyError("青果连续返回重复 IP，已停止创建共用节点的浏览器")
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -1827,7 +1843,19 @@ class CTExcelBatchAutomation:
             )
 
         proxy_override: Optional[dict[str, str]] = None
-        if self.proxy_pool is not None:
+        if (
+            self.config.proxy.mode.strip().lower() == "api"
+            and is_qg_proxy_api_url(self.config.proxy.api_url)
+        ):
+            try:
+                proxy_override = self._next_unique_qg_proxy()
+            except ProxyError as exc:
+                raise AutomationError(f"青果独立 IP 提取失败：{exc}") from exc
+            item_log(
+                "本浏览器已独立提取青果节点："
+                f"{masked_proxy_label(proxy_override)}"
+            )
+        elif self.proxy_pool is not None:
             lease = self.proxy_pool.next()
             proxy_override = lease.proxy
             item_log(

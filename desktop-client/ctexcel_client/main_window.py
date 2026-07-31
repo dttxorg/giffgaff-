@@ -352,24 +352,20 @@ class MainWindow(QMainWindow):
 
     def _proxy_card(self) -> QFrame:
         card, layout = self._card(
-            "浏览器代理",
-            "支持 HTTP / SOCKS5 单条、批量代理池和 API 动态提取。",
+            "青果网络代理",
+            "每个浏览器启动前独立提取一个短效 IP，避免并发浏览器共用节点。",
         )
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(8)
 
         self.proxy_mode = QComboBox()
-        self.proxy_mode.addItem("直连", "none")
-        self.proxy_mode.addItem("粘贴单条代理", "custom")
-        self.proxy_mode.addItem("批量代理池", "pool")
-        self.proxy_mode.addItem("API 动态提取", "api")
+        self.proxy_mode.addItem("青果网络 · 每浏览器独立 IP", "api")
         self.proxy_mode.currentIndexChanged.connect(self._update_proxy_fields)
 
         self.proxy_type = QComboBox()
-        self.proxy_type.addItem("SOCKS5", "socks5")
         self.proxy_type.addItem("HTTP", "http")
-        self.proxy_type.addItem("HTTPS", "https")
+        self.proxy_type.setEnabled(False)
 
         self.proxy_import = QLineEdit()
         self.proxy_import.setPlaceholderText(
@@ -407,9 +403,9 @@ class MainWindow(QMainWindow):
         self.proxy_port = QLineEdit()
         self.proxy_port.setPlaceholderText("端口")
         self.proxy_username = QLineEdit()
-        self.proxy_username.setPlaceholderText("可选")
+        self.proxy_username.setPlaceholderText("可选；青果填写 Authkey")
         self.proxy_password = QLineEdit()
-        self.proxy_password.setPlaceholderText("可选")
+        self.proxy_password.setPlaceholderText("可选；青果填写 Authpwd")
         self.proxy_password.setEchoMode(QLineEdit.Password)
         self.proxy_api_url = QLineEdit()
         self.proxy_api_url.setPlaceholderText(
@@ -417,7 +413,7 @@ class MainWindow(QMainWindow):
         )
         self.proxy_api_url.setClearButtonEnabled(True)
 
-        self.proxy_mode_label = self._field_label("代理模式")
+        self.proxy_mode_label = self._field_label("代理服务")
         self.proxy_type_label = self._field_label("代理协议")
         self.proxy_import_label = self._field_label(
             "整行代理（推荐，无需逐项填写）"
@@ -431,7 +427,7 @@ class MainWindow(QMainWindow):
         self.proxy_port_label = self._field_label("已解析端口")
         self.proxy_username_label = self._field_label("已解析账号")
         self.proxy_password_label = self._field_label("已解析密码")
-        self.proxy_api_url_label = self._field_label("完整提取链接")
+        self.proxy_api_url_label = self._field_label("青果完整提取链接")
 
         grid.addWidget(self.proxy_mode_label, 0, 0)
         grid.addWidget(self.proxy_type_label, 0, 1)
@@ -906,10 +902,16 @@ class MainWindow(QMainWindow):
             self.proxy_password_label,
             self.proxy_password,
         ):
-            widget.setVisible(custom)
+            widget.setVisible(custom or api_mode)
         for widget in (self.proxy_api_url_label, self.proxy_api_url):
             widget.setVisible(api_mode)
         qg_api = api_mode and is_qg_proxy_api_url(self.proxy_api_url.text())
+        self.proxy_username_label.setText(
+            "Authkey（代理连接账号）" if qg_api else "代理账号（可选）"
+        )
+        self.proxy_password_label.setText(
+            "Authpwd（代理连接密码）" if qg_api else "代理密码（可选）"
+        )
         for widget in (self.public_ip_status, self.copy_public_ip_btn):
             widget.setVisible(api_mode and not qg_api)
         self.proxy_test_btn.setEnabled(mode != "none")
@@ -931,7 +933,7 @@ class MainWindow(QMainWindow):
             if qg_api:
                 self.proxy_status.setText(
                     "直接粘贴服务商生成的完整 /get 链接；客户端从返回内容"
-                    "提取代理节点"
+                    "提取代理节点，并使用 Authkey / Authpwd 连接"
                 )
             else:
                 self.proxy_status.setText(
@@ -945,6 +947,12 @@ class MainWindow(QMainWindow):
         self._sync_proxy_protocol()
         qg_api = mode == "api" and is_qg_proxy_api_url(
             self.proxy_api_url.text()
+        )
+        self.proxy_username_label.setText(
+            "Authkey（代理连接账号）" if qg_api else "代理账号（可选）"
+        )
+        self.proxy_password_label.setText(
+            "Authpwd（代理连接密码）" if qg_api else "代理密码（可选）"
         )
         for widget in (self.public_ip_status, self.copy_public_ip_btn):
             widget.setVisible(mode == "api" and not qg_api)
@@ -997,19 +1005,26 @@ class MainWindow(QMainWindow):
 
     def _sync_proxy_protocol(self) -> None:
         mode = str(self.proxy_mode.currentData() or "none")
+        qg_api = (
+            mode == "api"
+            and is_qg_proxy_api_url(self.proxy_api_url.text())
+        )
         cliproxy = (
             mode == "api"
             and is_cliproxy_whitelist_url(self.proxy_api_url.text())
         )
-        if cliproxy:
-            index = self.proxy_type.findData("socks5")
+        if qg_api or cliproxy:
+            required_type = "http" if qg_api else "socks5"
+            index = self.proxy_type.findData(required_type)
             if index >= 0 and self.proxy_type.currentIndex() != index:
                 self.proxy_type.blockSignals(True)
                 self.proxy_type.setCurrentIndex(index)
                 self.proxy_type.blockSignals(False)
             self.proxy_type.setEnabled(False)
             self.proxy_type.setToolTip(
-                "该白名单提取接口会自动按 SOCKS5 使用"
+                "青果短效代理节点按 HTTP 使用"
+                if qg_api
+                else "该白名单提取接口会自动按 SOCKS5 使用"
             )
         else:
             self.proxy_type.setEnabled(mode != "none")
