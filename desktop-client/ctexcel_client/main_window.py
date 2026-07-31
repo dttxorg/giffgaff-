@@ -42,6 +42,7 @@ from .config import (
     RegistrationDefaults,
     TelegramConfig,
     is_cliproxy_whitelist_url,
+    is_qg_proxy_api_url,
     load_config,
     save_config,
 )
@@ -409,9 +410,13 @@ class MainWindow(QMainWindow):
         self.proxy_password.setEchoMode(QLineEdit.Password)
         self.proxy_api_url = QLineEdit()
         self.proxy_api_url.setPlaceholderText(
-            "https://代理服务/api?...&format=n&type=txt"
+            "https://share.proxy.qg.net/get?num=1&distinct=true"
         )
         self.proxy_api_url.setClearButtonEnabled(True)
+        self.proxy_api_key = QLineEdit()
+        self.proxy_api_key.setPlaceholderText("产品唯一标识 key")
+        self.proxy_api_key.setEchoMode(QLineEdit.Password)
+        self.proxy_api_key.setClearButtonEnabled(True)
 
         self.proxy_mode_label = self._field_label("代理模式")
         self.proxy_type_label = self._field_label("代理协议")
@@ -428,6 +433,7 @@ class MainWindow(QMainWindow):
         self.proxy_username_label = self._field_label("已解析账号")
         self.proxy_password_label = self._field_label("已解析密码")
         self.proxy_api_url_label = self._field_label("提取接口")
+        self.proxy_api_key_label = self._field_label("青果代理 API Key")
 
         grid.addWidget(self.proxy_mode_label, 0, 0)
         grid.addWidget(self.proxy_type_label, 0, 1)
@@ -456,6 +462,8 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.proxy_password, 12, 1)
         grid.addWidget(self.proxy_api_url_label, 13, 0, 1, 2)
         grid.addWidget(self.proxy_api_url, 14, 0, 1, 2)
+        grid.addWidget(self.proxy_api_key_label, 15, 0, 1, 2)
+        grid.addWidget(self.proxy_api_key, 16, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
@@ -491,6 +499,7 @@ class MainWindow(QMainWindow):
             self.proxy_username,
             self.proxy_password,
             self.proxy_api_url,
+            self.proxy_api_key,
         ):
             if isinstance(field, QLineEdit):
                 field.textChanged.connect(self._proxy_fields_changed)
@@ -719,6 +728,7 @@ class MainWindow(QMainWindow):
         self.proxy_username.setText(config.proxy.username)
         self.proxy_password.setText(config.proxy.password)
         self.proxy_api_url.setText(config.proxy.api_url)
+        self.proxy_api_key.setText(config.proxy.api_key)
         self.proxy_api_url.setCursorPosition(0)
         self.proxy_api_url.setToolTip(config.proxy.api_url)
         self.proxy_pool.setPlainText(config.proxy.pool)
@@ -756,6 +766,7 @@ class MainWindow(QMainWindow):
             username=self.proxy_username.text().strip(),
             password=self.proxy_password.text(),
             api_url=self.proxy_api_url.text().strip(),
+            api_key=self.proxy_api_key.text().strip(),
             api_timeout_seconds=self.config.proxy.api_timeout_seconds,
         )
         telegram = TelegramConfig(
@@ -864,6 +875,9 @@ class MainWindow(QMainWindow):
             widget.setVisible(custom)
         for widget in (self.proxy_api_url_label, self.proxy_api_url):
             widget.setVisible(api_mode)
+        qg_api = api_mode and is_qg_proxy_api_url(self.proxy_api_url.text())
+        for widget in (self.proxy_api_key_label, self.proxy_api_key):
+            widget.setVisible(qg_api)
         for widget in (self.public_ip_status, self.copy_public_ip_btn):
             widget.setVisible(api_mode)
         self.proxy_test_btn.setEnabled(mode != "none")
@@ -882,15 +896,26 @@ class MainWindow(QMainWindow):
             )
             self.proxy_test_btn.setText("测试代理池")
         else:
-            self.proxy_status.setText(
-                "接口返回的 HOST:PORT:USERNAME:PASSWORD 会自动识别，"
-                "无需逐项填写"
-            )
+            if qg_api:
+                self.proxy_status.setText(
+                    "青果 /get 每单提取 1 个节点；支持 area、area_ex、"
+                    "isp、distinct 查询参数"
+                )
+            else:
+                self.proxy_status.setText(
+                    "接口返回的 HOST:PORT:USERNAME:PASSWORD 会自动识别，"
+                    "无需逐项填写"
+                )
             self.proxy_test_btn.setText("提取并测试")
 
     def _proxy_fields_changed(self, *_args: object) -> None:
         mode = str(self.proxy_mode.currentData() or "none")
         self._sync_proxy_protocol()
+        qg_api = mode == "api" and is_qg_proxy_api_url(
+            self.proxy_api_url.text()
+        )
+        for widget in (self.proxy_api_key_label, self.proxy_api_key):
+            widget.setVisible(qg_api)
         self.proxy_api_url.setToolTip(self.proxy_api_url.text().strip())
         if mode != "none":
             self.proxy_status.setText("代理配置已修改，请提取并测试")
