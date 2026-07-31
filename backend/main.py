@@ -753,6 +753,9 @@ async def _claim_pending_ctexcel_auto_sync_customers() -> list[dict]:
             """SELECT *
                FROM customers
                WHERE product_type = 'ctexcel'
+                 AND NULLIF(
+                       TRIM(ctexcel_registration_confirmed_at), ''
+                     ) IS NULL
                  AND (
                        NULLIF(TRIM(phone_number), '') IS NULL
                        OR NULLIF(TRIM(ctexcel_order_number), '') IS NULL

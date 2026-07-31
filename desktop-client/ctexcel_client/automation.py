@@ -277,6 +277,8 @@ class CTExcelAutomation:
         with AdminApi(
             self.config.server_url,
             self.config.app_password,
+            retry_callback=self.log,
+            sleep=self._wait_interruptibly,
         ) as api:
             api.connect()
             self.log("客户管理连接成功")

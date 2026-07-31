@@ -1,12 +1,46 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+import time
+from typing import Any, Callable, Optional
 
 import httpx
 
 
 class ApiError(RuntimeError):
     pass
+
+
+TRANSIENT_STATUS_CODES = {
+    408,
+    425,
+    500,
+    502,
+    503,
+    504,
+    520,
+    521,
+    522,
+    523,
+    524,
+    525,
+    526,
+}
+DEFAULT_RETRY_DELAYS = (
+    2.0,
+    4.0,
+    8.0,
+    15.0,
+    30.0,
+    30.0,
+    30.0,
+    30.0,
+    30.0,
+    30.0,
+    30.0,
+    30.0,
+    30.0,
+    30.0,
+)
 
 
 class AdminApi:
@@ -19,11 +53,14 @@ class AdminApi:
         *,
         timeout: float = 25.0,
         transport: Optional[httpx.BaseTransport] = None,
+        retry_callback: Optional[Callable[[str], None]] = None,
+        retry_delays: tuple[float, ...] = DEFAULT_RETRY_DELAYS,
+        sleep: Callable[[float], None] = time.sleep,
     ):
         self.server_url = server_url.strip().rstrip("/")
         self.app_password = app_password.strip()
         headers = {
-            "User-Agent": "CTExcelApplyClient/2.3.6",
+            "User-Agent": "CTExcelApplyClient/2.3.7",
             "Accept": "application/json",
         }
         if self.app_password:
@@ -34,6 +71,12 @@ class AdminApi:
             transport=transport,
             headers=headers,
         )
+        self.retry_callback = retry_callback
+        self.retry_delays = tuple(
+            max(0.0, float(delay))
+            for delay in retry_delays
+        )
+        self.sleep = sleep
 
     def close(self) -> None:
         self.client.close()
@@ -59,6 +102,24 @@ class AdminApi:
             return ""
         return str(data.get("detail") or "") if isinstance(data, dict) else ""
 
+    def _retry(
+        self,
+        *,
+        attempt: int,
+        reason: str,
+    ) -> bool:
+        if attempt >= len(self.retry_delays):
+            return False
+        delay = self.retry_delays[attempt]
+        if self.retry_callback:
+            self.retry_callback(
+                f"客户管理临时连接异常（{reason}），"
+                f"{delay:g} 秒后自动重试 "
+                f"{attempt + 1}/{len(self.retry_delays)}"
+            )
+        self.sleep(delay)
+        return True
+
     def _request(
         self,
         method: str,
@@ -68,29 +129,55 @@ class AdminApi:
     ) -> Any:
         if not self.app_password:
             raise ApiError("请填写客户端连接口令")
-        try:
-            response = self.client.request(
-                method,
-                self._url(path),
-                json=json_body,
-            )
-        except httpx.HTTPError as exc:
-            raise ApiError(f"连接服务器失败：{exc}") from exc
-        if response.status_code >= 400:
-            detail = self._detail(response)
-            if response.status_code == 401:
-                detail = detail or "客户端连接口令错误"
-            elif response.status_code == 404:
-                detail = "服务器尚未启用 CTExcel 客户端 API"
-            elif response.status_code == 429:
-                detail = detail or "连接失败次数过多，请稍后再试"
-            raise ApiError(detail or f"服务器返回 HTTP {response.status_code}")
-        if not response.content:
-            return {}
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise ApiError("服务器接口返回格式错误") from exc
+        url = self._url(path)
+        for attempt in range(len(self.retry_delays) + 1):
+            try:
+                response = self.client.request(
+                    method,
+                    url,
+                    json=json_body,
+                )
+            except httpx.HTTPError as exc:
+                if self._retry(
+                    attempt=attempt,
+                    reason=type(exc).__name__,
+                ):
+                    continue
+                raise ApiError(f"连接服务器失败：{exc}") from exc
+
+            if (
+                response.status_code in TRANSIENT_STATUS_CODES
+                or 500 <= response.status_code <= 599
+            ):
+                if self._retry(
+                    attempt=attempt,
+                    reason=f"HTTP {response.status_code}",
+                ):
+                    continue
+
+            if response.status_code >= 400:
+                detail = self._detail(response)
+                if response.status_code == 401:
+                    detail = detail or "客户端连接口令错误"
+                elif response.status_code == 404:
+                    detail = "服务器尚未启用 CTExcel 客户端 API"
+                elif response.status_code == 429:
+                    detail = detail or "连接失败次数过多，请稍后再试"
+                raise ApiError(
+                    detail or f"服务器返回 HTTP {response.status_code}"
+                )
+            if not response.content:
+                return {}
+            try:
+                return response.json()
+            except ValueError as exc:
+                if self._retry(
+                    attempt=attempt,
+                    reason="响应格式不完整",
+                ):
+                    continue
+                raise ApiError("服务器接口返回格式错误") from exc
+        raise ApiError("客户管理连接重试结束")
 
     def connect(self) -> dict[str, Any]:
         status = self._request("GET", "/api/ctexcel-client/status")

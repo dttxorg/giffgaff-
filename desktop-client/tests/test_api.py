@@ -170,3 +170,84 @@ def test_client_api_reports_missing_server_endpoint():
             raise AssertionError("expected ApiError")
 
     assert message == "服务器尚未启用 CTExcel 客户端 API"
+
+
+def test_client_api_retries_cloudflare_5xx_before_creating_customer():
+    attempts = []
+    messages = []
+    sleeps = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(json.loads(request.content))
+        if len(attempts) < 3:
+            return httpx.Response(
+                502,
+                text=(
+                    "The origin web server returned an invalid or "
+                    "incomplete response to Cloudflare."
+                ),
+            )
+        return httpx.Response(
+            201,
+            json={
+                "customer_id": 489,
+                "email": "retry@example.test",
+                "reused": True,
+            },
+        )
+
+    with AdminApi(
+        "https://manager.example.test",
+        "app-secret",
+        transport=httpx.MockTransport(handler),
+        retry_callback=messages.append,
+        retry_delays=(2, 4),
+        sleep=sleeps.append,
+    ) as api:
+        created = api.create_ctexcel_customer(
+            allow_new_after_checkpoint=True,
+        )
+
+    assert created["customer_id"] == 489
+    assert len(attempts) == 3
+    assert attempts == [
+        {
+            "reuse_pending": True,
+            "allow_new_after_checkpoint": True,
+        }
+    ] * 3
+    assert sleeps == [2.0, 4.0]
+    assert "HTTP 502" in messages[0]
+    assert "自动重试 1/2" in messages[0]
+    assert "自动重试 2/2" in messages[1]
+
+
+def test_client_api_retries_incomplete_success_response():
+    responses = iter(
+        [
+            httpx.Response(200, text="<html>temporary edge page</html>"),
+            httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "api_version": 6,
+                    "ctexcel_customer_count": 10,
+                    "pending_customer_count": 2,
+                },
+            ),
+        ]
+    )
+    messages = []
+
+    with AdminApi(
+        "https://manager.example.test",
+        "app-secret",
+        transport=httpx.MockTransport(lambda _request: next(responses)),
+        retry_callback=messages.append,
+        retry_delays=(0,),
+        sleep=lambda _delay: None,
+    ) as api:
+        status = api.connect()
+
+    assert status["ok"] is True
+    assert "响应格式不完整" in messages[0]

@@ -421,6 +421,14 @@ def test_ctexcel_auto_sync_claims_recent_incomplete_mailbox_once(
         )
         connection.execute(
             """INSERT INTO customers
+               (product_type, email, activation_date, email_account_id,
+                ctexcel_order_number, ctexcel_registration_confirmed_at)
+               VALUES ('ctexcel', 'confirmed@example.com', '2026-07-29',
+                       'confirmed-mail', 'ORDER-CONFIRMED',
+                       '2026-07-31T08:00:00Z')"""
+        )
+        connection.execute(
+            """INSERT INTO customers
                (product_type, email, activation_date, email_account_id)
                VALUES ('giffgaff', 'giffgaff@example.com',
                        '2026-07-29', 'giffgaff-mail')"""
