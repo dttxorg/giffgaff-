@@ -70,7 +70,7 @@ def test_client_status_uses_bearer_password_without_hidden_entry_cookie(client_a
     assert response.status_code == 200
     assert response.json() == {
         "ok": True,
-        "api_version": 3,
+        "api_version": 4,
         "ctexcel_customer_count": 0,
         "pending_customer_count": 0,
     }
@@ -160,6 +160,59 @@ def test_client_api_creates_ctexcel_customer_and_dedicated_email(client_api):
     assert pending.status_code == 200
     assert pending.json()["count"] == 1
     assert pending.json()["customers"][0]["customer_id"] == data["customer_id"]
+
+
+def test_continuous_client_can_create_after_paid_pending_customer(client_api):
+    client, db_path = client_api
+    with sqlite3.connect(db_path) as connection:
+        paid_pending_id = connection.execute(
+            """INSERT INTO customers
+               (product_type, email, activation_date, ctexcel_order_number,
+                ctexcel_transaction_amount)
+               VALUES ('ctexcel', 'paid-pending@example.test', '2026-07-31',
+                       'ORDERSUK2026073104095817734376', '1.00')"""
+        ).lastrowid
+        connection.commit()
+
+    blocked = client.post(
+        "/api/ctexcel-client/customers",
+        headers=AUTH_HEADERS,
+        json={"reuse_pending": True},
+    )
+    assert blocked.status_code == 409
+
+    email_mock = AsyncMock(
+        return_value={
+            "email": "next-batch@example.test",
+            "email_account_id": "next-batch-mail",
+            "email_provider_id": None,
+            "email_provider_domain": None,
+            "share_link": "",
+            "is_email_auto": True,
+        }
+    )
+    with patch.object(
+        main,
+        "_generate_email_account",
+        new=email_mock,
+    ), patch.object(
+        main,
+        "regenerate_identity",
+        new=AsyncMock(),
+    ):
+        response = client.post(
+            "/api/ctexcel-client/customers",
+            headers=AUTH_HEADERS,
+            json={
+                "reuse_pending": True,
+                "allow_new_after_checkpoint": True,
+            },
+        )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["reused"] is False
+    assert response.json()["customer_id"] != paid_pending_id
+    assert response.json()["email"] == "next-batch@example.test"
 
 
 def test_client_verification_endpoint_is_scoped_to_ctexcel(client_api):

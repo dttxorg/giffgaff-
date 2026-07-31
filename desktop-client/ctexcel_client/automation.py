@@ -78,6 +78,22 @@ class AutomationResult:
     transaction_amount: str = ""
 
 
+@dataclass
+class AutomationBatchResult:
+    completed_count: int
+    total_count: int
+    last_result: Optional[AutomationResult] = None
+
+
+def application_target(config: AppConfig) -> int:
+    if not config.continuous_enabled:
+        return 1
+    try:
+        return min(1000, max(1, int(config.continuous_count)))
+    except (TypeError, ValueError):
+        return 1
+
+
 def normalize_money(value: str) -> Optional[Decimal]:
     raw = re.sub(r"[^0-9.]", "", str(value or ""))
     if not raw:
@@ -272,7 +288,11 @@ class CTExcelAutomation:
             self.log("客户管理连接成功")
             self.stage("准备 CTExcel 客户")
             self._refresh_pending_customers(api)
-            created = api.create_ctexcel_customer()
+            created = api.create_ctexcel_customer(
+                allow_new_after_checkpoint=(
+                    self.config.continuous_enabled
+                ),
+            )
             customer_id = int(created["customer_id"])
             email = str(created["email"])
             task = {
@@ -303,9 +323,27 @@ class CTExcelAutomation:
         if not pending:
             self.log("没有无手机号的待完成客户，将新建客户")
             return
-        self.log(f"检测到 {len(pending)} 个无手机号 CTExcel 客户，先扫描订单邮件")
+        scan_targets = pending
+        if self.config.continuous_enabled:
+            scan_targets = [
+                customer
+                for customer in pending
+                if not str(customer.get("order_number") or "").strip()
+            ]
+            paid_pending = len(pending) - len(scan_targets)
+            if paid_pending:
+                self.log(
+                    f"{paid_pending} 个已生成订单的客户由服务器后台同步，"
+                    "不阻塞本轮连续申请"
+                )
+        if not scan_targets:
+            return
+        self.log(
+            f"检测到 {len(scan_targets)} 个未生成订单的中断客户，"
+            "先扫描订单邮件"
+        )
         synced_count = 0
-        for customer in pending[:20]:
+        for customer in scan_targets[:20]:
             self._check_stop()
             customer_id = int(customer.get("customer_id") or 0)
             if not customer_id:
@@ -401,20 +439,28 @@ class CTExcelAutomation:
                 )
                 self.stage("支付成功")
                 self.stage("同步号码资料")
-                synced = self._poll_order_info(api, customer_id)
-                if synced:
-                    result.phone_number = (
-                        str(synced.get("phone_number") or "").strip()
-                        or result.phone_number
+                if self.config.continuous_enabled:
+                    self.log(
+                        "连续申请模式：订单邮件由服务器后台继续同步，"
+                        "当前浏览器将关闭并准备下一单"
                     )
-                    result.order_number = (
-                        str(synced.get("order_number") or "").strip()
-                        or result.order_number
-                    )
-                    result.transaction_amount = (
-                        str(synced.get("transaction_amount") or "").strip()
-                        or result.transaction_amount
-                    )
+                else:
+                    synced = self._poll_order_info(api, customer_id)
+                    if synced:
+                        result.phone_number = (
+                            str(synced.get("phone_number") or "").strip()
+                            or result.phone_number
+                        )
+                        result.order_number = (
+                            str(synced.get("order_number") or "").strip()
+                            or result.order_number
+                        )
+                        result.transaction_amount = (
+                            str(
+                                synced.get("transaction_amount") or ""
+                            ).strip()
+                            or result.transaction_amount
+                        )
                 self.log(
                     "支付成功；客户管理后台将根据专属邮箱自动同步订单号和手机号码"
                 )
@@ -1239,3 +1285,81 @@ class CTExcelAutomation:
         )
         locator.click()
         self._wait_for_page_ready(page, f"点击“{name}”")
+
+
+class CTExcelBatchAutomation:
+    """顺序运行多单；每单仍在微信二维码处等待人工支付。"""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        log: LogCallback,
+        stage: StageCallback,
+        customer_created: CustomerCallback,
+        item_started: Callable[[int, int], None],
+        item_completed: Callable[[AutomationResult, int, int], None],
+        completed_before: int = 0,
+        automation_factory: Callable[..., CTExcelAutomation] = (
+            CTExcelAutomation
+        ),
+    ):
+        self.config = config
+        self.log = log
+        self.stage = stage
+        self.customer_created = customer_created
+        self.item_started = item_started
+        self.item_completed = item_completed
+        self.completed_before = max(0, int(completed_before))
+        self.automation_factory = automation_factory
+        self.stop_event = threading.Event()
+        self.session: Optional[CTExcelAutomation] = None
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.session:
+            self.session.stop()
+
+    def run(self) -> AutomationBatchResult:
+        total = application_target(self.config)
+        completed = min(self.completed_before, total)
+        last_result: Optional[AutomationResult] = None
+        if completed >= total:
+            return AutomationBatchResult(
+                completed_count=completed,
+                total_count=total,
+            )
+
+        for ordinal in range(completed + 1, total + 1):
+            if self.stop_event.is_set():
+                raise AutomationError("用户已停止连续申请")
+            self.item_started(ordinal, total)
+            self.log(f"开始第 {ordinal} / {total} 单申请")
+            self.session = self.automation_factory(
+                self.config,
+                log=self.log,
+                stage=self.stage,
+                customer_created=self.customer_created,
+            )
+            last_result = self.session.run()
+            self.session = None
+            completed = ordinal
+            self.item_completed(last_result, ordinal, total)
+            if ordinal >= total:
+                break
+            self.log(
+                f"第 {ordinal} 单支付完成；"
+                f"{total - ordinal} 单等待继续"
+            )
+            delay = max(
+                0,
+                min(60, int(self.config.continuous_interval_seconds)),
+            )
+            if self.stop_event.wait(delay):
+                raise AutomationError("用户已停止连续申请")
+
+        return AutomationBatchResult(
+            completed_count=completed,
+            total_count=total,
+            last_result=last_result,
+        )

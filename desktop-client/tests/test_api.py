@@ -19,7 +19,7 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
                 200,
                 json={
                     "ok": True,
-                    "api_version": 3,
+                    "api_version": 4,
                     "ctexcel_customer_count": 3,
                     "pending_customer_count": 1,
                 },
@@ -41,7 +41,10 @@ def test_scoped_api_connection_customer_creation_and_verification_flow():
             )
         if path == "/api/ctexcel-client/customers":
             assert request.method == "POST"
-            assert json.loads(request.content) == {"reuse_pending": True}
+            assert json.loads(request.content) == {
+                "reuse_pending": True,
+                "allow_new_after_checkpoint": False,
+            }
             return httpx.Response(
                 201,
                 json={

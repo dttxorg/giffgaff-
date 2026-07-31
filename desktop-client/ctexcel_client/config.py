@@ -191,6 +191,9 @@ class AppConfig:
     app_password: str = ""
     remember_credentials: bool = True
     purchase_route: str = PURCHASE_ROUTE_FREECARD
+    continuous_enabled: bool = False
+    continuous_count: int = 100
+    continuous_interval_seconds: int = 3
     application_url: str = DEFAULT_APPLICATION_URL
     browser_channel: str = "msedge"
     user_data_dir: str = field(default_factory=default_user_data_dir)
@@ -245,6 +248,20 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
     }
     if values.get("purchase_route") not in PURCHASE_ROUTES:
         values["purchase_route"] = PURCHASE_ROUTE_FREECARD
+    try:
+        values["continuous_count"] = min(
+            1000,
+            max(1, int(values.get("continuous_count", 100))),
+        )
+    except (TypeError, ValueError):
+        values["continuous_count"] = 100
+    try:
+        values["continuous_interval_seconds"] = min(
+            60,
+            max(0, int(values.get("continuous_interval_seconds", 3))),
+        )
+    except (TypeError, ValueError):
+        values["continuous_interval_seconds"] = 3
     values["app_password"] = unprotect_secret(
         str(raw.get("app_password_protected") or "")
     )

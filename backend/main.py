@@ -1919,7 +1919,7 @@ async def get_ctexcel_client_status(request: Request, response: Response):
     pending = int(rows[0][1] or 0) if rows else 0
     return {
         "ok": True,
-        "api_version": 3,
+        "api_version": 4,
         "ctexcel_customer_count": total,
         "pending_customer_count": pending,
     }
@@ -1965,7 +1965,11 @@ async def create_ctexcel_client_customer(
             "reused": True,
             "pending_customer_count": len(pending),
         }
-    if data.reuse_pending and pending:
+    if (
+        data.reuse_pending
+        and pending
+        and not data.allow_new_after_checkpoint
+    ):
         raise HTTPException(
             status_code=409,
             detail=(

@@ -150,6 +150,8 @@ class CTExcelClientCustomerCreate(BaseModel):
     # shipping_address 仅保留用于兼容 2.0.0 客户端；服务端不再写入客户资料。
     shipping_address: Optional[str] = None
     reuse_pending: bool = True
+    # 连续申请时，已有订单号但尚待邮件同步手机号的客户不阻塞下一单。
+    allow_new_after_checkpoint: bool = False
 
 
 class CTExcelPaymentCheckpointRequest(BaseModel):

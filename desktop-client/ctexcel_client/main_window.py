@@ -22,12 +22,18 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from .api import AdminApi
-from .automation import AutomationResult, CTExcelAutomation
+from .automation import (
+    AutomationBatchResult,
+    AutomationResult,
+    CTExcelBatchAutomation,
+    application_target,
+)
 from .config import (
     AppConfig,
     ProxyConfig,
@@ -65,13 +71,21 @@ class AutomationWorker(QThread):
     log_message = Signal(str)
     stage_changed = Signal(str)
     customer_created = Signal(object)
+    item_started = Signal(int, int)
+    item_completed = Signal(object, int, int)
     succeeded = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, config: AppConfig):
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        completed_before: int = 0,
+    ):
         super().__init__()
         self.config = config
-        self.session: Optional[CTExcelAutomation] = None
+        self.completed_before = completed_before
+        self.session: Optional[CTExcelBatchAutomation] = None
 
     def stop(self) -> None:
         if self.session:
@@ -79,11 +93,14 @@ class AutomationWorker(QThread):
 
     def run(self) -> None:
         try:
-            self.session = CTExcelAutomation(
+            self.session = CTExcelBatchAutomation(
                 self.config,
                 log=self.log_message.emit,
                 stage=self.stage_changed.emit,
                 customer_created=self.customer_created.emit,
+                item_started=self.item_started.emit,
+                item_completed=self.item_completed.emit,
+                completed_before=self.completed_before,
             )
             self.succeeded.emit(self.session.run())
         except Exception as exc:  # noqa: BLE001 - thread boundary
@@ -116,6 +133,10 @@ class MainWindow(QMainWindow):
         self.automation_worker: Optional[AutomationWorker] = None
         self.current_customer: Optional[dict[str, Any]] = None
         self.current_public_ip = ""
+        self.batch_completed_count = 0
+        self.batch_target_count = 1
+        self.batch_resume_pending = False
+        self.batch_signature: Optional[tuple[object, ...]] = None
         self.setWindowTitle("CTExcel 申请工作台")
         self.resize(1120, 760)
         self.setMinimumSize(900, 650)
@@ -459,6 +480,42 @@ class MainWindow(QMainWindow):
         steps.addWidget(self._step("03", "邮件归档", "同步订单号与手机号"))
         layout.addLayout(steps)
 
+        batch_panel = QFrame()
+        batch_panel.setObjectName("batchPanel")
+        batch_layout = QHBoxLayout(batch_panel)
+        batch_layout.setContentsMargins(14, 11, 14, 11)
+        batch_layout.setSpacing(10)
+        self.continuous_enabled = QCheckBox("连续申请")
+        self.continuous_enabled.setObjectName("continuousToggle")
+        self.continuous_enabled.toggled.connect(
+            self._update_continuous_controls
+        )
+        self.continuous_count_label = self._field_label("目标数量")
+        self.continuous_count = QSpinBox()
+        self.continuous_count.setRange(1, 1000)
+        self.continuous_count.setSuffix(" 张")
+        self.continuous_count.setFixedWidth(110)
+        self.continuous_count.valueChanged.connect(
+            self._update_continuous_controls
+        )
+        self.batch_status = QLabel("单次申请")
+        self.batch_status.setObjectName("batchStatus")
+        batch_layout.addWidget(self.continuous_enabled)
+        batch_layout.addSpacing(8)
+        batch_layout.addWidget(self.continuous_count_label)
+        batch_layout.addWidget(self.continuous_count)
+        batch_layout.addStretch(1)
+        batch_layout.addWidget(self.batch_status)
+        layout.addWidget(batch_panel)
+
+        self.batch_progress = QProgressBar()
+        self.batch_progress.setObjectName("batchProgress")
+        self.batch_progress.setRange(0, 1)
+        self.batch_progress.setValue(0)
+        self.batch_progress.setFormat("本轮 %v / %m")
+        self.batch_progress.setTextVisible(True)
+        layout.addWidget(self.batch_progress)
+
         actions = QHBoxLayout()
         actions.setSpacing(8)
         self.start_btn = QPushButton("开始 / 继续申请")
@@ -543,6 +600,9 @@ class MainWindow(QMainWindow):
         self.expected_price.setText(config.registration.expected_price_gbp)
         route_index = self.purchase_route.findData(config.purchase_route)
         self.purchase_route.setCurrentIndex(max(0, route_index))
+        self.continuous_enabled.setChecked(config.continuous_enabled)
+        self.continuous_count.setValue(config.continuous_count)
+        self._update_continuous_controls()
         index = self.browser_channel.findText(config.browser_channel)
         self.browser_channel.setCurrentIndex(max(0, index))
         mode_index = self.proxy_mode.findData(config.proxy.mode)
@@ -592,10 +652,32 @@ class MainWindow(QMainWindow):
                 self.purchase_route.currentData()
                 or PURCHASE_ROUTE_FREECARD
             ),
+            continuous_enabled=self.continuous_enabled.isChecked(),
+            continuous_count=self.continuous_count.value(),
             browser_channel=self.browser_channel.currentText(),
             proxy=proxy,
             registration=registration,
         )
+
+    def _update_continuous_controls(self, *_args: object) -> None:
+        enabled = self.continuous_enabled.isChecked()
+        self.continuous_count_label.setEnabled(enabled)
+        self.continuous_count.setEnabled(enabled)
+        target = self.continuous_count.value() if enabled else 1
+        if not (
+            self.automation_worker
+            and self.automation_worker.isRunning()
+        ):
+            self.batch_status.setText(
+                f"等待开始 · 共 {target} 单"
+                if enabled
+                else "单次申请"
+            )
+            self.batch_progress.setRange(0, target)
+            self.batch_progress.setValue(0)
+            self.start_btn.setText(
+                "开始连续申请" if enabled else "开始 / 继续申请"
+            )
 
     def _update_proxy_fields(self, *_args: object) -> None:
         mode = str(self.proxy_mode.currentData() or "none")
@@ -920,23 +1002,60 @@ class MainWindow(QMainWindow):
             return
         self.config = self.collect_config()
         save_config(self.config)
+        target = application_target(self.config)
+        signature = (
+            self.config.continuous_enabled,
+            target,
+            self.config.purchase_route,
+        )
+        resume = (
+            self.batch_resume_pending
+            and self.batch_signature == signature
+            and self.batch_completed_count < target
+        )
+        if not resume:
+            self.batch_completed_count = 0
+        self.batch_target_count = target
+        self.batch_signature = signature
         self.current_customer = None
         self.customer_label.setText("正在检查待完成客户与专属邮箱……")
         self.copy_email_btn.setEnabled(False)
         self.progress.setValue(0)
         self.stage_counter.setText(f"0 / {len(self.STAGES)}")
-        self.log_box.clear()
-        self.log("开始 CTExcel 申请流程；优先检查并继续无手机号客户")
-        self.automation_worker = AutomationWorker(self.config)
+        self.batch_progress.setRange(0, target)
+        self.batch_progress.setValue(self.batch_completed_count)
+        if not resume:
+            self.log_box.clear()
+            self.log(
+                f"开始 CTExcel 申请流程，共 {target} 单；"
+                "优先检查并继续未生成订单的客户"
+            )
+        else:
+            self.log(
+                f"继续连续申请：已完成 {self.batch_completed_count} / "
+                f"{target} 单"
+            )
+        self.automation_worker = AutomationWorker(
+            self.config,
+            completed_before=self.batch_completed_count,
+        )
         self.automation_worker.log_message.connect(self.log)
         self.automation_worker.stage_changed.connect(self.on_stage)
         self.automation_worker.customer_created.connect(self.on_customer_created)
+        self.automation_worker.item_started.connect(self.on_item_started)
+        self.automation_worker.item_completed.connect(
+            self.on_item_completed
+        )
         self.automation_worker.succeeded.connect(self.on_success)
         self.automation_worker.failed.connect(self.on_failure)
         self.automation_worker.finished.connect(self.on_finished)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.test_connection_btn.setEnabled(False)
+        self.purchase_route.setEnabled(False)
+        self.continuous_enabled.setEnabled(False)
+        self.continuous_count.setEnabled(False)
+        self.save_btn.setEnabled(False)
         self.automation_worker.start()
 
     def stop_automation(self) -> None:
@@ -963,18 +1082,73 @@ class MainWindow(QMainWindow):
         )
         self.copy_email_btn.setEnabled(bool(payload.get("email")))
 
-    def on_success(self, payload: object) -> None:
+    def on_item_started(self, ordinal: int, total: int) -> None:
+        self.batch_target_count = total
+        self.batch_status.setText(f"正在处理第 {ordinal} / {total} 单")
+        self.batch_progress.setRange(0, total)
+        self.batch_progress.setValue(max(0, ordinal - 1))
+
+    def on_item_completed(
+        self,
+        payload: object,
+        ordinal: int,
+        total: int,
+    ) -> None:
         if not isinstance(payload, AutomationResult):
             return
-        self.start_btn.setText("开始下一位客户")
-        summary = (
-            f"客户 #{payload.customer_id}\n"
-            f"邮箱：{payload.email}\n"
-            f"订单号：{payload.order_number or '等待邮件同步'}\n"
-            f"手机号：{payload.phone_number or '等待邮件同步'}\n"
-            f"支付：£{payload.transaction_amount or self.config.registration.expected_price_gbp}"
+        self.batch_completed_count = ordinal
+        self.batch_target_count = total
+        self.batch_progress.setRange(0, total)
+        self.batch_progress.setValue(ordinal)
+        self.batch_status.setText(
+            f"已完成 {ordinal} / {total} 单"
+            if ordinal < total
+            else f"本轮 {total} 单全部完成"
         )
-        self.log("流程已完成；服务器邮件同步会继续运行")
+        self.log(
+            f"第 {ordinal} 单完成：客户 #{payload.customer_id} · "
+            f"{payload.order_number or '订单号等待同步'}"
+        )
+
+    def on_success(self, payload: object) -> None:
+        if not isinstance(payload, AutomationBatchResult):
+            return
+        self.batch_completed_count = payload.completed_count
+        self.batch_target_count = payload.total_count
+        self.batch_resume_pending = False
+        result = payload.last_result
+        if result is None:
+            return
+        self.start_btn.setText(
+            "重新开始连续申请"
+            if payload.total_count > 1
+            else "开始下一位客户"
+        )
+        expected = (
+            "1.00"
+            if self.config.purchase_route == PURCHASE_ROUTE_FREECARD
+            else self.config.registration.expected_price_gbp
+        )
+        if payload.total_count > 1:
+            summary = (
+                f"连续申请已完成：{payload.completed_count} / "
+                f"{payload.total_count} 单\n"
+                f"最后客户：#{result.customer_id}\n"
+                f"最后订单：{result.order_number or '等待邮件同步'}\n"
+                "订单邮件将由服务器继续同步"
+            )
+        else:
+            summary = (
+                f"客户 #{result.customer_id}\n"
+                f"邮箱：{result.email}\n"
+                f"订单号：{result.order_number or '等待邮件同步'}\n"
+                f"手机号：{result.phone_number or '等待邮件同步'}\n"
+                f"支付：£{result.transaction_amount or expected}"
+            )
+        self.log(
+            f"流程已完成：{payload.completed_count} / "
+            f"{payload.total_count} 单；服务器邮件同步会继续运行"
+        )
         self._show_message(
             QMessageBox.Information,
             "CTExcel 申请完成",
@@ -983,13 +1157,33 @@ class MainWindow(QMainWindow):
 
     def on_failure(self, message: str) -> None:
         self.log(f"流程停止：{message}")
-        self.start_btn.setText("重试当前客户")
+        self.batch_resume_pending = (
+            self.config.continuous_enabled
+            and self.batch_completed_count < self.batch_target_count
+        )
+        if self.batch_resume_pending:
+            next_ordinal = self.batch_completed_count + 1
+            self.batch_status.setText(
+                f"暂停在第 {next_ordinal} / "
+                f"{self.batch_target_count} 单"
+            )
+            self.start_btn.setText(
+                f"重试第 {next_ordinal} 单并继续"
+            )
+        else:
+            self.start_btn.setText("重试当前客户")
         self._show_message(QMessageBox.Warning, "流程未完成", message)
 
     def on_finished(self) -> None:
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.test_connection_btn.setEnabled(True)
+        self.purchase_route.setEnabled(True)
+        self.continuous_enabled.setEnabled(True)
+        self.continuous_count.setEnabled(
+            self.continuous_enabled.isChecked()
+        )
+        self.save_btn.setEnabled(True)
 
     def copy_current_email(self) -> None:
         email = str((self.current_customer or {}).get("email") or "")
@@ -1079,7 +1273,7 @@ class MainWindow(QMainWindow):
                 font-size: 12px;
                 font-weight: 700;
             }
-            QLineEdit, QComboBox {
+            QLineEdit, QComboBox, QSpinBox {
                 min-height: 36px;
                 padding: 0 10px;
                 color: #14213d;
@@ -1088,7 +1282,7 @@ class MainWindow(QMainWindow):
                 border-radius: 8px;
                 selection-background-color: #2878ff;
             }
-            QLineEdit:focus, QComboBox:focus {
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
                 background: #ffffff;
                 border: 1px solid #2878ff;
             }
@@ -1171,6 +1365,36 @@ class MainWindow(QMainWindow):
                 background: #f4f8ff;
                 border: 1px solid #d9e6ff;
                 border-radius: 10px;
+            }
+            QFrame#batchPanel {
+                background: #f7f9fc;
+                border: 1px solid #e2e8f1;
+                border-radius: 10px;
+            }
+            QCheckBox#continuousToggle {
+                color: #16345f;
+                font-size: 13px;
+                font-weight: 750;
+            }
+            QLabel#batchStatus {
+                color: #1758d8;
+                font-size: 12px;
+                font-weight: 750;
+            }
+            QProgressBar#batchProgress {
+                min-height: 22px;
+                max-height: 22px;
+                color: #16345f;
+                background: #eaf0f8;
+                border: 0;
+                border-radius: 7px;
+                text-align: center;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QProgressBar#batchProgress::chunk {
+                background: #9fc2ff;
+                border-radius: 7px;
             }
             QLabel#customerValue {
                 color: #16345f;

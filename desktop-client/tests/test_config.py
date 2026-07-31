@@ -27,6 +27,8 @@ def test_client_ui_uses_scoped_api_without_hidden_entry_field():
     assert '"预存 £1 领卡"' in source
     assert '"50GB · £11.9/30天（优惠后 £5.95）"' in source
     assert "£1 路线推荐人号码" in source
+    assert '"连续申请"' in source
+    assert '"目标数量"' in source
 
 
 def test_credentials_are_not_written_as_plaintext(tmp_path: Path):
@@ -100,6 +102,8 @@ def test_non_secret_registration_defaults_round_trip(tmp_path: Path):
     config = AppConfig(
         remember_credentials=False,
         purchase_route=PURCHASE_ROUTE_50GB,
+        continuous_enabled=True,
+        continuous_count=100,
         registration=RegistrationDefaults(
             last_name="Fixed",
             first_name="Name",
@@ -117,6 +121,8 @@ def test_non_secret_registration_defaults_round_trip(tmp_path: Path):
 
     assert loaded.registration == config.registration
     assert loaded.purchase_route == PURCHASE_ROUTE_50GB
+    assert loaded.continuous_enabled is True
+    assert loaded.continuous_count == 100
     assert loaded.app_password == ""
 
 
@@ -130,3 +136,23 @@ def test_invalid_saved_purchase_route_migrates_to_freecard(tmp_path: Path):
     loaded = load_config(target)
 
     assert loaded.purchase_route == PURCHASE_ROUTE_FREECARD
+
+
+def test_invalid_continuous_values_are_bounded(tmp_path: Path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        """
+        {
+          "continuous_enabled": true,
+          "continuous_count": 50000,
+          "continuous_interval_seconds": -3
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_config(target)
+
+    assert loaded.continuous_enabled is True
+    assert loaded.continuous_count == 1000
+    assert loaded.continuous_interval_seconds == 0

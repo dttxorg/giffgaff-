@@ -3,7 +3,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ctexcel_client.automation import (
+    AutomationResult,
+    CTExcelBatchAutomation,
     CTExcelAutomation,
+    application_target,
     assess_verification_freshness,
     coupon_rejection_message,
     normalize_money,
@@ -89,6 +92,8 @@ def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     assert "activityPageconfirm" in source
     assert "freecard/buycardWX" in source
     assert "save_payment_checkpoint" in source
+    assert "allow_new_after_checkpoint" in source
+    assert "连续申请模式：订单邮件由服务器后台继续同步" in source
 
 
 def test_freecard_route_is_the_new_default():
@@ -96,6 +101,96 @@ def test_freecard_route_is_the_new_default():
 
     assert config.purchase_route == PURCHASE_ROUTE_FREECARD
     assert config.registration.freecard_referrer == "447942946765"
+
+
+def test_continuous_runner_waits_for_each_completed_item_before_next():
+    started = []
+    completed = []
+    created_count = 0
+
+    class FakeAutomation:
+        def __init__(self, _config, **_callbacks):
+            nonlocal created_count
+            created_count += 1
+            self.ordinal = created_count
+
+        def run(self):
+            return AutomationResult(
+                customer_id=self.ordinal,
+                email=f"customer-{self.ordinal}@example.test",
+                order_number=f"ORDERSUK20260731{self.ordinal:012d}",
+                transaction_amount="1.00",
+            )
+
+        def stop(self):
+            pass
+
+    config = AppConfig(
+        continuous_enabled=True,
+        continuous_count=3,
+        continuous_interval_seconds=0,
+    )
+    runner = CTExcelBatchAutomation(
+        config,
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+        item_started=lambda ordinal, total: started.append(
+            (ordinal, total)
+        ),
+        item_completed=lambda result, ordinal, total: completed.append(
+            (result.customer_id, ordinal, total)
+        ),
+        automation_factory=FakeAutomation,
+    )
+
+    result = runner.run()
+
+    assert application_target(config) == 3
+    assert started == [(1, 3), (2, 3), (3, 3)]
+    assert completed == [(1, 1, 3), (2, 2, 3), (3, 3, 3)]
+    assert result.completed_count == 3
+    assert result.total_count == 3
+    assert result.last_result.customer_id == 3
+
+
+def test_continuous_runner_resumes_after_completed_items():
+    started = []
+
+    class FakeAutomation:
+        def __init__(self, _config, **_callbacks):
+            pass
+
+        def run(self):
+            return AutomationResult(
+                customer_id=9,
+                email="resume@example.test",
+            )
+
+        def stop(self):
+            pass
+
+    runner = CTExcelBatchAutomation(
+        AppConfig(
+            continuous_enabled=True,
+            continuous_count=3,
+            continuous_interval_seconds=0,
+        ),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+        item_started=lambda ordinal, total: started.append(
+            (ordinal, total)
+        ),
+        item_completed=lambda *_args: None,
+        completed_before=2,
+        automation_factory=FakeAutomation,
+    )
+
+    result = runner.run()
+
+    assert started == [(3, 3)]
+    assert result.completed_count == 3
 
 
 def test_loading_overlay_waits_until_the_page_is_stably_ready():

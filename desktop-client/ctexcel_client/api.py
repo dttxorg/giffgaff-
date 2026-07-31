@@ -23,7 +23,7 @@ class AdminApi:
         self.server_url = server_url.strip().rstrip("/")
         self.app_password = app_password.strip()
         headers = {
-            "User-Agent": "CTExcelApplyClient/2.1.0",
+            "User-Agent": "CTExcelApplyClient/2.2.0",
             "Accept": "application/json",
         }
         if self.app_password:
@@ -111,11 +111,20 @@ class AdminApi:
             if isinstance(customer, dict)
         ]
 
-    def create_ctexcel_customer(self) -> dict[str, Any]:
+    def create_ctexcel_customer(
+        self,
+        *,
+        allow_new_after_checkpoint: bool = False,
+    ) -> dict[str, Any]:
         data = self._request(
             "POST",
             "/api/ctexcel-client/customers",
-            json_body={"reuse_pending": True},
+            json_body={
+                "reuse_pending": True,
+                "allow_new_after_checkpoint": bool(
+                    allow_new_after_checkpoint
+                ),
+            },
         )
         if not isinstance(data, dict):
             raise ApiError("准备 CTExcel 客户返回格式错误")
