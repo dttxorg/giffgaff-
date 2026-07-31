@@ -1,5 +1,6 @@
 import aiosqlite
 import os
+import sqlite3
 
 DATABASE_PATH = os.path.join(os.path.dirname(__file__), "giffgaff.db")
 
@@ -199,7 +200,15 @@ async def _ensure_column(db: aiosqlite.Connection, table: str, column: str, defi
     rows = await db.execute_fetchall(f"PRAGMA table_info({table})")
     existing_columns = {row[1] for row in rows}
     if column not in existing_columns:
-        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        try:
+            await db.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            )
+        except sqlite3.OperationalError as exc:
+            # Uvicorn 多 Worker 会并发执行 startup：两个进程
+            # 可能同时看到缺列，其中一个先完成 ALTER。
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 async def _ensure_nullable_phone_number(db: aiosqlite.Connection):
