@@ -10,6 +10,7 @@ from concurrent.futures import (
     wait,
 )
 import contextlib
+import ipaddress
 from pathlib import Path
 import re
 import shutil
@@ -37,11 +38,13 @@ from .config import (
     app_config_dir,
 )
 from .proxy import (
+    BrowserProxyRoute,
     ProxyError,
     ProxyPoolRotator,
     browser_compatible_proxy,
     masked_proxy_label,
     prepare_proxy,
+    probe_proxy_endpoint,
 )
 from .telegram import TelegramError, TelegramNotifier
 
@@ -75,6 +78,76 @@ LOADING_OVERLAY_SCRIPT = """() => {
     Array.from(document.querySelectorAll(selector)).some(visible)
   );
 }"""
+COOKIE_CONSENT_WATCHER_SCRIPT = r"""(() => {
+  if (window.__ctexcelConsentWatcherInstalled) return;
+  window.__ctexcelConsentWatcherInstalled = true;
+  const normalized = value => String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  const visible = node => {
+    if (!node || node.hidden) return false;
+    const style = getComputedStyle(node);
+    const rect = node.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && Number(style.opacity || 1) > 0
+      && rect.width > 0
+      && rect.height > 0;
+  };
+  const roots = () => {
+    const values = [document];
+    for (let index = 0; index < values.length; index += 1) {
+      for (const node of values[index].querySelectorAll('*')) {
+        if (node.shadowRoot && !values.includes(node.shadowRoot)) {
+          values.push(node.shadowRoot);
+        }
+      }
+    }
+    return values;
+  };
+  window.__ctexcelDismissCookieConsent = () => {
+    const host = document.querySelector('#usercentrics-cmp-ui');
+    const bodyText = normalized(document.body?.innerText);
+    const consentVisible = Boolean(host)
+      || bodyText.includes('隐私设置')
+      || bodyText.includes('privacy settings');
+    if (!consentVisible) return '';
+    const preferred = new Set([
+      '拒绝', '全部拒绝', 'reject', 'reject all', 'deny'
+    ]);
+    const fallback = new Set([
+      '全部接受', '接受全部', '确认', '确认选择',
+      'accept all', 'allow all', 'confirm choices'
+    ]);
+    const buttons = [];
+    for (const root of roots()) {
+      buttons.push(...root.querySelectorAll(
+        'button, [role="button"], .uc-deny-button, .uc-accept-all-button'
+      ));
+    }
+    for (const labels of [preferred, fallback]) {
+      for (const button of buttons) {
+        const label = normalized(
+          button.innerText
+          || button.textContent
+          || button.getAttribute?.('aria-label')
+        );
+        if (visible(button) && labels.has(label)) {
+          button.click();
+          window.__ctexcelCookieDismissed =
+            (window.__ctexcelCookieDismissed || 0) + 1;
+          return preferred.has(label) ? 'reject' : 'accept';
+        }
+      }
+    }
+    return '';
+  };
+  const tick = () => window.__ctexcelDismissCookieConsent?.();
+  const timer = setInterval(tick, 200);
+  addEventListener('DOMContentLoaded', tick, {once: true});
+  setTimeout(() => clearInterval(timer), 60000);
+})()"""
 class AutomationError(RuntimeError):
     pass
 
@@ -246,6 +319,7 @@ class CTExcelAutomation:
         reuse_pending_customer: bool = True,
         worker_slot: int = 1,
         proxy_override: Optional[dict[str, str]] = None,
+        browser_start_barrier: Optional[threading.Barrier] = None,
     ):
         self.config = config
         self.log = log
@@ -260,6 +334,7 @@ class CTExcelAutomation:
         self.proxy_override = (
             dict(proxy_override) if proxy_override is not None else None
         )
+        self.browser_start_barrier = browser_start_barrier
         self.stop_event = threading.Event()
         self.context: Optional[BrowserContext] = None
         self.profile_dir: Optional[Path] = None
@@ -267,6 +342,9 @@ class CTExcelAutomation:
 
     def stop(self) -> None:
         self.stop_event.set()
+        if self.browser_start_barrier is not None:
+            with contextlib.suppress(threading.BrokenBarrierError):
+                self.browser_start_barrier.abort()
 
     def _check_stop(self) -> None:
         if self.stop_event.is_set():
@@ -275,19 +353,21 @@ class CTExcelAutomation:
     def run(self) -> AutomationResult:
         self._validate_registration_defaults()
         self.stage("准备浏览器代理")
+        route = BrowserProxyRoute(proxy=None)
+        notification_proxy: Optional[dict[str, str]] = None
         try:
             prepared_proxy = prepare_proxy(
                 self.config.proxy,
                 resolved_proxy=self.proxy_override,
             )
-            browser_proxy = prepared_proxy.playwright_proxy
+            notification_proxy = prepared_proxy.playwright_proxy
             if prepared_proxy.public_ip:
                 self.log(
                     f"当前出口公网 IP：{prepared_proxy.public_ip}"
                 )
             elif prepared_proxy.public_ip_error:
                 self.log(prepared_proxy.public_ip_error)
-            if browser_proxy:
+            if notification_proxy:
                 source = (
                     "动态提取"
                     if self.config.proxy.mode == "api"
@@ -298,66 +378,71 @@ class CTExcelAutomation:
                     )
                 )
                 self.log(
-                    f"{source}代理已就绪：{masked_proxy_label(browser_proxy)}"
+                    f"{source}代理已就绪："
+                    f"{masked_proxy_label(notification_proxy)}"
                 )
+                route = browser_compatible_proxy(notification_proxy)
+                if route.bridge:
+                    probe_proxy_endpoint(route.proxy or {})
+                    self.log(
+                        "带认证 SOCKS5 已通过本机桥接完成端到端预检："
+                        f"{masked_proxy_label(route.proxy)}"
+                    )
+                else:
+                    self.log("浏览器将直接载入已验证的代理")
             else:
                 self.log("浏览器使用直连")
         except ProxyError as exc:
+            route.close()
             raise AutomationError(f"浏览器代理准备失败：{exc}") from exc
 
-        self.stage("连接客户管理")
-        with AdminApi(
-            self.config.server_url,
-            self.config.app_password,
-            retry_callback=self.log,
-            sleep=self._wait_interruptibly,
-        ) as api:
-            api.connect()
-            self.log("客户管理连接成功")
-            self.stage("准备 CTExcel 客户")
-            if self.reuse_pending_customer:
-                self._refresh_pending_customers(api)
-            created = api.create_ctexcel_customer(
-                reuse_pending=self.reuse_pending_customer,
-                allow_new_after_checkpoint=(
-                    self.config.continuous_enabled
-                ),
-                request_key=self.request_key,
-            )
-            customer_id = int(created["customer_id"])
-            email = str(created["email"])
-            task = {
-                "customer_id": customer_id,
-                "email": email,
-                "product_type": "ctexcel",
-                "worker_slot": self.worker_slot,
-            }
-            self.customer_created(task)
-            if created.get("reused"):
-                self.log(
-                    f"已复用无手机号的待完成客户 #{customer_id}，专属邮箱：{email}"
+        try:
+            self.stage("连接客户管理")
+            with AdminApi(
+                self.config.server_url,
+                self.config.app_password,
+                retry_callback=self.log,
+                sleep=self._wait_interruptibly,
+            ) as api:
+                api.connect()
+                self.log("客户管理连接成功")
+                self.stage("准备 CTExcel 客户")
+                if self.reuse_pending_customer:
+                    self._refresh_pending_customers(api)
+                created = api.create_ctexcel_customer(
+                    reuse_pending=self.reuse_pending_customer,
+                    allow_new_after_checkpoint=(
+                        self.config.continuous_enabled
+                    ),
+                    request_key=self.request_key,
                 )
-            else:
-                self.log(
-                    f"已新建 CTExcel 客户 #{customer_id}，专属邮箱：{email}"
-                )
-            self._check_stop()
-            route = browser_compatible_proxy(browser_proxy)
-            if route.bridge:
-                self.log(
-                    "已启用本地 SOCKS5 认证桥接，"
-                    "Chrome/Edge 将通过上游账号密码代理访问"
-                )
-            try:
+                customer_id = int(created["customer_id"])
+                email = str(created["email"])
+                task = {
+                    "customer_id": customer_id,
+                    "email": email,
+                    "product_type": "ctexcel",
+                    "worker_slot": self.worker_slot,
+                }
+                self.customer_created(task)
+                if created.get("reused"):
+                    self.log(
+                        f"已复用无手机号的待完成客户 #{customer_id}，专属邮箱：{email}"
+                    )
+                else:
+                    self.log(
+                        f"已新建 CTExcel 客户 #{customer_id}，专属邮箱：{email}"
+                    )
+                self._check_stop()
                 return self._run_browser(
                     api,
                     customer_id,
                     email,
                     browser_proxy=route.proxy,
-                    notification_proxy=browser_proxy,
+                    notification_proxy=notification_proxy,
                 )
-            finally:
-                route.close()
+        finally:
+            route.close()
 
     def _refresh_pending_customers(self, api: AdminApi) -> None:
         """开始新流程前先扫描无手机号客户，避免重复建立空记录。"""
@@ -519,6 +604,7 @@ class CTExcelAutomation:
                 );
                 """
             )
+            self.context.add_init_script(COOKIE_CONSENT_WATCHER_SCRIPT)
             self.log(
                 "已启用浏览器兼容模式：每单使用独立临时配置，"
                 "并移除 Chrome/Edge 的自动测试标记"
@@ -531,6 +617,23 @@ class CTExcelAutomation:
                 page.set_default_navigation_timeout(
                     max(5000, int(self.config.page_timeout_ms))
                 )
+                if browser_proxy:
+                    exit_ip = self._detect_browser_proxy_exit_ip(page)
+                    if exit_ip:
+                        self.log(f"浏览器实际代理出口 IP：{exit_ip}")
+                    else:
+                        self.log(
+                            "浏览器代理已通过 CTExcel 端口预检；"
+                            "公网 IP 检测站未返回可识别地址"
+                        )
+                if self.browser_start_barrier is not None:
+                    self.stage("等待并发窗口就绪")
+                    self.log("浏览器已就绪，等待首批并发窗口")
+                    try:
+                        self.browser_start_barrier.wait(timeout=90)
+                        self.log("首批窗口已全部就绪，同时开始操作")
+                    except threading.BrokenBarrierError:
+                        self.log("部分窗口未按时就绪，当前线程继续操作")
                 if self.config.purchase_route == PURCHASE_ROUTE_FREECARD:
                     self._start_freecard_application(page)
                 else:
@@ -581,6 +684,39 @@ class CTExcelAutomation:
                     with contextlib.suppress(Exception):
                         shutil.rmtree(self.profile_dir)
                 self.profile_dir = None
+
+    def _detect_browser_proxy_exit_ip(self, page: Page) -> str:
+        """由真实 Chrome/Edge 页面访问 IP 检测站，验证代理已装载。"""
+        endpoints = (
+            "https://1.1.1.1/cdn-cgi/trace",
+            "https://api.ipify.org?format=json",
+        )
+        for endpoint in endpoints:
+            self._check_stop()
+            try:
+                page.goto(
+                    endpoint,
+                    wait_until="domcontentloaded",
+                    timeout=min(20_000, int(self.config.page_timeout_ms)),
+                )
+                text = page.locator("body").inner_text(timeout=5000)
+            except Exception:
+                continue
+            candidates = re.findall(
+                r"(?<![0-9A-Fa-f:.])(?:"
+                r"(?:\d{1,3}\.){3}\d{1,3}"
+                r"|[0-9A-Fa-f:]{3,}"
+                r")(?![0-9A-Fa-f:.])",
+                text or "",
+            )
+            for candidate in candidates:
+                try:
+                    address = ipaddress.ip_address(candidate)
+                except ValueError:
+                    continue
+                if address.is_global:
+                    return str(address)
+        return ""
 
     def _record_network_event(self, message: str) -> None:
         self.network_events.append(message)
@@ -824,94 +960,67 @@ class CTExcelAutomation:
         self._wait_for_page_ready(page, "客户资料页")
 
     def _dismiss_cookie_consent(self, page: Page) -> None:
-        """拒绝非必要 Cookie，兼容 Usercentrics 新旧版 Shadow DOM。"""
-        try:
-            page.wait_for_function(
-                """() => {
-                  const host = document.querySelector('#usercentrics-cmp-ui');
-                  const text = document.body?.innerText || '';
-                  return Boolean(host)
-                    || (text.includes('隐私设置') && text.includes('全部接受'))
-                    || text.includes('Privacy Settings');
-                }""",
-                timeout=6000,
-            )
-        except PlaywrightTimeoutError:
-            return
-
-        deny = page.get_by_role(
-            "button",
-            name=re.compile(
-                r"^(拒绝|全部拒绝|Reject|Reject all|Deny)$",
-                re.I,
-            ),
-        )
-        try:
-            clicked = False
-            for index in range(deny.count()):
-                candidate = deny.nth(index)
-                if candidate.is_visible():
-                    candidate.click(
-                        timeout=self.config.step_timeout_ms,
-                        force=True,
-                    )
-                    clicked = True
-                    break
-            if not clicked:
-                clicked = bool(
-                    page.evaluate(
-                        """() => {
-                          const roots = [document];
-                          for (let i = 0; i < roots.length; i += 1) {
-                            for (const node of roots[i].querySelectorAll('*')) {
-                              if (node.shadowRoot) roots.push(node.shadowRoot);
-                            }
-                          }
-                          const labels = new Set([
-                            '拒绝', '全部拒绝', 'reject', 'reject all', 'deny'
-                          ]);
-                          for (const root of roots) {
-                            for (const node of root.querySelectorAll(
-                              'button, [role="button"], .uc-deny-button'
-                            )) {
-                              const text = String(
-                                node.innerText || node.textContent || ''
-                              ).trim().toLowerCase();
-                              if (labels.has(text)) {
-                                node.click();
-                                return true;
-                              }
-                            }
-                          }
-                          return false;
-                        }"""
-                    )
+        """关闭 Usercentrics；页面内监视器会继续处理延迟弹出。"""
+        deadline = time.monotonic() + 10
+        saw_dialog = False
+        while time.monotonic() < deadline:
+            self._check_stop()
+            try:
+                state = page.evaluate(
+                    """() => {
+                      const action = window.__ctexcelDismissCookieConsent?.()
+                        || '';
+                      const host = document.querySelector(
+                        '#usercentrics-cmp-ui'
+                      );
+                      const text = String(
+                        document.body?.innerText || ''
+                      ).toLowerCase();
+                      const hostVisible = (() => {
+                        if (!host) return false;
+                        const style = getComputedStyle(host);
+                        const rect = host.getBoundingClientRect();
+                        return style.display !== 'none'
+                          && style.visibility !== 'hidden'
+                          && Number(style.opacity || 1) > 0
+                          && rect.width > 0
+                          && rect.height > 0;
+                      })();
+                      const visible = hostVisible
+                        || text.includes('隐私设置')
+                        || text.includes('privacy settings');
+                      return {action, visible};
+                    }"""
                 )
-            if not clicked:
-                raise AutomationError("隐私设置弹窗中没有找到拒绝按钮")
-            page.wait_for_function(
-                """() => {
-                  const visible = node => {
-                    if (!node) return false;
-                    const style = getComputedStyle(node);
-                    const rect = node.getBoundingClientRect();
-                    return style.display !== 'none'
-                      && style.visibility !== 'hidden'
-                      && rect.width > 0
-                      && rect.height > 0;
-                  };
-                  const host = document.querySelector('#usercentrics-cmp-ui');
-                  if (!host || !visible(host)) return true;
-                  const overlay = host.shadowRoot?.querySelector(
-                    '.overlay, [role="dialog"]'
-                  );
-                  return !visible(overlay);
-                }""",
-                timeout=self.config.step_timeout_ms,
-            )
-            self.log("已自动拒绝非必要 Cookie 并关闭隐私设置")
-        except PlaywrightTimeoutError as exc:
-            raise AutomationError("隐私设置遮罩仍在阻挡页面操作") from exc
+            except Exception:
+                if page.is_closed():
+                    return
+                page.wait_for_timeout(200)
+                continue
+            action = str((state or {}).get("action") or "")
+            visible = bool((state or {}).get("visible"))
+            if action:
+                page.wait_for_timeout(500)
+                self.log(
+                    "已自动关闭隐私设置（"
+                    + ("拒绝非必要 Cookie" if action == "reject" else "确认 Cookie 选择")
+                    + "）"
+                )
+                return
+            if visible:
+                saw_dialog = True
+            elif saw_dialog:
+                self.log("隐私设置已自动关闭")
+                return
+            elif time.monotonic() + 7 < deadline:
+                # 首页短暂等待弹窗；后续延迟出现由页面监视器处理。
+                page.wait_for_timeout(200)
+                continue
+            else:
+                return
+            page.wait_for_timeout(200)
+        if saw_dialog:
+            raise AutomationError("隐私设置遮罩仍在阻挡页面操作")
 
     def _ensure_selected_option(
         self,
@@ -1645,6 +1754,7 @@ class CTExcelBatchAutomation:
         total: int,
         worker_slot: int,
         reuse_pending_customer: bool,
+        browser_start_barrier: Optional[threading.Barrier] = None,
     ) -> AutomationResult:
         prefix = (
             f"[线程 {worker_slot} · 第 {ordinal} 单] "
@@ -1693,6 +1803,7 @@ class CTExcelBatchAutomation:
             reuse_pending_customer=reuse_pending_customer,
             worker_slot=worker_slot,
             proxy_override=proxy_override,
+            browser_start_barrier=browser_start_barrier,
         )
         with self.sessions_lock:
             self.sessions[worker_slot] = session
@@ -1757,6 +1868,13 @@ class CTExcelBatchAutomation:
         last_result: Optional[AutomationResult] = None
         next_ordinal = completed + 1
         first_ordinal = next_ordinal
+        first_wave_last_ordinal = min(
+            total,
+            first_ordinal + workers - 1,
+        )
+        browser_start_barrier = threading.Barrier(
+            first_wave_last_ordinal - first_ordinal + 1
+        )
         available_slots = list(range(1, workers + 1))
         futures: dict[Future[AutomationResult], tuple[int, int]] = {}
 
@@ -1776,6 +1894,11 @@ class CTExcelBatchAutomation:
                 total=total,
                 worker_slot=worker_slot,
                 reuse_pending_customer=(ordinal == first_ordinal),
+                browser_start_barrier=(
+                    browser_start_barrier
+                    if ordinal <= first_wave_last_ordinal
+                    else None
+                ),
             )
             futures[future] = (ordinal, worker_slot)
 

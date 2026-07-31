@@ -3,9 +3,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
 import time
+from types import SimpleNamespace
+
+import pytest
+
+import ctexcel_client.automation as automation_module
 
 from ctexcel_client.automation import (
     AutomationResult,
+    AutomationError,
     CTExcelBatchAutomation,
     CTExcelAutomation,
     application_target,
@@ -20,7 +26,10 @@ from ctexcel_client.automation import (
 from ctexcel_client.config import (
     AppConfig,
     PURCHASE_ROUTE_FREECARD,
+    ProxyConfig,
+    RegistrationDefaults,
 )
+from ctexcel_client.proxy import ProxyError
 
 
 def test_money_and_discount_price_parsing():
@@ -128,6 +137,125 @@ def test_application_flow_has_no_phone_capture_or_gate():
     assert "订单确认接口没有返回手机号，已停止进入支付" not in source
 
 
+def test_authenticated_socks_bridge_is_preflighted_before_customer_creation(
+    monkeypatch,
+):
+    events = []
+
+    class FakeRoute:
+        proxy = {"server": "socks5://127.0.0.1:32123"}
+        bridge = object()
+
+        def close(self):
+            events.append("closed")
+
+    monkeypatch.setattr(
+        automation_module,
+        "prepare_proxy",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            playwright_proxy={
+                "server": "socks5://proxy.example.test:3010",
+                "username": "user",
+                "password": "pass",
+            },
+            public_ip="",
+            public_ip_error="",
+        ),
+    )
+    monkeypatch.setattr(
+        automation_module,
+        "browser_compatible_proxy",
+        lambda _proxy: FakeRoute(),
+    )
+
+    def fail_bridge_probe(_proxy):
+        events.append("bridge-probe")
+        raise ProxyError("本机桥接连接失败")
+
+    monkeypatch.setattr(
+        automation_module,
+        "probe_proxy_endpoint",
+        fail_bridge_probe,
+    )
+
+    class UnexpectedAdminApi:
+        def __init__(self, *_args, **_kwargs):
+            events.append("customer-api")
+            raise AssertionError("代理预检失败时不应连接客户 API")
+
+    monkeypatch.setattr(
+        automation_module,
+        "AdminApi",
+        UnexpectedAdminApi,
+    )
+    config = AppConfig(
+        proxy=ProxyConfig(mode="custom"),
+        registration=RegistrationDefaults(
+            last_name="朱",
+            first_name="先生",
+            contact_phone="18170908787",
+            chinese_address="测试地址",
+        ),
+    )
+    runner = CTExcelAutomation(
+        config,
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    with pytest.raises(AutomationError, match="本机桥接连接失败"):
+        runner.run()
+
+    assert events == ["bridge-probe", "closed"]
+
+
+def test_browser_proxy_exit_ip_is_read_from_the_real_page():
+    class FakeBody:
+        def inner_text(self, timeout):
+            assert timeout == 5000
+            return "fl=123\nip=8.8.4.4\nloc=GB"
+
+    class FakePage:
+        def __init__(self):
+            self.urls = []
+
+        def goto(self, url, *, wait_until, timeout):
+            self.urls.append(url)
+            assert wait_until == "domcontentloaded"
+            assert timeout == 20000
+
+        def locator(self, selector):
+            assert selector == "body"
+            return FakeBody()
+
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    page = FakePage()
+
+    assert runner._detect_browser_proxy_exit_ip(page) == "8.8.4.4"
+    assert page.urls == ["https://1.1.1.1/cdn-cgi/trace"]
+
+
+def test_stopping_a_worker_releases_the_initial_browser_barrier():
+    barrier = threading.Barrier(2)
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+        browser_start_barrier=barrier,
+    )
+
+    runner.stop()
+
+    assert barrier.broken is True
+
+
 def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     source = (
         Path(__file__).resolve().parents[1]
@@ -138,7 +266,10 @@ def test_sim_configuration_tracks_current_page_dom_and_preserves_errors():
     assert '"实体SIM卡",\n            exact=False' in source
     assert "全部拒绝" in source
     assert ".uc-deny-button" in source
-    assert "已自动拒绝非必要 Cookie" in source
+    assert "COOKIE_CONSENT_WATCHER_SCRIPT" in source
+    assert "__ctexcelDismissCookieConsent" in source
+    assert "已自动关闭隐私设置" in source
+    assert "'全部接受'" in source
     assert 'page.locator(".el-switch")' in source
     assert "'.el-loading-mask'" in source
     assert "Loading 遮罩持续未消失" in source
@@ -272,6 +403,7 @@ def test_continuous_runner_supports_ten_safe_parallel_workers():
     request_keys = []
     reuse_flags = []
     worker_slots = []
+    browser_start_barriers = []
     completed_ordinals = []
 
     class FakeAutomation:
@@ -282,6 +414,7 @@ def test_continuous_runner_supports_ten_safe_parallel_workers():
             request_key,
             reuse_pending_customer,
             worker_slot,
+            browser_start_barrier,
             **_callbacks,
         ):
             nonlocal created
@@ -291,6 +424,7 @@ def test_continuous_runner_supports_ten_safe_parallel_workers():
                 request_keys.append(request_key)
                 reuse_flags.append(reuse_pending_customer)
                 worker_slots.append(worker_slot)
+                browser_start_barriers.append(browser_start_barrier)
 
         def run(self):
             nonlocal active, max_active
@@ -332,6 +466,12 @@ def test_continuous_runner_supports_ten_safe_parallel_workers():
     assert len(set(request_keys)) == 12
     assert reuse_flags.count(True) == 1
     assert set(worker_slots) == set(range(1, 11))
+    first_wave_barriers = [
+        barrier for barrier in browser_start_barriers if barrier is not None
+    ]
+    assert len(first_wave_barriers) == 10
+    assert len({id(barrier) for barrier in first_wave_barriers}) == 1
+    assert browser_start_barriers.count(None) == 2
     assert sorted(completed_ordinals) == list(range(1, 13))
 
 

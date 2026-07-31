@@ -120,6 +120,22 @@ No actionable P0, P1, or P2 issue remains.
 
 final result: passed
 
+## CTExcel Windows client v2.3.9 verification
+
+- The first wave uses one shared `threading.Barrier`; all configured browser
+  workers finish proxy/customer/browser preparation before page actions begin.
+- Every new document installs a 60-second Usercentrics watcher that scans normal
+  DOM and open Shadow DOM, prioritizes reject actions, and falls back to the
+  visible accept/confirm action when required.
+- Authenticated SOCKS5 is probed twice before customer creation: once against
+  the upstream node and once through the loopback browser bridge to CTExcel 443.
+- The actual Chrome/Edge page then records its externally observed proxy IP in
+  the per-thread log before navigating to the application route.
+- Python compilation, consent-watcher JavaScript syntax, client tests and diff
+  checks pass.
+
+final result: passed
+
 ## CTExcel Windows client v2.3.8 verification
 
 - Desktop `1440 × 1000`: the proxy-pool mode exposes a full-width multiline

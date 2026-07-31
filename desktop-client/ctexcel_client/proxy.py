@@ -93,7 +93,7 @@ def detect_public_ip(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.3.8",
+                "User-Agent": "CTExcelApplyClient/2.3.9",
             },
         ) as client:
             for endpoint in PUBLIC_IP_ENDPOINTS:
@@ -318,7 +318,7 @@ def fetch_proxy_from_api(
             transport=transport,
             headers={
                 "Accept": "text/plain, application/json",
-                "User-Agent": "CTExcelApplyClient/2.3.8",
+                "User-Agent": "CTExcelApplyClient/2.3.9",
             },
         ) as client:
             response = client.get(url)

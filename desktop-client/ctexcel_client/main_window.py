@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         "连接客户管理",
         "准备 CTExcel 客户",
         "启动浏览器",
+        "等待并发窗口就绪",
         "选择申请路线",
         "配置 SIM / 套餐",
         "填写客户资料",
