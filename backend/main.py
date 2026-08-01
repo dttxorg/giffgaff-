@@ -49,6 +49,7 @@ from crud import (
     get_settings, set_setting, fetch_one, normalize_optional_text
 )
 from qr_utils import parse_esim_raw, build_lpa_string, generate_esim_qr_png
+from ctexcel_constants import CTEXCEL_PERSONAL_CENTER_URL
 from email_providers.pool import (
     pick_provider,
     record_provider_use,
@@ -688,17 +689,35 @@ def _payment_info_email_kind(message: dict) -> Optional[str]:
 
 
 def _extract_ctexcel_order_info(message: dict) -> dict:
-    """从 CTExcel 订单邮件的纯文本或 HTML 正文中提取关键资料。"""
+    """从 CTExcel 订单/激活邮件的纯文本或 HTML 正文中提取关键资料。"""
     text = _message_search_text(message)
     if not text:
         return {}
     normalized = html.unescape(text).replace("\u00a0", " ")
-    # 邮件正文有时会保留 Markdown 的 **粗体** 标记；字段解析不依赖排版符号。
-    normalized = re.sub(r"\*+", "", normalized)
+    if _looks_like_html(normalized):
+        normalized = _plain_text_from_html(normalized)
+    # 订单字段不依赖 Markdown 粗体，但账号密码必须保留值内部的单个 *。
+    order_text = normalized.replace("**", "")
 
     def find(pattern: str, flags: int = re.I) -> Optional[str]:
-        match = re.search(pattern, normalized, flags)
+        match = re.search(pattern, order_text, flags)
         return match.group(1).strip() if match else None
+
+    def find_token(label_pattern: str) -> Optional[str]:
+        match = re.search(
+            rf"(?:{label_pattern})\s*[:：]\s*([^\r\n<>]{{1,256}})",
+            normalized,
+            re.I,
+        )
+        if not match:
+            return None
+        value = match.group(1).strip()
+        if value.startswith("**"):
+            value = value[2:].lstrip()
+        value = value.split(maxsplit=1)[0] if value else ""
+        if value.endswith("**"):
+            value = value[:-2].rstrip()
+        return value or None
 
     order_number = find(
         r"(?:订单号|order\s*(?:number|no\.?))\s*[:：]\s*\**\s*([A-Z0-9][A-Z0-9-]{7,})"
@@ -719,12 +738,36 @@ def _extract_ctexcel_order_info(message: dict) -> dict:
     )
     if referral_link:
         referral_link = referral_link.rstrip(".,;，。；")
+
+    login_account = None
+    initial_password = None
+    has_login_context = (
+        CTEXCEL_PERSONAL_CENTER_URL.casefold() in normalized.casefold()
+        or (
+            re.search(r"ctexcel", normalized, re.I)
+            and re.search(r"个人中心|personal\s*(?:centre|center)", normalized, re.I)
+        )
+    )
+    if has_login_context:
+        candidate_account = find_token(r"登录账号|账号|login\s*account|account")
+        candidate_password = find_token(r"初始密码|密码|initial\s*password|password")
+        # 两个带明确标签的字段必须在同一封邮件出现，避免把普通通知误当登录资料。
+        if (
+            candidate_account
+            and candidate_password
+            and re.fullmatch(r"[A-Za-z0-9+@._-]{4,128}", candidate_account)
+            and re.fullmatch(r"\S{4,128}", candidate_password)
+        ):
+            login_account = candidate_account
+            initial_password = candidate_password
     return {
         "phone_number": phone_number,
         "order_number": order_number,
         "transaction_amount": transaction_amount,
         "referral_code": referral_code,
         "referral_link": referral_link,
+        "login_account": login_account,
+        "initial_password": initial_password,
     }
 
 
@@ -760,12 +803,16 @@ async def _claim_pending_ctexcel_auto_sync_customers() -> list[dict]:
             """SELECT *
                FROM customers
                WHERE product_type = 'ctexcel'
-                 AND NULLIF(
-                       TRIM(ctexcel_registration_confirmed_at), ''
-                     ) IS NULL
                  AND (
-                       NULLIF(TRIM(phone_number), '') IS NULL
-                       OR NULLIF(TRIM(ctexcel_order_number), '') IS NULL
+                       (
+                         NULLIF(TRIM(ctexcel_registration_confirmed_at), '') IS NULL
+                         AND (
+                           NULLIF(TRIM(phone_number), '') IS NULL
+                           OR NULLIF(TRIM(ctexcel_order_number), '') IS NULL
+                         )
+                       )
+                       OR NULLIF(TRIM(ctexcel_login_account), '') IS NULL
+                       OR NULLIF(TRIM(ctexcel_initial_password), '') IS NULL
                      )
                  AND (
                        NULLIF(TRIM(email_account_id), '') IS NOT NULL
@@ -1272,6 +1319,7 @@ async def list_customers(search: str = ""):
         ctexcel_transaction_amount=r.get("ctexcel_transaction_amount"),
         ctexcel_referral_code=r.get("ctexcel_referral_code"),
         ctexcel_referral_link=r.get("ctexcel_referral_link"),
+        ctexcel_login_account=r.get("ctexcel_login_account"),
         ctexcel_last_checked_at=r.get("ctexcel_last_checked_at"),
         ctexcel_registration_confirmed_at=r.get(
             "ctexcel_registration_confirmed_at"
@@ -1326,6 +1374,8 @@ async def get_customer_detail(customer_id: int):
         ctexcel_transaction_amount=c.get("ctexcel_transaction_amount"),
         ctexcel_referral_code=c.get("ctexcel_referral_code"),
         ctexcel_referral_link=c.get("ctexcel_referral_link"),
+        ctexcel_login_account=c.get("ctexcel_login_account"),
+        ctexcel_initial_password=c.get("ctexcel_initial_password"),
         ctexcel_last_checked_at=c.get("ctexcel_last_checked_at"),
         ctexcel_registration_confirmed_at=c.get(
             "ctexcel_registration_confirmed_at"
@@ -2531,6 +2581,8 @@ async def _sync_ctexcel_order_info(
             "transaction_amount": None,
             "referral_code": None,
             "referral_link": None,
+            "login_account": None,
+            "initial_password": None,
         }
         matched_message: dict = {}
         confirmation_message: dict = {}
@@ -2593,7 +2645,7 @@ async def _sync_ctexcel_order_info(
                     found[key] = parsed[key]
             if found["phone_number"] and found["order_number"] and all(
                 found[key] for key in ("transaction_amount", "referral_code", "referral_link")
-            ):
+            ) and found["login_account"] and found["initial_password"]:
                 break
 
         checked_at = _utc_now()
@@ -2604,6 +2656,8 @@ async def _sync_ctexcel_order_info(
             transaction_amount=found["transaction_amount"],
             referral_code=found["referral_code"],
             referral_link=found["referral_link"],
+            login_account=found["login_account"],
+            initial_password=found["initial_password"],
             registration_confirmed_at=registration_confirmed_at,
             checked_at=checked_at,
         )
@@ -2616,15 +2670,24 @@ async def _sync_ctexcel_order_info(
             "transaction_amount": found["transaction_amount"] or c.get("ctexcel_transaction_amount"),
             "referral_code": found["referral_code"] or c.get("ctexcel_referral_code"),
             "referral_link": found["referral_link"] or c.get("ctexcel_referral_link"),
+            "login_account": found["login_account"] or c.get("ctexcel_login_account"),
+            "initial_password": found["initial_password"] or c.get("ctexcel_initial_password"),
         }
         registration_confirmed = bool(registration_confirmed_at)
         has_core_info = bool(
             output["phone_number"]
             or output["order_number"]
+            or output["login_account"]
+            or output["initial_password"]
             or registration_confirmed
         )
+        credentials_synced = bool(found["login_account"] and found["initial_password"])
         detail_text = (
-            "已从 CTExcel 订单邮件同步手机号码和订单资料"
+            "已从 CTExcel 邮件同步个人中心账号、初始密码和订单资料"
+            if credentials_synced and found["phone_number"] and found["order_number"]
+            else "已从 CTExcel 激活邮件同步个人中心账号和初始密码"
+            if credentials_synced
+            else "已从 CTExcel 订单邮件同步手机号码和订单资料"
             if found["phone_number"] and found["order_number"]
             else (
                 "已确认该邮箱完成 CTExcel 注册；等待订单号和手机号同步"
@@ -3532,6 +3595,8 @@ async def _restore_backup_payload(data: dict) -> dict:
                     "ctexcel_transaction_amount": normalize_optional_text(c.get("ctexcel_transaction_amount")),
                     "ctexcel_referral_code": normalize_optional_text(c.get("ctexcel_referral_code")),
                     "ctexcel_referral_link": normalize_optional_text(c.get("ctexcel_referral_link")),
+                    "ctexcel_login_account": normalize_optional_text(c.get("ctexcel_login_account")),
+                    "ctexcel_initial_password": normalize_optional_text(c.get("ctexcel_initial_password")),
                     "ctexcel_last_checked_at": c.get("ctexcel_last_checked_at"),
                     "ctexcel_registration_confirmed_at": c.get(
                         "ctexcel_registration_confirmed_at"
