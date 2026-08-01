@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import os
 import sys
 import tempfile
 import time
@@ -107,11 +109,53 @@ def test_frontend_turns_expired_entry_plaintext_into_a_clear_reentry_prompt():
     assert "if (!res.ok)" in html[html.index("async function checkAuth"):]
 
 
+@pytest.mark.parametrize("path", [
+    "/",
+    "/index.html",
+    "//index.html",
+    "/INDEX.HTML",
+    "/worker_setup.js",
+    "///worker_setup.js",
+    "/WORKER_SETUP.JS",
+])
+def test_management_frontend_cache_path_normalization(path):
+    assert main._is_management_frontend_path(path)
+
+
+def test_frontend_revision_refreshes_when_index_changes(tmp_path, monkeypatch):
+    index = tmp_path / "index.html"
+    index.write_text("first admin bundle", encoding="utf-8")
+    monkeypatch.setattr(main, "FRONTEND_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "_FRONTEND_REVISION_STATE", None)
+
+    first = main._frontend_revision()
+    first_stat = index.stat()
+    index.write_text("other admin bundle", encoding="utf-8")
+    os.utime(
+        index,
+        ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns),
+    )
+    second = main._frontend_revision()
+
+    assert first == hashlib.sha256(b"first admin bundle").hexdigest()[:12]
+    assert index.stat().st_size == first_stat.st_size
+    assert index.stat().st_mtime_ns == first_stat.st_mtime_ns
+    assert second == hashlib.sha256(b"other admin bundle").hexdigest()[:12]
+    assert second != first
+
+
 def test_secret_entry_sets_secure_signed_cookie_then_shows_password_login(hidden_admin_client):
     entry = hidden_admin_client.get(SECRET_PATH, follow_redirects=False)
+    expected_revision = hashlib.sha256(
+        (BACKEND_DIR.parent / "frontend" / "index.html").read_bytes()
+    ).hexdigest()[:12]
+    expected_index_url = f"/index.html?v={expected_revision}"
 
     assert entry.status_code == 302
-    assert entry.headers["location"] == "/index.html"
+    assert entry.headers["location"] == expected_index_url
+    assert entry.headers["Cache-Control"] == "no-store, max-age=0"
+    assert entry.headers["Pragma"] == "no-cache"
+    assert entry.headers["Expires"] == "Thu, 01 Jan 1970 00:00:00 GMT"
     set_cookie = entry.headers["set-cookie"]
     assert main.ADMIN_ENTRY_COOKIE_NAME in set_cookie
     assert "HttpOnly" in set_cookie
@@ -133,6 +177,33 @@ def test_secret_entry_sets_secure_signed_cookie_then_shows_password_login(hidden
     page = hidden_admin_client.get("/index.html")
     assert page.status_code == 200
     assert "访问口令" in page.text
+    assert page.headers["Cache-Control"] == "no-store, max-age=0"
+    assert page.headers["Pragma"] == "no-cache"
+    assert page.headers["Expires"] == "Thu, 01 Jan 1970 00:00:00 GMT"
+
+    versioned_page = hidden_admin_client.get(entry.headers["location"])
+    assert versioned_page.status_code == 200
+    assert versioned_page.text == page.text
+
+    revalidated_page = hidden_admin_client.get(
+        "/index.html",
+        headers={"If-None-Match": page.headers["ETag"]},
+    )
+    assert revalidated_page.status_code == 304
+    assert revalidated_page.headers["Cache-Control"] == "no-store, max-age=0"
+    assert revalidated_page.headers["Pragma"] == "no-cache"
+    assert revalidated_page.headers["Expires"] == "Thu, 01 Jan 1970 00:00:00 GMT"
+
+    root = hidden_admin_client.get("/", follow_redirects=False)
+    assert root.status_code == 307
+    assert root.headers["location"] == expected_index_url
+    assert root.headers["Cache-Control"] == "no-store, max-age=0"
+
+    worker_setup = hidden_admin_client.get("/worker_setup.js")
+    assert worker_setup.status_code == 200
+    assert worker_setup.headers["Cache-Control"] == "no-store, max-age=0"
+    assert worker_setup.headers["Pragma"] == "no-cache"
+    assert worker_setup.headers["Expires"] == "Thu, 01 Jan 1970 00:00:00 GMT"
 
     # 隐藏入口只解除 404 门禁，不替代原有密码认证。
     before_login = hidden_admin_client.get("/api/customers")
