@@ -211,6 +211,69 @@ app.add_middleware(
 )
 
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+# Keep this list in sync when adding management UI assets under frontend/.
+MANAGEMENT_FRONTEND_PATHS = {"/", "/index.html", "/worker_setup.js"}
+_FRONTEND_REVISION_STATE: Optional[tuple[int, int, int, int, int, str]] = None
+_FRONTEND_REVISION_LOCK = threading.Lock()
+
+
+def _frontend_revision() -> str:
+    """Return a cached content revision and refresh it when index.html changes."""
+    global _FRONTEND_REVISION_STATE
+    index_path = os.path.join(FRONTEND_DIR, "index.html")
+    try:
+        stat = os.stat(index_path)
+    except OSError:
+        return "missing"
+    cache_key = (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_ctime_ns,
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
+    cached = _FRONTEND_REVISION_STATE
+    if cached and cached[:5] == cache_key:
+        return cached[5]
+
+    with _FRONTEND_REVISION_LOCK:
+        cached = _FRONTEND_REVISION_STATE
+        if cached and cached[:5] == cache_key:
+            return cached[5]
+        try:
+            with open(index_path, "rb") as handle:
+                content = handle.read()
+                file_stat = os.fstat(handle.fileno())
+        except OSError:
+            return "missing"
+        revision = hashlib.sha256(content).hexdigest()[:12]
+        _FRONTEND_REVISION_STATE = (
+            file_stat.st_dev,
+            file_stat.st_ino,
+            file_stat.st_ctime_ns,
+            file_stat.st_mtime_ns,
+            file_stat.st_size,
+            revision,
+        )
+        return revision
+
+
+def _frontend_index_url() -> str:
+    return f"/index.html?v={_frontend_revision()}"
+
+
+def _is_management_frontend_path(path: str) -> bool:
+    """Normalize redundant slashes/case before applying static cache headers."""
+    normalized_path = f"/{path.lstrip('/')}".lower()
+    return normalized_path in MANAGEMENT_FRONTEND_PATHS
+
+
+def _disable_management_frontend_cache(response: Response) -> Response:
+    """Keep browsers and reverse proxies from retaining an old admin bundle."""
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
+    return response
 
 
 def _auth_enabled() -> bool:
@@ -899,7 +962,7 @@ async def require_app_password(request, call_next):
 
         if admin_entry_path:
             if request.method == "GET" and path == admin_entry_path:
-                response = RedirectResponse(url="/index.html", status_code=302)
+                response = RedirectResponse(url=_frontend_index_url(), status_code=302)
                 response.set_cookie(
                     ADMIN_ENTRY_COOKIE_NAME,
                     _new_admin_entry_cookie(admin_entry_path),
@@ -913,7 +976,7 @@ async def require_app_password(request, call_next):
                         + datetime.timedelta(seconds=ADMIN_ENTRY_TTL_SECONDS)
                     ),
                 )
-                response.headers["Cache-Control"] = "no-store, max-age=0"
+                _disable_management_frontend_cache(response)
                 response.headers["Referrer-Policy"] = "no-referrer"
                 return response
             if not _has_admin_entry_cookie(request, admin_entry_path):
@@ -930,7 +993,10 @@ async def require_app_password(request, call_next):
     if _auth_enabled() and path not in public_paths and path.startswith(protected_prefixes):
         if not _is_authenticated(request):
             return JSONResponse({"detail": "需要登录"}, status_code=401)
-    return await call_next(request)
+    response = await call_next(request)
+    if _is_management_frontend_path(path):
+        _disable_management_frontend_cache(response)
+    return response
 
 
 @app.on_event("startup")
@@ -3655,7 +3721,7 @@ app.include_router(public_router)
 
 @app.get("/")
 async def serve_index():
-    return RedirectResponse(url="/index.html")
+    return RedirectResponse(url=_frontend_index_url())
 
 
 if os.path.isdir(FRONTEND_DIR):
