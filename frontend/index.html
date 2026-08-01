@@ -1188,7 +1188,7 @@
     #tab-customers .customer-ledger-table .th-courier { width: 78px; }
     #tab-customers .customer-ledger-table .th-tracking { width: 120px; }
     #tab-customers .customer-ledger-table .th-date { width: 88px; }
-    #tab-customers .customer-ledger-table .th-action { width: 60px; text-align: center; }
+    #tab-customers .customer-ledger-table .th-action { width: 126px; text-align: center; }
     #tab-customers tbody tr {
       background: #fff;
       cursor: pointer;
@@ -1214,7 +1214,14 @@
     }
     .ledger-address { color: #5f5968 !important; }
     .ledger-date { white-space: nowrap; color: #6f6878 !important; }
-    .ledger-action { text-align: center; }
+    .ledger-action {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      text-align: center;
+      white-space: nowrap;
+    }
     .ledger-order { color: #204f92 !important; }
     .customer-phone-link {
       min-height: 0;
@@ -1238,6 +1245,15 @@
       border-color: #cfc5df;
     }
     .customer-list-view:hover { background: #ebe5f5; color: #45326f; }
+    .customer-list-public {
+      min-height: 26px;
+      padding: 3px 8px;
+      border-color: #b8cae8;
+      background: #f3f7fd;
+      color: #24558f;
+      font-size: 11px;
+    }
+    .customer-list-public:hover { background: #e4eefb; color: #173f70; }
     .customer-pagination {
       min-height: 46px;
       padding: 7px 14px;
@@ -1788,8 +1804,15 @@
         white-space: normal;
         line-height: 1.45;
       }
-      #tab-customers .customer-ledger-table .ledger-action { align-items: stretch; }
-      #tab-customers .customer-ledger-table .customer-list-view { width: 100%; }
+      #tab-customers .customer-ledger-table .ledger-action {
+        align-items: stretch;
+        flex-direction: row;
+      }
+      #tab-customers .customer-ledger-table .customer-list-view,
+      #tab-customers .customer-ledger-table .customer-list-public {
+        width: auto;
+        flex: 1 1 0;
+      }
       #tab-customers .customer-ledger-table .empty-state::before { content: none; }
       .customer-pagination { align-items: flex-start; flex-direction: column; }
       .customer-page-controls { width: 100%; flex-wrap: wrap; }
@@ -2147,6 +2170,11 @@
             <button type="submit">保存登录资料</button>
           </form>
           <a class="ctexcel-personal-link" href="https://www.ctexcel.com/uk/login?redirect=/personal/personalHome" target="_blank" rel="noopener noreferrer">打开固定个人中心地址 ↗</a>
+          <div class="button-row" style="margin-top:10px;">
+            <button type="button" class="small blue" id="d-ctexcel-public-page-open" onclick="openCTExcelPublicPageForActive()">打开已激活号码资料扫码页</button>
+            <button type="button" class="small ghost" id="d-ctexcel-public-page-copy" onclick="copyCTExcelPublicPageForActive()">复制扫码页链接</button>
+          </div>
+          <div class="code-meta" id="d-ctexcel-public-page-status">扫码页可快捷复制手机号、注册邮箱、个人中心账号和初始密码。</div>
           <div class="code-meta" id="d-ctexcel-meta">点击扫描，或刷新验证码时自动同步。</div>
         </div>
       </div>
@@ -2210,7 +2238,7 @@
         <button type="submit">保存</button>
       </form>
 
-      <!-- 已激活号码资料扫码页 -->
+      <!-- 客户专属资料复制页 -->
       <div class="info-box" id="d-public-link-box" hidden>
         <div class="code-box-head">
           <strong id="d-public-link-title">已激活号码资料扫码页</strong>
@@ -3562,6 +3590,13 @@ function buildCustomerRow(c, index) {
     viewCustomer(c.id);
   }, 'customer-list-view');
   actionCell.appendChild(viewButton);
+  if (normalizeProductType(c.product_type) === 'ctexcel') {
+    const publicPageButton = makeButton('扫码页', (event) => {
+      openCustomerPublicPage(c, event);
+    }, 'customer-list-public');
+    publicPageButton.title = '打开 CTExcel 已激活号码资料扫码页';
+    actionCell.appendChild(publicPageButton);
+  }
 
   row.dataset.rowNumber = String(index + 1);
   return row;
@@ -3832,28 +3867,121 @@ function renderMoemailBox(c) {
 function renderPublicLinkBox(c) {
   const box = $('d-public-link-box');
   const input = $('d-public-link-input');
-  if (!c.public_token) {
+  const isCTExcel = normalizeProductType(c.product_type) === 'ctexcel';
+  if (!c.public_token && !isCTExcel) {
     box.hidden = true;
     return;
   }
-  const base = getPublicBaseUrl();
-  const url = getPublicPageUrl(c.public_token);
-  input.value = url;
   box.hidden = false;
-  const isCTExcel = normalizeProductType(c.product_type) === 'ctexcel';
-  $('d-public-link-title').textContent = isCTExcel ? 'CTExcel 号码与订单资料扫码页' : '已激活号码资料扫码页';
+  $('d-public-link-title').textContent = isCTExcel ? 'CTExcel 已激活号码资料扫码页' : '已激活号码资料扫码页';
   $('d-public-link-description').textContent = isCTExcel
-    ? '客户扫码后可复制 CTExcel 手机号码、注册邮箱、订单号和推荐码，不显示 giffgaff 内容。'
+    ? '与 giffgaff 客户页一致；客户扫码后可快捷复制手机号、注册邮箱、个人中心账号、初始密码、订单号和推荐码。'
     : '客户扫码后可复制 giffgaff 手机号码和初始注册邮箱，不会暴露客户管理后台。';
   const copyBtn = $('d-public-link-copy');
   const openBtn = $('d-public-link-open');
   const regenBtn = $('d-public-link-regenerate');
   const meta = $('d-public-link-meta');
+  if (!c.public_token) {
+    input.value = '尚未生成；点击“生成扫码页”即可创建固定链接';
+    copyBtn.disabled = true;
+    openBtn.disabled = true;
+    regenBtn.textContent = '生成扫码页';
+    regenBtn.style.color = '#24558f';
+    regenBtn.onclick = async () => {
+      try {
+        await ensureCustomerPublicLink(c);
+        renderPublicLinkBox(c);
+        renderCTExcelOrderBox(c);
+        toast('CTExcel 已激活号码资料扫码页已生成', 'success');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    };
+    meta.textContent = '该存量客户还没有公开 Token；生成后链接保持固定，更新账号或密码只刷新缓存版本。';
+    return;
+  }
+  const base = getPublicBaseUrl();
+  const url = getPublicPageUrl(c.public_token);
+  input.value = url;
+  copyBtn.disabled = false;
+  openBtn.disabled = false;
+  regenBtn.textContent = '重新生成链接';
+  regenBtn.style.color = '#dc2626';
   copyBtn.onclick = () => copyText(url, '公开页链接已复制');
   openBtn.onclick = () => window.open(url, '_blank', 'noopener');
   regenBtn.onclick = () => regeneratePublicLink(c);
   const usingWorker = (appSettings && appSettings.public_worker_domain) ? 'Worker' : '当前后台';
   meta.innerHTML = `当前使用域名：<code>${escapeHtml(base)}</code>（${usingWorker}）· 版本：<strong>v${c.public_version || 1}</strong>`;
+}
+
+async function ensureCustomerPublicLink(customer) {
+  if (!customer) throw new Error('客户资料不存在');
+  if (!customer.public_token) {
+    const res = await fetch(`${API}/customers/${customer.id}/public-link/ensure`, {
+      method: 'POST',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.public_token) {
+      throw new Error(data.detail || '生成已激活号码资料扫码页失败');
+    }
+    customer.public_token = data.public_token;
+    customer.public_version = data.public_version || 1;
+    const cached = customers.find(item => item.id === customer.id);
+    if (cached && cached !== customer) {
+      cached.public_token = customer.public_token;
+      cached.public_version = customer.public_version;
+    }
+    if (activeCustomer?.id === customer.id && activeCustomer !== customer) {
+      activeCustomer.public_token = customer.public_token;
+      activeCustomer.public_version = customer.public_version;
+    }
+  }
+  return customer;
+}
+
+async function openCustomerPublicPage(customer, event=null) {
+  event?.stopPropagation?.();
+  let pendingWindow = null;
+  try {
+    if (!customer.public_token) {
+      pendingWindow = window.open('', '_blank');
+      if (pendingWindow) pendingWindow.opener = null;
+    }
+    await ensureCustomerPublicLink(customer);
+    const url = getPublicPageUrl(customer.public_token);
+    if (pendingWindow) pendingWindow.location.replace(url);
+    else window.open(url, '_blank', 'noopener');
+    if (activeCustomer?.id === customer.id) {
+      renderPublicLinkBox(activeCustomer);
+      renderCTExcelOrderBox(activeCustomer);
+    }
+  } catch (err) {
+    pendingWindow?.close();
+    toast(err.message, 'error');
+  }
+}
+
+async function copyCustomerPublicPage(customer) {
+  try {
+    await ensureCustomerPublicLink(customer);
+    copyText(getPublicPageUrl(customer.public_token), 'CTExcel 已激活号码资料扫码页链接已复制');
+    if (activeCustomer?.id === customer.id) {
+      renderPublicLinkBox(activeCustomer);
+      renderCTExcelOrderBox(activeCustomer);
+    }
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function openCTExcelPublicPageForActive() {
+  if (!activeCustomer || normalizeProductType(activeCustomer.product_type) !== 'ctexcel') return;
+  openCustomerPublicPage(activeCustomer);
+}
+
+function copyCTExcelPublicPageForActive() {
+  if (!activeCustomer || normalizeProductType(activeCustomer.product_type) !== 'ctexcel') return;
+  copyCustomerPublicPage(activeCustomer);
 }
 
 async function regeneratePublicLink(c) {
@@ -4021,6 +4149,9 @@ function renderCTExcelOrderBox(c) {
   $('d-ctexcel-initial-password').textContent = c.ctexcel_initial_password || '—';
   $('d-ctexcel-login-account-input').value = c.ctexcel_login_account || '';
   $('d-ctexcel-initial-password-input').value = c.ctexcel_initial_password || '';
+  $('d-ctexcel-public-page-status').textContent = c.public_token
+    ? '已激活号码资料扫码页已生成：可打开或复制固定链接，账号密码更新后链接保持不变。'
+    : '该存量客户尚无扫码页；点击打开或复制时会自动生成固定链接。';
   $('d-ctexcel-registration-status').textContent =
     c.ctexcel_registration_confirmed_at
       ? `已确认 · ${formatShortDate(c.ctexcel_registration_confirmed_at)}`

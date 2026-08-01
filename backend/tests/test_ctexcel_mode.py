@@ -417,9 +417,9 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "5000002"
+    assert response.headers["X-Cache-Version"] == "6000002"
     body = response.text
-    assert "CTExcel 号码与订单资料" in body
+    assert "CTExcel 已激活号码资料" in body
     assert "07942946765" in body
     assert "ORDER2026072512362267544904" in body
     assert "NTKWJX" in body
@@ -438,7 +438,7 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
 
     version = client.get("/api/public/ctexcel-public-token/version")
     assert version.status_code == 200
-    assert version.json() == {"public_version": 5_000_002}
+    assert version.json() == {"public_version": 6_000_002}
 
 
 def test_ctexcel_admin_edit_keeps_public_token_and_bumps_only_on_change(
@@ -481,7 +481,7 @@ def test_ctexcel_public_card_shows_pending_login_state_without_credentials(
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "5000001"
+    assert response.headers["X-Cache-Version"] == "6000001"
     assert "登录资料等待同步" in response.text
     assert "一键复制登录资料</button>" in response.text
     assert "disabled" in response.text
@@ -489,6 +489,39 @@ def test_ctexcel_public_card_shows_pending_login_state_without_credentials(
         'href="https://www.ctexcel.com/uk/login?redirect=/personal/personalHome"'
         in response.text
     )
+
+
+def test_legacy_ctexcel_customer_can_lazily_create_fixed_credential_page(
+    ctexcel_client,
+):
+    client, db_path = ctexcel_client
+    customer_id = _insert_ctexcel_customer(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """UPDATE customers
+               SET public_token = NULL,
+                   ctexcel_login_account = ?,
+                   ctexcel_initial_password = ?
+               WHERE id = ?""",
+            ("447900000789", "Z9x8*WvU", customer_id),
+        )
+        connection.commit()
+
+    first = client.post(f"/api/customers/{customer_id}/public-link/ensure")
+    second = client.post(f"/api/customers/{customer_id}/public-link/ensure")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+    token = first.json()["public_token"]
+    assert token
+    page = client.get(f"/p/{token}")
+    assert page.status_code == 200
+    assert page.headers["X-Cache-Version"] == "6000001"
+    assert "个人中心登录资料" in page.text
+    assert "447900000789" in page.text
+    assert "Z9x8*WvU" in page.text
+    assert "一键复制登录资料" in page.text
 
 
 def test_ctexcel_rejects_giffgaff_only_tools(ctexcel_client):
@@ -518,6 +551,14 @@ def test_frontend_contains_persistent_ctexcel_mode_and_mode_specific_ui():
     assert "function refreshCTExcelOrderForActive" in html_text
     assert "/ctexcel-order-info" in html_text
     assert "ctexcel-50x40" in html_text
+    assert "CTExcel 已激活号码资料扫码页" in html_text
+    assert "打开已激活号码资料扫码页" in html_text
+    assert "复制扫码页链接" in html_text
+    assert "function ensureCustomerPublicLink" in html_text
+    assert "function openCustomerPublicPage" in html_text
+    assert "function copyCustomerPublicPage" in html_text
+    assert "/public-link/ensure" in html_text
+    assert "扫码页" in html_text
     assert "CTExcel订单号" in html_text
     assert "CTExcel推荐码" in html_text
     assert "ctexcel-login-form" in html_text

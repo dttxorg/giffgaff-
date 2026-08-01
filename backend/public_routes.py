@@ -34,7 +34,7 @@ ACTIVATION_GUIDE_PUBLIC_TOKEN = "activation-guide-public-page"
 # 比后端更早部署时把旧 HTML 缓存到新 Worker 版本下。
 ACTIVATION_GUIDE_CONTENT_VERSION = 5
 ACTIVATED_CARD_CONTENT_VERSION = 3
-CTEXCEL_CARD_CONTENT_VERSION = 5
+CTEXCEL_CARD_CONTENT_VERSION = 6
 _ACTIVATION_VERSION_FACTOR = 1_000_000
 
 VOICEMAIL_SUPPORT_URL = "https://support2.giffgaff.com/app/ask/International-and-Roaming/Accessing-voicemail-while-abroad/form/"
