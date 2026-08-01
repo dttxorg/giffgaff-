@@ -1415,6 +1415,22 @@
     #detail-panel .shipping-form {
       grid-template-columns: minmax(240px, 1.8fr) minmax(120px, .8fr) minmax(150px, 1fr) auto;
     }
+    #detail-panel .ctexcel-login-form {
+      grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr) auto;
+      margin: 12px 0 0;
+      padding: 12px;
+      background: #fff;
+    }
+    .ctexcel-personal-link {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      margin-top: 10px;
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 700;
+      text-decoration: none;
+    }
     .detail-tool-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -2108,7 +2124,29 @@
               <span>注册确认</span>
               <code id="d-ctexcel-registration-status">待扫描</code>
             </div>
+            <div class="registration-quick-item">
+              <span>个人中心账号</span>
+              <code id="d-ctexcel-login-account">—</code>
+              <button type="button" class="small blue" onclick="copyElText('d-ctexcel-login-account', '已复制个人中心账号')">复制</button>
+            </div>
+            <div class="registration-quick-item">
+              <span>初始密码</span>
+              <code id="d-ctexcel-initial-password">—</code>
+              <button type="button" class="small blue" onclick="copyElText('d-ctexcel-initial-password', '已复制初始密码')">复制</button>
+            </div>
           </div>
+          <form class="inline-form ctexcel-login-form" id="ctexcel-login-form">
+            <div>
+              <label>个人中心账号</label>
+              <input type="text" id="d-ctexcel-login-account-input" autocomplete="off" placeholder="邮件中的账号">
+            </div>
+            <div>
+              <label>初始密码</label>
+              <input type="text" id="d-ctexcel-initial-password-input" autocomplete="off" placeholder="邮件中的初始密码">
+            </div>
+            <button type="submit">保存登录资料</button>
+          </form>
+          <a class="ctexcel-personal-link" href="https://www.ctexcel.com/uk/login?redirect=/personal/personalHome" target="_blank" rel="noopener noreferrer">打开固定个人中心地址 ↗</a>
           <div class="code-meta" id="d-ctexcel-meta">点击扫描，或刷新验证码时自动同步。</div>
         </div>
       </div>
@@ -3585,7 +3623,12 @@ async function viewCustomer(id, focusTarget='') {
     if (
       customerMode === 'ctexcel'
       && hasReadableInbox(activeCustomer)
-      && (!activeCustomer.phone_number || !activeCustomer.ctexcel_order_number)
+      && (
+        !activeCustomer.phone_number
+        || !activeCustomer.ctexcel_order_number
+        || !activeCustomer.ctexcel_login_account
+        || !activeCustomer.ctexcel_initial_password
+      )
     ) {
       setTimeout(() => refreshCTExcelOrderForActive({ silent: true }), 0);
     }
@@ -3974,6 +4017,10 @@ function renderCTExcelOrderBox(c) {
     ? `£ ${c.ctexcel_transaction_amount}`
     : '—';
   $('d-ctexcel-referral-code').textContent = c.ctexcel_referral_code || '—';
+  $('d-ctexcel-login-account').textContent = c.ctexcel_login_account || '—';
+  $('d-ctexcel-initial-password').textContent = c.ctexcel_initial_password || '—';
+  $('d-ctexcel-login-account-input').value = c.ctexcel_login_account || '';
+  $('d-ctexcel-initial-password-input').value = c.ctexcel_initial_password || '';
   $('d-ctexcel-registration-status').textContent =
     c.ctexcel_registration_confirmed_at
       ? `已确认 · ${formatShortDate(c.ctexcel_registration_confirmed_at)}`
@@ -3981,7 +4028,7 @@ function renderCTExcelOrderBox(c) {
   const readable = hasReadableInbox(c);
   $('d-ctexcel-refresh').disabled = !readable;
   $('d-ctexcel-meta').textContent = c.ctexcel_registration_confirmed_at
-    ? `已收到“【CTExcel】您的订单已确认！”邮件；该账号不会再次用于注册。`
+    ? `已收到“【CTExcel】您的订单已确认！”邮件；个人中心登录资料会继续自动同步。`
     : c.ctexcel_last_checked_at
     ? `最近扫描：${formatShortDate(c.ctexcel_last_checked_at)}`
     : (readable ? '打开详情后会自动扫描；也可以手动刷新。' : '该客户没有可读取的托管邮箱账户。');
@@ -3994,7 +4041,7 @@ async function refreshCTExcelOrderForActive(options={}) {
   const meta = $('d-ctexcel-meta');
   button.disabled = true;
   button.textContent = '扫描中...';
-  meta.textContent = '正在读取 MoEmail / CloudMail 订单邮件并提取号码资料...';
+  meta.textContent = '正在读取 MoEmail / CloudMail 邮件并提取号码及个人中心登录资料...';
   try {
     const res = await fetch(`${API}/customers/${activeCustomer.id}/ctexcel-order-info`, {
       cache: 'no-store',
@@ -4705,6 +4752,38 @@ $('phone-update-form').onsubmit = async (e) => {
   } finally {
     btn.disabled = false;
     btn.textContent = '保存手机号';
+  }
+};
+
+$('ctexcel-login-form').onsubmit = async (e) => {
+  e.preventDefault();
+  if (!activeCustomer || normalizeProductType(activeCustomer.product_type) !== 'ctexcel') return;
+  const loginAccount = $('d-ctexcel-login-account-input').value.trim();
+  const initialPassword = $('d-ctexcel-initial-password-input').value.trim();
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  btn.textContent = '保存中...';
+  try {
+    const res = await fetch(API + '/customers/' + activeCustomer.id, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        ctexcel_login_account: loginAccount,
+        ctexcel_initial_password: initialPassword,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || '保存失败');
+    activeCustomer = await getCustomer(activeCustomer.id);
+    renderCTExcelOrderBox(activeCustomer);
+    renderPublicLinkBox(activeCustomer);
+    toast('CTExcel 个人中心登录资料已保存', 'success');
+    await loadCustomers();
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '保存登录资料';
   }
 };
 

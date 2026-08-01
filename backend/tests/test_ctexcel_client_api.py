@@ -419,26 +419,33 @@ def test_backup_roundtrip_preserves_ctexcel_completion_state(client_api):
             """INSERT INTO customers
                (product_type, email, activation_date,
                 ctexcel_registration_confirmed_at,
-                ctexcel_payment_succeeded_at)
+                ctexcel_payment_succeeded_at,
+                ctexcel_login_account, ctexcel_initial_password)
                VALUES ('ctexcel', 'completed@example.test', '2026-08-01',
-                       '2026-08-01T01:00:00Z', '2026-08-01T01:05:00Z')"""
+                       '2026-08-01T01:00:00Z', '2026-08-01T01:05:00Z',
+                       '447900000789', 'Backup*Pass1')"""
         ).lastrowid
         connection.commit()
 
     payload = asyncio.run(main._export_backup_payload())
+    assert payload["customers"][0]["ctexcel_login_account"] == "447900000789"
+    assert payload["customers"][0]["ctexcel_initial_password"] == "Backup*Pass1"
     restored = asyncio.run(main._restore_backup_payload(payload))
 
     assert restored["customers_restored"] == 1
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
             """SELECT ctexcel_registration_confirmed_at,
-                      ctexcel_payment_succeeded_at
+                      ctexcel_payment_succeeded_at,
+                      ctexcel_login_account, ctexcel_initial_password
                FROM customers WHERE id = ?""",
             (customer_id,),
         ).fetchone()
     assert row == (
         "2026-08-01T01:00:00Z",
         "2026-08-01T01:05:00Z",
+        "447900000789",
+        "Backup*Pass1",
     )
     pending = client.get(
         "/api/ctexcel-client/customers/pending",
@@ -654,7 +661,8 @@ def test_client_payment_checkpoint_persists_success_page_fields(client_api):
     with sqlite3.connect(db_path) as connection:
         persisted = connection.execute(
             """SELECT ctexcel_order_number, ctexcel_transaction_amount,
-                      phone_number, ctexcel_payment_succeeded_at
+                      phone_number, ctexcel_payment_succeeded_at,
+                      public_version
                FROM customers WHERE id = ?""",
             (ctexcel_id,),
         ).fetchone()
@@ -663,6 +671,7 @@ def test_client_payment_checkpoint_persists_success_page_fields(client_api):
         "1.00",
         "447900000009",
         payload["payment_succeeded_at"],
+        2,
     )
 
     assert client.post(

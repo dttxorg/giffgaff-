@@ -110,6 +110,8 @@ def test_nullable_phone_migration_preserves_ctexcel_columns():
                     item[1] for item in connection.execute("PRAGMA index_list(customers)")
                 }
             assert columns["phone_number"][3] == 0
+            assert "ctexcel_login_account" in columns
+            assert "ctexcel_initial_password" in columns
             assert row == ("ctexcel", "07942946765", "ORDER-LEGACY-1")
             assert "ix_customers_public_token" in indexes
         finally:
@@ -245,6 +247,94 @@ def test_ctexcel_freecard_order_email_parses_new_order_and_payment_amount():
     assert parsed["phone_number"] == "07942946765"
 
 
+def test_ctexcel_activation_email_parses_login_with_special_character_password():
+    parsed = main._extract_ctexcel_order_info(
+        {
+            "subject": "【CTExcel】个人中心账户已开通",
+            "htmlBody": (
+                "<p>您距离成功注册个人中心账户只差一步。</p>"
+                "<div>账号：<strong>447900000123</strong></div>"
+                "<div>密码: <strong>A7b9*XyZ</strong></div>"
+                "<div>个人中心地址:"
+                "https://www.ctexcel.com/uk/login?redirect=/personal/personalHome"
+                "</div>"
+            ),
+        }
+    )
+
+    assert parsed["login_account"] == "447900000123"
+    assert parsed["initial_password"] == "A7b9*XyZ"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "账号:447900000123\n个人中心地址:https://www.ctexcel.com/uk/login?redirect=/personal/personalHome",
+        "密码:A7b9*XyZ\n个人中心地址:https://www.ctexcel.com/uk/login?redirect=/personal/personalHome",
+        "普通网站账号:447900000123\n密码:A7b9*XyZ",
+    ],
+)
+def test_ctexcel_login_parser_requires_both_fields_and_portal_context(text):
+    parsed = main._extract_ctexcel_order_info({"subject": "普通通知", "text": text})
+
+    assert parsed["login_account"] is None
+    assert parsed["initial_password"] is None
+
+
+def test_ctexcel_activation_email_syncs_credentials_and_bumps_cache_once(
+    ctexcel_client,
+):
+    client, db_path = ctexcel_client
+    customer_id = _insert_ctexcel_customer(db_path)
+    provider = MagicMock(name="activation-provider")
+    provider.get_email_messages.return_value = {
+        "messages": [
+            {
+                "id": "activation-mail",
+                "subject": "【CTExcel】个人中心账户已开通",
+                "fromAddress": "service@ctexcel.example",
+                "receivedAt": 1785567600000,
+            }
+        ]
+    }
+    provider.get_message.return_value = {
+        "message": {
+            "text": (
+                "账号:447900000123\n"
+                "密码:A7b9*XyZ\n"
+                "个人中心地址:"
+                "https://www.ctexcel.com/uk/login?redirect=/personal/personalHome"
+            )
+        }
+    }
+
+    with patch.object(
+        main,
+        "_resolve_inbox_provider",
+        new=AsyncMock(return_value=("mail-account-1", provider)),
+    ):
+        first = client.get(f"/api/customers/{customer_id}/ctexcel-order-info")
+        second = client.get(f"/api/customers/{customer_id}/ctexcel-order-info")
+
+    assert first.status_code == 200, first.text
+    assert first.json()["login_account"] == "447900000123"
+    assert first.json()["initial_password"] == "A7b9*XyZ"
+    assert second.status_code == 200
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """SELECT ctexcel_login_account, ctexcel_initial_password,
+                      public_token, public_version
+               FROM customers WHERE id = ?""",
+            (customer_id,),
+        ).fetchone()
+    assert row == (
+        "447900000123",
+        "A7b9*XyZ",
+        "ctexcel-public-token",
+        2,
+    )
+
+
 def test_ctexcel_confirmation_subject_marks_registration_success(
     ctexcel_client,
 ):
@@ -318,6 +408,8 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
                     "https://www.ctexcel.com/uk/buyCard/buyCardPackage/1"
                     "?recommendCode=NTKWJX"
                 ),
+                ctexcel_login_account="447900000123",
+                ctexcel_initial_password="A7b9*XyZ",
             ),
         )
     )
@@ -325,12 +417,20 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "4000001"
+    assert response.headers["X-Cache-Version"] == "5000002"
     body = response.text
     assert "CTExcel 号码与订单资料" in body
     assert "07942946765" in body
     assert "ORDER2026072512362267544904" in body
     assert "NTKWJX" in body
+    assert "447900000123" in body
+    assert "A7b9*XyZ" in body
+    assert "个人中心登录资料" in body
+    assert "一键复制登录资料" in body
+    assert (
+        'href="https://www.ctexcel.com/uk/login?redirect=/personal/personalHome"'
+        in body
+    )
     assert "<!--email_off-->" in body
     assert "copyValue" in body
     assert "语音信箱" not in body
@@ -338,7 +438,57 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
 
     version = client.get("/api/public/ctexcel-public-token/version")
     assert version.status_code == 200
-    assert version.json() == {"public_version": 4_000_001}
+    assert version.json() == {"public_version": 5_000_002}
+
+
+def test_ctexcel_admin_edit_keeps_public_token_and_bumps_only_on_change(
+    ctexcel_client,
+):
+    client, db_path = ctexcel_client
+    customer_id = _insert_ctexcel_customer(db_path)
+    before = client.get(f"/api/customers/{customer_id}").json()
+    payload = {
+        "ctexcel_login_account": "447900000456",
+        "ctexcel_initial_password": "Q2w3*ErT",
+    }
+
+    first = client.patch(f"/api/customers/{customer_id}", json=payload)
+    after = client.get(f"/api/customers/{customer_id}").json()
+    repeated = client.patch(f"/api/customers/{customer_id}", json=payload)
+    final = client.get(f"/api/customers/{customer_id}").json()
+
+    assert first.status_code == 200
+    assert repeated.status_code == 200
+    assert after["ctexcel_login_account"] == "447900000456"
+    assert after["ctexcel_initial_password"] == "Q2w3*ErT"
+    assert after["public_token"] == before["public_token"]
+    assert after["public_version"] == before["public_version"] + 1
+    assert final["public_token"] == before["public_token"]
+    assert final["public_version"] == after["public_version"]
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT public_token FROM customers WHERE id = ?",
+            (customer_id,),
+        ).fetchone()[0] == "ctexcel-public-token"
+
+
+def test_ctexcel_public_card_shows_pending_login_state_without_credentials(
+    ctexcel_client,
+):
+    client, db_path = ctexcel_client
+    _insert_ctexcel_customer(db_path)
+
+    response = client.get("/p/ctexcel-public-token")
+
+    assert response.status_code == 200
+    assert response.headers["X-Cache-Version"] == "5000001"
+    assert "登录资料等待同步" in response.text
+    assert "一键复制登录资料</button>" in response.text
+    assert "disabled" in response.text
+    assert (
+        'href="https://www.ctexcel.com/uk/login?redirect=/personal/personalHome"'
+        in response.text
+    )
 
 
 def test_ctexcel_rejects_giffgaff_only_tools(ctexcel_client):
@@ -370,6 +520,13 @@ def test_frontend_contains_persistent_ctexcel_mode_and_mode_specific_ui():
     assert "ctexcel-50x40" in html_text
     assert "CTExcel订单号" in html_text
     assert "CTExcel推荐码" in html_text
+    assert "ctexcel-login-form" in html_text
+    assert "ctexcel_login_account: loginAccount" in html_text
+    assert "ctexcel_initial_password: initialPassword" in html_text
+    assert (
+        "https://www.ctexcel.com/uk/login?redirect=/personal/personalHome"
+        in html_text
+    )
 
 
 def test_legacy_label_config_is_merged_with_ctexcel_template(ctexcel_client):
@@ -415,9 +572,11 @@ def test_ctexcel_auto_sync_claims_recent_incomplete_mailbox_once(
         connection.execute(
             """INSERT INTO customers
                (product_type, email, phone_number, activation_date,
-                email_account_id, ctexcel_order_number)
+                email_account_id, ctexcel_order_number,
+                ctexcel_login_account, ctexcel_initial_password)
                VALUES ('ctexcel', 'complete@example.com', '07900000001',
-                       '2026-07-29', 'complete-mail', 'ORDER-COMPLETE')"""
+                       '2026-07-29', 'complete-mail', 'ORDER-COMPLETE',
+                       '447900000111', 'Complete*Pass1')"""
         )
         connection.execute(
             """INSERT INTO customers
@@ -454,8 +613,10 @@ def test_ctexcel_auto_sync_claims_recent_incomplete_mailbox_once(
 
     claims = asyncio.run(claim_from_two_workers())
 
-    assert sorted(len(batch) for batch in claims) == [0, 1]
-    assert [row["id"] for batch in claims for row in batch] == [pending_id]
+    assert sorted(len(batch) for batch in claims) == [0, 2]
+    claimed_ids = [row["id"] for batch in claims for row in batch]
+    assert pending_id in claimed_ids
+    assert len(claimed_ids) == 2
     with sqlite3.connect(db_path) as connection:
         claimed_at = connection.execute(
             "SELECT ctexcel_last_checked_at FROM customers WHERE id = ?",

@@ -46,6 +46,8 @@ class CustomerUpdate(BaseModel):
     ctexcel_transaction_amount: Optional[str] = None
     ctexcel_referral_code: Optional[str] = None
     ctexcel_referral_link: Optional[str] = None
+    ctexcel_login_account: Optional[str] = Field(default=None, max_length=128)
+    ctexcel_initial_password: Optional[str] = Field(default=None, max_length=128)
 
 
 class CustomerOut(BaseModel):
@@ -78,6 +80,7 @@ class CustomerOut(BaseModel):
     ctexcel_transaction_amount: Optional[str] = None
     ctexcel_referral_code: Optional[str] = None
     ctexcel_referral_link: Optional[str] = None
+    ctexcel_login_account: Optional[str] = None
     ctexcel_last_checked_at: Optional[str] = None
     ctexcel_registration_confirmed_at: Optional[str] = None
     ctexcel_payment_succeeded_at: Optional[str] = None
@@ -122,6 +125,8 @@ class CustomerDetail(BaseModel):
     ctexcel_transaction_amount: Optional[str] = None
     ctexcel_referral_code: Optional[str] = None
     ctexcel_referral_link: Optional[str] = None
+    ctexcel_login_account: Optional[str] = None
+    ctexcel_initial_password: Optional[str] = None
     ctexcel_last_checked_at: Optional[str] = None
     ctexcel_registration_confirmed_at: Optional[str] = None
     ctexcel_payment_succeeded_at: Optional[str] = None
@@ -251,6 +256,8 @@ class CTExcelOrderInfoOut(BaseModel):
     transaction_amount: Optional[str] = None
     referral_code: Optional[str] = None
     referral_link: Optional[str] = None
+    login_account: Optional[str] = None
+    initial_password: Optional[str] = None
     message_id: Optional[str] = None
     subject: Optional[str] = None
     from_address: Optional[str] = None

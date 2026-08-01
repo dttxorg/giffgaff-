@@ -12,6 +12,7 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import crud
+from ctexcel_constants import CTEXCEL_PERSONAL_CENTER_URL
 
 router = APIRouter()
 
@@ -33,7 +34,7 @@ ACTIVATION_GUIDE_PUBLIC_TOKEN = "activation-guide-public-page"
 # 比后端更早部署时把旧 HTML 缓存到新 Worker 版本下。
 ACTIVATION_GUIDE_CONTENT_VERSION = 5
 ACTIVATED_CARD_CONTENT_VERSION = 3
-CTEXCEL_CARD_CONTENT_VERSION = 4
+CTEXCEL_CARD_CONTENT_VERSION = 5
 _ACTIVATION_VERSION_FACTOR = 1_000_000
 
 VOICEMAIL_SUPPORT_URL = "https://support2.giffgaff.com/app/ask/International-and-Roaming/Accessing-voicemail-while-abroad/form/"
@@ -556,6 +557,8 @@ def _build_substitution_vars(customer_row: dict) -> dict:
         "ctexcel_transaction_amount": customer_row.get("ctexcel_transaction_amount") or "",
         "ctexcel_referral_code": customer_row.get("ctexcel_referral_code") or "",
         "ctexcel_referral_link": customer_row.get("ctexcel_referral_link") or "",
+        "ctexcel_login_account": customer_row.get("ctexcel_login_account") or "",
+        "ctexcel_initial_password": customer_row.get("ctexcel_initial_password") or "",
     }
 
 
@@ -619,6 +622,8 @@ def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
     amount = vars_.get("ctexcel_transaction_amount") or ""
     referral_code = vars_.get("ctexcel_referral_code") or ""
     referral_link = vars_.get("ctexcel_referral_link") or ""
+    login_account = vars_.get("ctexcel_login_account") or ""
+    initial_password = vars_.get("ctexcel_initial_password") or ""
 
     def copy_row(row_id: str, label: str, value: str, message: str) -> str:
         if not value:
@@ -642,6 +647,24 @@ def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
             '<a class="referral-link" target="_blank" rel="noopener noreferrer" '
             f'href="{safe_link}">打开专属推荐链接 <span>↗</span></a>'
         )
+    login_rows = "".join(
+        (
+            copy_row("login-account", "个人中心账号", login_account, "已复制账号"),
+            copy_row("login-password", "初始密码", initial_password, "已复制初始密码"),
+        )
+    )
+    missing_login_fields = []
+    if not login_account:
+        missing_login_fields.append("账号")
+    if not initial_password:
+        missing_login_fields.append("初始密码")
+    if missing_login_fields:
+        login_rows += (
+            '<div class="login-pending" role="status">'
+            '<strong>登录资料等待同步</strong>'
+            f'<span>激活邮件同步后将显示{"、".join(missing_login_fields)}，也可由后台手动补充。</span>'
+            '</div>'
+        )
     amount_display = f"£ {html.escape(amount)}" if amount else "邮件同步后显示"
     return (
         _load_ctexcel_template()
@@ -651,6 +674,15 @@ def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
         .replace("__AMOUNT__", amount_display)
         .replace("__REFERRAL_ROW__", copy_row("referral", "专属推荐码", referral_code, "已复制推荐码"))
         .replace("__REFERRAL_LINK__", referral_link_html)
+        .replace("__LOGIN_ROWS__", login_rows)
+        .replace(
+            "__LOGIN_COPY_DISABLED__",
+            "" if login_account and initial_password else "disabled",
+        )
+        .replace(
+            "__PERSONAL_CENTER_URL__",
+            html.escape(CTEXCEL_PERSONAL_CENTER_URL, quote=True),
+        )
         .replace("__WECHAT_GUIDE_HTML__", _render_wechat_guide())
     )
 

@@ -46,6 +46,8 @@ async def init_db():
                 ctexcel_transaction_amount TEXT,
                 ctexcel_referral_code TEXT,
                 ctexcel_referral_link TEXT,
+                ctexcel_login_account TEXT,
+                ctexcel_initial_password TEXT,
                 ctexcel_last_checked_at TEXT,
                 ctexcel_registration_confirmed_at TEXT,
                 ctexcel_payment_succeeded_at TEXT,
@@ -85,6 +87,8 @@ async def init_db():
         await _ensure_column(db, "customers", "ctexcel_transaction_amount", "TEXT")
         await _ensure_column(db, "customers", "ctexcel_referral_code", "TEXT")
         await _ensure_column(db, "customers", "ctexcel_referral_link", "TEXT")
+        await _ensure_column(db, "customers", "ctexcel_login_account", "TEXT")
+        await _ensure_column(db, "customers", "ctexcel_initial_password", "TEXT")
         await _ensure_column(db, "customers", "ctexcel_last_checked_at", "TEXT")
         await _ensure_column(
             db,
@@ -279,6 +283,8 @@ async def _ensure_nullable_phone_number(db: aiosqlite.Connection):
             ctexcel_transaction_amount TEXT,
             ctexcel_referral_code TEXT,
             ctexcel_referral_link TEXT,
+            ctexcel_login_account TEXT,
+            ctexcel_initial_password TEXT,
             ctexcel_last_checked_at TEXT,
             ctexcel_registration_confirmed_at TEXT,
             ctexcel_payment_succeeded_at TEXT,

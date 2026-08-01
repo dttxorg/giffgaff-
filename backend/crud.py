@@ -43,9 +43,10 @@ async def search_customers(query: str):
                   OR LOWER(COALESCE(courier_company, '')) LIKE ?
                   OR LOWER(COALESCE(courier_order_code, '')) LIKE ?
                   OR LOWER(COALESCE(ctexcel_order_number, '')) LIKE ?
+                  OR LOWER(COALESCE(ctexcel_login_account, '')) LIKE ?
                   OR LOWER(COALESCE(email, '')) LIKE ?
                ORDER BY created_at DESC""",
-            (pattern, pattern, pattern, pattern, pattern, pattern),
+            (pattern, pattern, pattern, pattern, pattern, pattern, pattern),
         )
         return [dict(r) for r in rows] 
 
@@ -124,13 +125,58 @@ async def update_customer(customer_id: int, data: CustomerUpdate):
         fields.append("ctexcel_referral_code = ?"); values.append(normalize_optional_text(data.ctexcel_referral_code))
     if data.ctexcel_referral_link is not None:
         fields.append("ctexcel_referral_link = ?"); values.append(normalize_optional_text(data.ctexcel_referral_link))
+    if data.ctexcel_login_account is not None:
+        fields.append("ctexcel_login_account = ?"); values.append(normalize_optional_text(data.ctexcel_login_account))
+    if data.ctexcel_initial_password is not None:
+        fields.append("ctexcel_initial_password = ?"); values.append(normalize_optional_text(data.ctexcel_initial_password))
     if not fields:
         return True
-    values.append(customer_id)
+
+    public_updates = {}
+    for field in (
+        "phone_number",
+        "ctexcel_order_number",
+        "ctexcel_transaction_amount",
+        "ctexcel_referral_code",
+        "ctexcel_referral_link",
+        "ctexcel_login_account",
+        "ctexcel_initial_password",
+    ):
+        value = getattr(data, field)
+        if value is not None:
+            public_updates[field] = normalize_optional_text(value)
+    if data.email is not None:
+        public_updates["email"] = data.email
+
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute(f"UPDATE customers SET {', '.join(fields)} WHERE id = ?", values)
-        await db.commit()
-        return True
+        db.row_factory = aiosqlite.Row
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            current = await fetch_one(
+                db,
+                "SELECT * FROM customers WHERE id = ?",
+                (customer_id,),
+            )
+            if not current:
+                await db.rollback()
+                return False
+            if (
+                (current["product_type"] or "giffgaff") == "ctexcel"
+                and any(current[field] != value for field, value in public_updates.items())
+            ):
+                # 公开字段变化只让 Worker 换缓存 key；客户二维码 token 保持不变。
+                fields.append(
+                    "public_version = COALESCE(public_version, 1) + 1"
+                )
+            cursor = await db.execute(
+                f"UPDATE customers SET {', '.join(fields)} WHERE id = ?",
+                (*values, customer_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+        except Exception:
+            await db.rollback()
+            raise
 
 
 async def delete_customer(customer_id: int):
@@ -200,7 +246,8 @@ async def get_public_card(token: str) -> Optional[dict]:
                       sim_activation_code, initial_password, share_link,
                       activation_date, phone_status, shipping_address,
                       ctexcel_order_number, ctexcel_transaction_amount,
-                      ctexcel_referral_code, ctexcel_referral_link
+                      ctexcel_referral_code, ctexcel_referral_link,
+                      ctexcel_login_account, ctexcel_initial_password
                FROM customers WHERE public_token = ?""",
             (token,),
         )
@@ -230,6 +277,8 @@ async def get_public_card(token: str) -> Optional[dict]:
             "ctexcel_transaction_amount": row["ctexcel_transaction_amount"],
             "ctexcel_referral_code": row["ctexcel_referral_code"],
             "ctexcel_referral_link": row["ctexcel_referral_link"],
+            "ctexcel_login_account": row["ctexcel_login_account"],
+            "ctexcel_initial_password": row["ctexcel_initial_password"],
         }
 
 
@@ -375,35 +424,65 @@ async def save_ctexcel_order_info(
     transaction_amount: Optional[str],
     referral_code: Optional[str],
     referral_link: Optional[str],
+    login_account: Optional[str],
+    initial_password: Optional[str],
     registration_confirmed_at: Optional[str],
     checked_at: str,
 ) -> bool:
     """保存 CTExcel 订单邮件中解析出的资料；空字段保留现有值。"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        cursor = await db.execute(
-            """UPDATE customers
-               SET phone_number = COALESCE(?, phone_number),
-                   ctexcel_order_number = COALESCE(?, ctexcel_order_number),
-                   ctexcel_transaction_amount = COALESCE(?, ctexcel_transaction_amount),
-                   ctexcel_referral_code = COALESCE(?, ctexcel_referral_code),
-                   ctexcel_referral_link = COALESCE(?, ctexcel_referral_link),
-                   ctexcel_registration_confirmed_at =
-                       COALESCE(?, ctexcel_registration_confirmed_at),
-                   ctexcel_last_checked_at = ?
-               WHERE id = ? AND product_type = 'ctexcel'""",
-            (
-                normalize_optional_text(phone_number),
-                normalize_optional_text(order_number),
-                normalize_optional_text(transaction_amount),
-                normalize_optional_text(referral_code),
-                normalize_optional_text(referral_link),
-                normalize_optional_text(registration_confirmed_at),
-                checked_at,
-                customer_id,
-            ),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+        db.row_factory = aiosqlite.Row
+        incoming = {
+            "phone_number": normalize_optional_text(phone_number),
+            "ctexcel_order_number": normalize_optional_text(order_number),
+            "ctexcel_transaction_amount": normalize_optional_text(transaction_amount),
+            "ctexcel_referral_code": normalize_optional_text(referral_code),
+            "ctexcel_referral_link": normalize_optional_text(referral_link),
+            "ctexcel_login_account": normalize_optional_text(login_account),
+            "ctexcel_initial_password": normalize_optional_text(initial_password),
+        }
+        try:
+            # 手动扫描和后台扫描可能重叠；串行比较后只为一次真实变化提升一次版本。
+            await db.execute("BEGIN IMMEDIATE")
+            current = await fetch_one(
+                db,
+                "SELECT * FROM customers WHERE id = ? AND product_type = 'ctexcel'",
+                (customer_id,),
+            )
+            if not current:
+                await db.rollback()
+                return False
+            public_changed = any(
+                value is not None and current[field] != value
+                for field, value in incoming.items()
+            )
+            cursor = await db.execute(
+                """UPDATE customers
+                   SET phone_number = COALESCE(?, phone_number),
+                       ctexcel_order_number = COALESCE(?, ctexcel_order_number),
+                       ctexcel_transaction_amount = COALESCE(?, ctexcel_transaction_amount),
+                       ctexcel_referral_code = COALESCE(?, ctexcel_referral_code),
+                       ctexcel_referral_link = COALESCE(?, ctexcel_referral_link),
+                       ctexcel_login_account = COALESCE(?, ctexcel_login_account),
+                       ctexcel_initial_password = COALESCE(?, ctexcel_initial_password),
+                       ctexcel_registration_confirmed_at =
+                           COALESCE(?, ctexcel_registration_confirmed_at),
+                       ctexcel_last_checked_at = ?,
+                       public_version = COALESCE(public_version, 1) + ?
+                   WHERE id = ? AND product_type = 'ctexcel'""",
+                (
+                    *incoming.values(),
+                    normalize_optional_text(registration_confirmed_at),
+                    checked_at,
+                    1 if public_changed else 0,
+                    customer_id,
+                ),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+        except Exception:
+            await db.rollback()
+            raise
 
 
 async def save_ctexcel_payment_checkpoint(
@@ -415,25 +494,50 @@ async def save_ctexcel_payment_checkpoint(
     payment_succeeded_at: Optional[str] = None,
 ) -> bool:
     """保存支付页订单资料；成功页可同时补全手机号码。"""
+    incoming = {
+        "ctexcel_order_number": normalize_optional_text(order_number),
+        "ctexcel_transaction_amount": normalize_optional_text(transaction_amount),
+        "phone_number": normalize_optional_text(phone_number),
+    }
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        cursor = await db.execute(
-            """UPDATE customers
-               SET ctexcel_order_number = COALESCE(?, ctexcel_order_number),
-                   ctexcel_transaction_amount = ?,
-                   phone_number = COALESCE(?, phone_number),
-                   ctexcel_payment_succeeded_at =
-                       COALESCE(?, ctexcel_payment_succeeded_at)
-               WHERE id = ? AND product_type = 'ctexcel'""",
-            (
-                normalize_optional_text(order_number),
-                normalize_optional_text(transaction_amount),
-                normalize_optional_text(phone_number),
-                normalize_optional_text(payment_succeeded_at),
-                customer_id,
-            ),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+        db.row_factory = aiosqlite.Row
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            current = await fetch_one(
+                db,
+                "SELECT * FROM customers WHERE id = ? AND product_type = 'ctexcel'",
+                (customer_id,),
+            )
+            if not current:
+                await db.rollback()
+                return False
+            public_changed = any(
+                value is not None and current[field] != value
+                for field, value in incoming.items()
+            )
+            cursor = await db.execute(
+                """UPDATE customers
+                   SET ctexcel_order_number = COALESCE(?, ctexcel_order_number),
+                       ctexcel_transaction_amount = ?,
+                       phone_number = COALESCE(?, phone_number),
+                       ctexcel_payment_succeeded_at =
+                           COALESCE(?, ctexcel_payment_succeeded_at),
+                       public_version = COALESCE(public_version, 1) + ?
+                   WHERE id = ? AND product_type = 'ctexcel'""",
+                (
+                    incoming["ctexcel_order_number"],
+                    incoming["ctexcel_transaction_amount"],
+                    incoming["phone_number"],
+                    normalize_optional_text(payment_succeeded_at),
+                    1 if public_changed else 0,
+                    customer_id,
+                ),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+        except Exception:
+            await db.rollback()
+            raise
 
 
 

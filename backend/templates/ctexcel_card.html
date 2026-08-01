@@ -104,6 +104,60 @@
       font-weight: 900;
     }
     .data-row button.copied { color: var(--ink); background: var(--lime); }
+    .login-panel {
+      margin-top: 28px;
+      box-shadow: 6px 6px 0 var(--coral);
+    }
+    .login-pending {
+      padding: 15px 14px;
+      border: 1px dashed #91a9bf;
+      border-radius: 15px;
+      background: #f8fbfe;
+    }
+    .login-pending strong { display: block; font-size: 13px; }
+    .login-pending span { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+    .login-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0,1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .login-actions button,
+    .login-actions a {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      padding: 0 12px;
+      border: 2px solid var(--ink);
+      border-radius: 13px;
+      color: #fff;
+      background: var(--blue);
+      box-shadow: 3px 3px 0 var(--ink);
+      text-align: center;
+      text-decoration: none;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 900;
+    }
+    .login-actions a,
+    .login-actions button.copied { color: var(--ink); background: var(--lime); }
+    .login-actions button:disabled {
+      color: #7a8998;
+      background: #dfe7ee;
+      box-shadow: none;
+      cursor: not-allowed;
+    }
+    .login-note {
+      margin: 14px 0 0;
+      padding: 11px 12px;
+      border-left: 4px solid var(--coral);
+      border-radius: 8px;
+      color: #5f5235;
+      background: #fff5d9;
+      font-size: 11px;
+      line-height: 1.6;
+    }
     .order-summary {
       display: grid;
       grid-template-columns: repeat(2, minmax(0,1fr));
@@ -176,6 +230,7 @@
       .hero { padding-inline: 19px; }
       .panel, .notice, .wechat-card { margin-inline: 4px; }
       .order-summary { grid-template-columns: 1fr; }
+      .login-actions { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -210,6 +265,20 @@
       __REFERRAL_LINK__
     </section>
 
+    <section class="panel login-panel" aria-labelledby="login-title">
+      <p class="section-index">02 / PERSONAL CENTER</p>
+      <h2 id="login-title">个人中心登录资料</h2>
+      <p class="caption">成功激活邮件到达后会自动记录。账号、初始密码可分别复制，也可一键复制全部。</p>
+      <div class="data-stack">
+        __LOGIN_ROWS__
+      </div>
+      <div class="login-actions">
+        <button type="button" onclick="copyLoginDetails(this)" __LOGIN_COPY_DISABLED__>一键复制登录资料</button>
+        <a id="personal-center-link" href="__PERSONAL_CENTER_URL__" target="_blank" rel="noopener noreferrer">打开个人中心 <span>↗</span></a>
+      </div>
+      <p class="login-note">首次登录使用初始密码；登录后请按页面提示立即修改密码，后续使用账号和新密码登录。</p>
+    </section>
+
     <section class="notice">
       <b>需要帮助或续费服务？</b>
       <p>如遇订单、号码、套餐或使用问题，请通过下方微信联系客服。官方服务可前往
@@ -229,6 +298,33 @@
         const original = button.textContent;
         button.classList.add("copied");
         button.textContent = message || "已复制";
+        setTimeout(() => {
+          button.classList.remove("copied");
+          button.textContent = original;
+        }, 1400);
+      };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(value).then(done).catch(() => fallbackCopy(value, done));
+      } else {
+        fallbackCopy(value, done);
+      }
+    }
+    function copyLoginDetails(button) {
+      const account = document.getElementById("login-account");
+      const password = document.getElementById("login-password");
+      const link = document.getElementById("personal-center-link");
+      const accountValue = account ? (account.dataset.copy || account.textContent.trim()) : "";
+      const passwordValue = password ? (password.dataset.copy || password.textContent.trim()) : "";
+      if (!accountValue || !passwordValue || !link) return;
+      const value = [
+        `账号:${accountValue}`,
+        `密码:${passwordValue}`,
+        `个人中心地址:${link.href}`,
+      ].join("\n");
+      const done = () => {
+        const original = button.textContent;
+        button.classList.add("copied");
+        button.textContent = "登录资料已复制";
         setTimeout(() => {
           button.classList.remove("copied");
           button.textContent = original;
