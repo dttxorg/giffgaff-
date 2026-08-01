@@ -2171,10 +2171,10 @@
           </form>
           <a class="ctexcel-personal-link" href="https://www.ctexcel.com/uk/login?redirect=/personal/personalHome" target="_blank" rel="noopener noreferrer">打开固定个人中心地址 ↗</a>
           <div class="button-row" style="margin-top:10px;">
-            <button type="button" class="small blue" id="d-ctexcel-public-page-open" onclick="openCTExcelPublicPageForActive()">打开客户专属复制网页</button>
-            <button type="button" class="small ghost" id="d-ctexcel-public-page-copy" onclick="copyCTExcelPublicPageForActive()">复制专属网页链接</button>
+            <button type="button" class="small blue" id="d-ctexcel-public-page-open" onclick="openCTExcelPublicPageForActive()">打开已激活号码资料扫码页</button>
+            <button type="button" class="small ghost" id="d-ctexcel-public-page-copy" onclick="copyCTExcelPublicPageForActive()">复制扫码页链接</button>
           </div>
-          <div class="code-meta" id="d-ctexcel-public-page-status">专属网页可快捷复制个人中心账号和初始密码。</div>
+          <div class="code-meta" id="d-ctexcel-public-page-status">扫码页可快捷复制手机号、注册邮箱、个人中心账号和初始密码。</div>
           <div class="code-meta" id="d-ctexcel-meta">点击扫描，或刷新验证码时自动同步。</div>
         </div>
       </div>
@@ -3591,10 +3591,10 @@ function buildCustomerRow(c, index) {
   }, 'customer-list-view');
   actionCell.appendChild(viewButton);
   if (normalizeProductType(c.product_type) === 'ctexcel') {
-    const publicPageButton = makeButton('专属网页', (event) => {
+    const publicPageButton = makeButton('扫码页', (event) => {
       openCustomerPublicPage(c, event);
     }, 'customer-list-public');
-    publicPageButton.title = '打开可快捷复制个人中心账号和初始密码的客户专属网页';
+    publicPageButton.title = '打开 CTExcel 已激活号码资料扫码页';
     actionCell.appendChild(publicPageButton);
   }
 
@@ -3873,26 +3873,26 @@ function renderPublicLinkBox(c) {
     return;
   }
   box.hidden = false;
-  $('d-public-link-title').textContent = isCTExcel ? 'CTExcel 账号与初始密码专属网页' : '已激活号码资料扫码页';
+  $('d-public-link-title').textContent = isCTExcel ? 'CTExcel 已激活号码资料扫码页' : '已激活号码资料扫码页';
   $('d-public-link-description').textContent = isCTExcel
-    ? '客户打开后可快捷复制个人中心账号、初始密码，也可复制手机号、注册邮箱、订单号和推荐码。'
+    ? '与 giffgaff 客户页一致；客户扫码后可快捷复制手机号、注册邮箱、个人中心账号、初始密码、订单号和推荐码。'
     : '客户扫码后可复制 giffgaff 手机号码和初始注册邮箱，不会暴露客户管理后台。';
   const copyBtn = $('d-public-link-copy');
   const openBtn = $('d-public-link-open');
   const regenBtn = $('d-public-link-regenerate');
   const meta = $('d-public-link-meta');
   if (!c.public_token) {
-    input.value = '尚未生成；点击“生成专属网页”即可创建固定链接';
+    input.value = '尚未生成；点击“生成扫码页”即可创建固定链接';
     copyBtn.disabled = true;
     openBtn.disabled = true;
-    regenBtn.textContent = '生成专属网页';
+    regenBtn.textContent = '生成扫码页';
     regenBtn.style.color = '#24558f';
     regenBtn.onclick = async () => {
       try {
         await ensureCustomerPublicLink(c);
         renderPublicLinkBox(c);
         renderCTExcelOrderBox(c);
-        toast('CTExcel 客户专属网页已生成', 'success');
+        toast('CTExcel 已激活号码资料扫码页已生成', 'success');
       } catch (err) {
         toast(err.message, 'error');
       }
@@ -3922,7 +3922,7 @@ async function ensureCustomerPublicLink(customer) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.public_token) {
-      throw new Error(data.detail || '生成客户专属网页失败');
+      throw new Error(data.detail || '生成已激活号码资料扫码页失败');
     }
     customer.public_token = data.public_token;
     customer.public_version = data.public_version || 1;
@@ -3964,7 +3964,7 @@ async function openCustomerPublicPage(customer, event=null) {
 async function copyCustomerPublicPage(customer) {
   try {
     await ensureCustomerPublicLink(customer);
-    copyText(getPublicPageUrl(customer.public_token), 'CTExcel 客户专属网页链接已复制');
+    copyText(getPublicPageUrl(customer.public_token), 'CTExcel 已激活号码资料扫码页链接已复制');
     if (activeCustomer?.id === customer.id) {
       renderPublicLinkBox(activeCustomer);
       renderCTExcelOrderBox(activeCustomer);
@@ -4150,8 +4150,8 @@ function renderCTExcelOrderBox(c) {
   $('d-ctexcel-login-account-input').value = c.ctexcel_login_account || '';
   $('d-ctexcel-initial-password-input').value = c.ctexcel_initial_password || '';
   $('d-ctexcel-public-page-status').textContent = c.public_token
-    ? '专属网页已生成：可打开或复制固定链接，账号密码更新后链接保持不变。'
-    : '该存量客户尚无专属网页；点击打开或复制时会自动生成固定链接。';
+    ? '已激活号码资料扫码页已生成：可打开或复制固定链接，账号密码更新后链接保持不变。'
+    : '该存量客户尚无扫码页；点击打开或复制时会自动生成固定链接。';
   $('d-ctexcel-registration-status').textContent =
     c.ctexcel_registration_confirmed_at
       ? `已确认 · ${formatShortDate(c.ctexcel_registration_confirmed_at)}`
