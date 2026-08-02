@@ -158,31 +158,6 @@
       font-size: 11px;
       line-height: 1.6;
     }
-    .order-summary {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0,1fr));
-      gap: 10px;
-      margin-top: 14px;
-    }
-    .summary-card { padding: 14px; border: 1px solid var(--line); border-radius: 15px; background: var(--ice); }
-    .summary-card span { display: block; color: var(--muted); font-size: 10px; font-weight: 800; }
-    .summary-card strong { display: block; margin-top: 7px; font-size: 17px; overflow-wrap: anywhere; }
-    .referral-link {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      min-height: 48px;
-      margin-top: 10px;
-      padding: 0 14px;
-      border: 2px solid var(--ink);
-      border-radius: 13px;
-      color: #fff;
-      background: var(--ink);
-      text-decoration: none;
-      font-size: 12px;
-      font-weight: 900;
-    }
-    .referral-link span { color: var(--lime); font-size: 19px; }
     .notice {
       margin: 28px 10px 0;
       padding: 20px;
@@ -229,7 +204,6 @@
       body { padding-inline: 8px; }
       .hero { padding-inline: 19px; }
       .panel, .notice, .wechat-card { margin-inline: 4px; }
-      .order-summary { grid-template-columns: 1fr; }
       .login-actions { grid-template-columns: 1fr; }
     }
   </style>
@@ -251,18 +225,11 @@
     <section class="panel" aria-labelledby="account-title">
       <p class="section-index">01 / ACCOUNT</p>
       <h2 id="account-title">账号资料</h2>
-      <p class="caption">订单邮件同步完成后，手机号和订单号会自动出现在这里。</p>
+      <p class="caption">这里仅展示已激活手机号和注册邮箱，点击对应按钮即可复制。</p>
       <div class="data-stack">
         __PHONE_ROW__
         __EMAIL_ROW__
-        __ORDER_ROW__
-        __REFERRAL_ROW__
       </div>
-      <div class="order-summary">
-        <div class="summary-card"><span>交易金额</span><strong>__AMOUNT__</strong></div>
-        <div class="summary-card"><span>订单服务</span><strong>CTExcel UK</strong></div>
-      </div>
-      __REFERRAL_LINK__
     </section>
 
     <section class="panel login-panel" aria-labelledby="login-title">

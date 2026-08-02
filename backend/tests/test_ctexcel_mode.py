@@ -417,12 +417,11 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "6000002"
+    assert response.headers["X-Cache-Version"] == "7000002"
     body = response.text
     assert "CTExcel 已激活号码资料" in body
     assert "07942946765" in body
-    assert "ORDER2026072512362267544904" in body
-    assert "NTKWJX" in body
+    assert "ctexcel@example.com" in body
     assert "447900000123" in body
     assert "A7b9*XyZ" in body
     assert "个人中心登录资料" in body
@@ -433,12 +432,20 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     )
     assert "<!--email_off-->" in body
     assert "copyValue" in body
+    assert "ORDER2026072512362267544904" not in body
+    assert "NTKWJX" not in body
+    assert "178.8" not in body
+    assert "CTExcel 订单号" not in body
+    assert "专属推荐码" not in body
+    assert "打开专属推荐链接" not in body
+    assert "交易金额" not in body
+    assert "订单服务" not in body
     assert "语音信箱" not in body
     assert "giffgaff" not in body.lower()
 
     version = client.get("/api/public/ctexcel-public-token/version")
     assert version.status_code == 200
-    assert version.json() == {"public_version": 6_000_002}
+    assert version.json() == {"public_version": 7_000_002}
 
 
 def test_ctexcel_admin_edit_keeps_public_token_and_bumps_only_on_change(
@@ -481,7 +488,7 @@ def test_ctexcel_public_card_shows_pending_login_state_without_credentials(
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "6000001"
+    assert response.headers["X-Cache-Version"] == "7000001"
     assert "登录资料等待同步" in response.text
     assert "一键复制登录资料</button>" in response.text
     assert "disabled" in response.text
@@ -517,7 +524,7 @@ def test_legacy_ctexcel_customer_can_lazily_create_fixed_credential_page(
     assert token
     page = client.get(f"/p/{token}")
     assert page.status_code == 200
-    assert page.headers["X-Cache-Version"] == "6000001"
+    assert page.headers["X-Cache-Version"] == "7000001"
     assert "个人中心登录资料" in page.text
     assert "447900000789" in page.text
     assert "Z9x8*WvU" in page.text
@@ -558,6 +565,9 @@ def test_frontend_contains_persistent_ctexcel_mode_and_mode_specific_ui():
     assert "function openCustomerPublicPage" in html_text
     assert "function copyCustomerPublicPage" in html_text
     assert "/public-link/ensure" in html_text
+    assert "const PUBLIC_PAGE_VIEW_VERSION = '7';" in html_text
+    assert "客户扫码后可快捷复制手机号、注册邮箱、个人中心账号和初始密码。" in html_text
+    assert "初始密码、订单号和推荐码" not in html_text
     assert "扫码页" in html_text
     assert "CTExcel订单号" in html_text
     assert "CTExcel推荐码" in html_text

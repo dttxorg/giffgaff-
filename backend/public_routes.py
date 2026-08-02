@@ -34,7 +34,7 @@ ACTIVATION_GUIDE_PUBLIC_TOKEN = "activation-guide-public-page"
 # 比后端更早部署时把旧 HTML 缓存到新 Worker 版本下。
 ACTIVATION_GUIDE_CONTENT_VERSION = 5
 ACTIVATED_CARD_CONTENT_VERSION = 3
-CTEXCEL_CARD_CONTENT_VERSION = 6
+CTEXCEL_CARD_CONTENT_VERSION = 7
 _ACTIVATION_VERSION_FACTOR = 1_000_000
 
 VOICEMAIL_SUPPORT_URL = "https://support2.giffgaff.com/app/ask/International-and-Roaming/Accessing-voicemail-while-abroad/form/"
@@ -618,10 +618,6 @@ def _render_activation_card() -> str:
 def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
     phone = vars_.get("phone_number") or ""
     email = customer.get("email") or ""
-    order_number = vars_.get("ctexcel_order_number") or ""
-    amount = vars_.get("ctexcel_transaction_amount") or ""
-    referral_code = vars_.get("ctexcel_referral_code") or ""
-    referral_link = vars_.get("ctexcel_referral_link") or ""
     login_account = vars_.get("ctexcel_login_account") or ""
     initial_password = vars_.get("ctexcel_initial_password") or ""
 
@@ -640,13 +636,6 @@ def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
     email_row = copy_row("email", "注册邮箱", email, "已复制邮箱")
     # Cloudflare 邮箱混淆只会检查 HTML 注释之间的邮箱文本。
     email_row = f"<!--email_off-->{email_row}<!--/email_off-->"
-    referral_link_html = ""
-    if referral_link:
-        safe_link = html.escape(referral_link, quote=True)
-        referral_link_html = (
-            '<a class="referral-link" target="_blank" rel="noopener noreferrer" '
-            f'href="{safe_link}">打开专属推荐链接 <span>↗</span></a>'
-        )
     login_rows = "".join(
         (
             copy_row("login-account", "个人中心账号", login_account, "已复制账号"),
@@ -665,15 +654,10 @@ def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
             f'<span>激活邮件同步后将显示{"、".join(missing_login_fields)}，也可由后台手动补充。</span>'
             '</div>'
         )
-    amount_display = f"£ {html.escape(amount)}" if amount else "邮件同步后显示"
     return (
         _load_ctexcel_template()
         .replace("__PHONE_ROW__", copy_row("phone", "CTExcel 手机号码", phone, "已复制手机号码"))
         .replace("__EMAIL_ROW__", email_row)
-        .replace("__ORDER_ROW__", copy_row("order", "CTExcel 订单号", order_number, "已复制订单号"))
-        .replace("__AMOUNT__", amount_display)
-        .replace("__REFERRAL_ROW__", copy_row("referral", "专属推荐码", referral_code, "已复制推荐码"))
-        .replace("__REFERRAL_LINK__", referral_link_html)
         .replace("__LOGIN_ROWS__", login_rows)
         .replace(
             "__LOGIN_COPY_DISABLED__",
