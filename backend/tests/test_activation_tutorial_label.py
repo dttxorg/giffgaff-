@@ -309,7 +309,7 @@ def test_frontend_has_selectable_tutorial_sources_and_template():
     assert "case '激活教程地址':" in html
     assert "source === '激活教程二维码'" in html
     assert "ACTIVATION_GUIDE_PUBLIC_TOKEN = 'activation-guide-public-page'" in html
-    assert "const PUBLIC_PAGE_VIEW_VERSION = '6';" in html
+    assert "const PUBLIC_PAGE_VIEW_VERSION = '7';" in html
     assert "return getPublicPageUrl(ACTIVATION_GUIDE_PUBLIC_TOKEN);" in html
     assert "?view=${PUBLIC_PAGE_VIEW_VERSION}" in html
     assert "onclick=\"addLabelElement('qr', '号码资料二维码')\"" in html

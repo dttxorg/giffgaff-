@@ -2704,7 +2704,7 @@ const API = '/api';
 const DEFAULT_GIFFGAFF_URL = 'https://www.giffgaff.com/mobile-app';
 const DEFAULT_ACTIVATION_TUTORIAL_URL = 'https://gg.681218.xyz/activation.html';
 const ACTIVATION_GUIDE_PUBLIC_TOKEN = 'activation-guide-public-page';
-const PUBLIC_PAGE_VIEW_VERSION = '6';
+const PUBLIC_PAGE_VIEW_VERSION = '7';
 const COURIER_TEMPLATE_ID = 'courier-50x40';
 const nativeFetch = window.fetch.bind(window);
 let adminEntryExpired = false;
@@ -3875,7 +3875,7 @@ function renderPublicLinkBox(c) {
   box.hidden = false;
   $('d-public-link-title').textContent = isCTExcel ? 'CTExcel 已激活号码资料扫码页' : '已激活号码资料扫码页';
   $('d-public-link-description').textContent = isCTExcel
-    ? '与 giffgaff 客户页一致；客户扫码后可快捷复制手机号、注册邮箱、个人中心账号、初始密码、订单号和推荐码。'
+    ? '与 giffgaff 客户页一致；客户扫码后可快捷复制手机号、注册邮箱、个人中心账号和初始密码。'
     : '客户扫码后可复制 giffgaff 手机号码和初始注册邮箱，不会暴露客户管理后台。';
   const copyBtn = $('d-public-link-copy');
   const openBtn = $('d-public-link-open');
