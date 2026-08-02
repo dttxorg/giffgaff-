@@ -158,6 +158,38 @@
       font-size: 11px;
       line-height: 1.6;
     }
+    .gpt-promo {
+      position: relative;
+      overflow: hidden;
+      margin: 28px 10px 0;
+      padding: 22px 20px;
+      border: 2px solid var(--ink);
+      border-radius: 24px;
+      color: #fff;
+      background: linear-gradient(135deg, #101f3d 0%, #243f91 62%, #1858d5 100%);
+      box-shadow: 6px 6px 0 var(--lime);
+    }
+    .gpt-promo::after {
+      content: "";
+      position: absolute;
+      right: -46px;
+      top: -54px;
+      width: 138px;
+      height: 138px;
+      border: 25px solid rgba(214,255,82,.16);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .gpt-promo-head { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .gpt-kicker { margin: 0; color: var(--lime); font: 900 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; }
+    .gpt-badge { padding: 6px 9px; border: 1px solid rgba(255,255,255,.45); border-radius: 999px; font-size: 10px; font-weight: 900; }
+    .gpt-promo h2 { position: relative; z-index: 1; margin: 18px 0 8px; color: #fff; font-size: 30px; }
+    .gpt-promo-copy { position: relative; z-index: 1; max-width: 470px; margin: 0; color: rgba(255,255,255,.76); font-size: 13px; line-height: 1.65; }
+    .gpt-plans { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin-top: 17px; }
+    .gpt-plan { min-width: 0; padding: 12px 10px; border: 1px solid rgba(255,255,255,.24); border-radius: 14px; background: rgba(255,255,255,.08); }
+    .gpt-plan strong { display: block; color: var(--lime); font-size: 12px; line-height: 1.35; }
+    .gpt-plan small { display: block; margin-top: 5px; color: rgba(255,255,255,.67); font-size: 9px; line-height: 1.45; }
+    .gpt-promo-cta { position: relative; z-index: 1; margin: 14px 0 0; padding: 10px 12px; border-radius: 11px; color: var(--ink); background: var(--lime); font-size: 11px; font-weight: 800; line-height: 1.55; }
     .notice {
       margin: 28px 10px 0;
       padding: 20px;
@@ -203,7 +235,8 @@
     @media (max-width: 380px) {
       body { padding-inline: 8px; }
       .hero { padding-inline: 19px; }
-      .panel, .notice, .wechat-card { margin-inline: 4px; }
+      .panel, .gpt-promo, .notice, .wechat-card { margin-inline: 4px; }
+      .gpt-plans { grid-template-columns: 1fr; }
       .login-actions { grid-template-columns: 1fr; }
     }
   </style>
@@ -244,6 +277,21 @@
         <a id="personal-center-link" href="__PERSONAL_CENTER_URL__" target="_blank" rel="noopener noreferrer">打开个人中心 <span>↗</span></a>
       </div>
       <p class="login-note">首次登录使用初始密码；登录后请按页面提示立即修改密码，后续使用账号和新密码登录。</p>
+    </section>
+
+    <section class="gpt-promo" aria-labelledby="gpt-promo-title">
+      <div class="gpt-promo-head">
+        <p class="gpt-kicker">GPT TOP-UP / SERVICE</p>
+        <span class="gpt-badge">微信办理</span>
+      </div>
+      <h2 id="gpt-promo-title">ChatGPT Plus / Pro 代充</h2>
+      <p class="gpt-promo-copy">无需海外支付方式，支持 ChatGPT Plus、5x Pro 与 20x Pro 订阅代充，适用于学习、办公、编程与内容创作。</p>
+      <div class="gpt-plans" aria-label="ChatGPT 代充套餐">
+        <div class="gpt-plan"><strong>⭐ ChatGPT Plus</strong><small>日常学习 · 办公提效</small></div>
+        <div class="gpt-plan"><strong>⚡ ChatGPT 5x Pro</strong><small>编程辅助 · 高频创作</small></div>
+        <div class="gpt-plan"><strong>🔥 ChatGPT 20x Pro</strong><small>专业创作 · 高强度使用</small></div>
+      </div>
+      <p class="gpt-promo-cta">需要 GPT 代充？长按下方微信二维码或使用微信扫一扫联系客服。</p>
     </section>
 
     <section class="notice">
