@@ -143,7 +143,7 @@ export CTEXCEL_CLIENT_LEASE_SECONDS=2700
 
 账号和密码必须在同一封带 CTExcel 个人中心上下文的邮件中同时出现才会写入，密码中的 `*` 等字符会原样保留。客户详情支持人工编辑和快速复制；公开页固定使用 `https://www.ctexcel.com/uk/login?redirect=/personal/personalHome`，提供账号、初始密码、整段登录资料复制及直接打开个人中心按钮。
 
-每位客户保存自己的 `product_type`，因此切换到另一模式不会改变历史客户的业务类型。CTExcel 号码资料二维码继续复用现有公开 Token 和 Worker 地址，但后端会根据客户类型渲染独立 CTExcel 扫码页；页面不包含 giffgaff 教程、eSIM、支付检查或语音信箱内容。邮件同步、支付回写或后台编辑公开字段时只提升 `public_version` 让 Worker 缓存失效，原有 `public_token` 和客户链接保持不变。
+每位客户保存自己的 `product_type`，因此切换到另一模式不会改变历史客户的业务类型。CTExcel 号码资料二维码继续复用现有公开 Token 和 Worker 地址，但后端会根据客户类型渲染独立 CTExcel 扫码页。公开账号区只显示手机号、注册邮箱、个人中心账号和初始密码，不展示订单号、推荐资料、交易金额或订单服务；页面另外提供 giffgaff 携号转网三步教程、中国大陆区域 2 漫游资费与通话提示，不包含 eSIM、支付检查或语音信箱内容。邮件同步、支付回写或后台编辑公开字段时只提升 `public_version` 让 Worker 缓存失效，原有 `public_token` 和客户链接保持不变。
 
 Windows 自动申请客户端位于
 [`desktop-client`](desktop-client/README.md)。它通过受限的
