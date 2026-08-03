@@ -29,12 +29,21 @@ _ACTIVATION_ASSET_DIR = os.path.join(
 _WECHAT_QR_PATH = os.path.join(
     os.path.dirname(__file__), "assets", "public", "wechat-support.jpg"
 )
+_CTEXCEL_PORTING_GUIDE_PATHS = tuple(
+    os.path.join(
+        os.path.dirname(__file__),
+        "assets",
+        "public",
+        f"ctexcel-giffgaff-porting-step-{step}.webp",
+    )
+    for step in range(1, 4)
+)
 ACTIVATION_GUIDE_PUBLIC_TOKEN = "activation-guide-public-page"
 # 代码内教程内容变化时递增。与数据库设置版本组合后，可防止 Worker
 # 比后端更早部署时把旧 HTML 缓存到新 Worker 版本下。
 ACTIVATION_GUIDE_CONTENT_VERSION = 5
 ACTIVATED_CARD_CONTENT_VERSION = 3
-CTEXCEL_CARD_CONTENT_VERSION = 8
+CTEXCEL_CARD_CONTENT_VERSION = 9
 _ACTIVATION_VERSION_FACTOR = 1_000_000
 
 VOICEMAIL_SUPPORT_URL = "https://support2.giffgaff.com/app/ask/International-and-Roaming/Accessing-voicemail-while-abroad/form/"
@@ -500,6 +509,17 @@ def _wechat_qr_data_uri() -> str:
     return f"data:image/jpeg;base64,{encoded}"
 
 
+@lru_cache(maxsize=1)
+def _ctexcel_porting_guide_data_uris() -> tuple[str, str, str]:
+    """Embed the three public tutorial screenshots for Worker CSP compatibility."""
+    images = []
+    for image_path in _CTEXCEL_PORTING_GUIDE_PATHS:
+        with open(image_path, "rb") as image_file:
+            encoded = base64.b64encode(image_file.read()).decode("ascii")
+        images.append(f"data:image/webp;base64,{encoded}")
+    return tuple(images)
+
+
 def _render_wechat_guide() -> str:
     return (
         '<section class="wechat-card" aria-labelledby="wechat-title">'
@@ -654,6 +674,7 @@ def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
             f'<span>激活邮件同步后将显示{"、".join(missing_login_fields)}，也可由后台手动补充。</span>'
             '</div>'
         )
+    porting_step_images = _ctexcel_porting_guide_data_uris()
     return (
         _load_ctexcel_template()
         .replace("__PHONE_ROW__", copy_row("phone", "CTExcel 手机号码", phone, "已复制手机号码"))
@@ -667,6 +688,9 @@ def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
             "__PERSONAL_CENTER_URL__",
             html.escape(CTEXCEL_PERSONAL_CENTER_URL, quote=True),
         )
+        .replace("__PORTING_STEP_1_IMAGE__", porting_step_images[0])
+        .replace("__PORTING_STEP_2_IMAGE__", porting_step_images[1])
+        .replace("__PORTING_STEP_3_IMAGE__", porting_step_images[2])
         .replace("__WECHAT_GUIDE_HTML__", _render_wechat_guide())
     )
 

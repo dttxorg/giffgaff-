@@ -158,6 +158,139 @@
       font-size: 11px;
       line-height: 1.6;
     }
+    .ready-banner {
+      position: relative;
+      overflow: hidden;
+      display: grid;
+      grid-template-columns: auto minmax(0,1fr);
+      gap: 14px;
+      margin: 28px 10px 0;
+      padding: 20px;
+      border: 2px solid var(--ink);
+      border-radius: 22px;
+      background: var(--lime);
+      box-shadow: 6px 6px 0 var(--ink);
+    }
+    .ready-icon {
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
+      border: 2px solid var(--ink);
+      border-radius: 50%;
+      color: #fff;
+      background: var(--blue);
+      font-size: 25px;
+      font-weight: 950;
+    }
+    .ready-kicker { margin: 2px 0 7px; color: var(--blue); font: 900 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; }
+    .ready-banner h2 { font-size: 29px; }
+    .ready-copy { margin: 8px 0 0; color: #32411c; font-size: 12px; line-height: 1.65; }
+    .ready-warning {
+      grid-column: 1 / -1;
+      margin-top: 2px;
+      padding: 12px 14px;
+      border: 2px solid var(--ink);
+      border-radius: 13px;
+      color: #fff;
+      background: #d94032;
+      font-size: 14px;
+      font-weight: 950;
+      line-height: 1.5;
+      text-align: center;
+    }
+    .tariff-panel { margin-top: 28px; box-shadow: 6px 6px 0 var(--blue); }
+    .tariff-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      margin: 12px 0 15px;
+      padding: 0 10px;
+      border-radius: 999px;
+      color: #fff;
+      background: var(--blue);
+      font-size: 10px;
+      font-weight: 900;
+    }
+    .tariff-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; }
+    .tariff-item {
+      min-width: 0;
+      padding: 13px 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #f2f8ff;
+    }
+    .tariff-item.wide { grid-column: 1 / -1; }
+    .tariff-item span { display: block; color: var(--muted); font-size: 10px; font-weight: 850; line-height: 1.45; }
+    .tariff-item strong { display: block; margin-top: 5px; color: var(--blue); font-size: 20px; line-height: 1.2; letter-spacing: -.035em; }
+    .tariff-item small { font-size: 11px; letter-spacing: 0; }
+    .tariff-alert {
+      margin: 14px 0 0;
+      padding: 13px 14px;
+      border-left: 5px solid #d94032;
+      border-radius: 10px;
+      color: #672218;
+      background: #ffe8e3;
+      font-size: 12px;
+      font-weight: 850;
+      line-height: 1.65;
+    }
+    .tariff-examples { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin-top: 14px; }
+    .tariff-example { padding: 10px 11px; border-radius: 11px; color: #40556b; background: #eef3f7; font-size: 10px; line-height: 1.55; }
+    .tariff-example b { color: var(--ink); }
+    .tariff-source { margin: 14px 0 0; color: var(--muted); font-size: 10px; line-height: 1.65; }
+    .tariff-source a { color: var(--blue); font-weight: 900; }
+    .porting-guide {
+      margin: 30px 10px 0;
+      padding: 23px 20px;
+      border: 2px solid var(--ink);
+      border-radius: 25px;
+      background: #fff;
+      box-shadow: 7px 7px 0 var(--cyan);
+    }
+    .porting-kicker { margin: 0 0 8px; color: var(--blue); font: 900 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .13em; }
+    .porting-guide h2 { font-size: 30px; }
+    .porting-intro { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+    .porting-prereq {
+      margin: 16px 0 0;
+      padding: 12px 13px;
+      border: 1px solid #a9c0d8;
+      border-radius: 12px;
+      color: #30455b;
+      background: var(--ice);
+      font-size: 11px;
+      line-height: 1.65;
+    }
+    .porting-prereq b { color: var(--blue); }
+    .porting-steps { display: grid; gap: 14px; margin-top: 17px; }
+    .porting-step { overflow: hidden; border: 1px solid var(--line); border-radius: 17px; background: #f8fbfe; }
+    .porting-step-copy { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 10px 12px; padding: 14px; }
+    .porting-step-index {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border: 2px solid var(--ink);
+      border-radius: 10px;
+      color: var(--ink);
+      background: var(--lime);
+      box-shadow: 2px 2px 0 var(--ink);
+      font: 950 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .porting-step h3 { margin: 1px 0 5px; font-size: 16px; line-height: 1.25; }
+    .porting-step p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.65; }
+    .porting-media { padding: 10px; border-top: 1px solid var(--line); background: #e8f0f6; }
+    .porting-media img {
+      display: block;
+      width: 100%;
+      height: auto;
+      margin: 0 auto;
+      border-radius: 11px;
+      background: #fff;
+      user-select: none;
+      -webkit-touch-callout: default;
+    }
+    .porting-note { margin: 15px 0 0; color: #5f5235; font-size: 11px; line-height: 1.65; }
     .gpt-promo {
       position: relative;
       overflow: hidden;
@@ -235,7 +368,9 @@
     @media (max-width: 380px) {
       body { padding-inline: 8px; }
       .hero { padding-inline: 19px; }
-      .panel, .gpt-promo, .notice, .wechat-card { margin-inline: 4px; }
+      .panel, .ready-banner, .porting-guide, .gpt-promo, .notice, .wechat-card { margin-inline: 4px; }
+      .tariff-grid, .tariff-examples { grid-template-columns: 1fr; }
+      .tariff-item.wide { grid-column: auto; }
       .gpt-plans { grid-template-columns: 1fr; }
       .login-actions { grid-template-columns: 1fr; }
     }
@@ -277,6 +412,69 @@
         <a id="personal-center-link" href="__PERSONAL_CENTER_URL__" target="_blank" rel="noopener noreferrer">打开个人中心 <span>↗</span></a>
       </div>
       <p class="login-note">首次登录使用初始密码；登录后请按页面提示立即修改密码，后续使用账号和新密码登录。</p>
+    </section>
+
+    <section class="ready-banner" aria-labelledby="ready-title">
+      <div class="ready-icon" aria-hidden="true">✓</div>
+      <div>
+        <p class="ready-kicker">READY TO USE / CHINA</p>
+        <h2 id="ready-title">到手即可用</h2>
+        <p class="ready-copy">本页号码已经激活，插卡并等待网络注册后即可使用；在中国大陆使用时，按 CTExcel 国际漫游区域 2 资费计算。</p>
+      </div>
+      <strong class="ready-warning">重要：尽量不要接听或拨打电话</strong>
+    </section>
+
+    <section class="panel tariff-panel" aria-labelledby="tariff-title">
+      <p class="section-index">03 / CHINA ROAMING</p>
+      <h2 id="tariff-title">中国大陆漫游资费</h2>
+      <p class="caption">依据 CTExcel 官网“国际漫游资费”中的区域 2（中国大陆），以下为余额计费单价。</p>
+      <span class="tariff-badge">中国大陆 · 区域 2</span>
+      <div class="tariff-grid" aria-label="中国大陆漫游单价">
+        <div class="tariff-item"><span>接听电话</span><strong>£0.05 <small>/ 分钟</small></strong></div>
+        <div class="tariff-item"><span>拨打电话到任意区域</span><strong>£0.20 <small>/ 分钟</small></strong></div>
+        <div class="tariff-item"><span>发送短信到任意区域</span><strong>£0.10 <small>/ 条</small></strong></div>
+        <div class="tariff-item"><span>接收短信</span><strong>免费</strong></div>
+        <div class="tariff-item wide"><span>手机上网流量</span><strong>£0.005 <small>/ MB</small></strong></div>
+      </div>
+      <p class="tariff-alert">接听也会产生漫游费用。若主要用于接收验证码，优先接收短信，尽量不要接听或拨打电话。</p>
+      <div class="tariff-examples" aria-label="资费计算示例">
+        <div class="tariff-example"><b>接听 10 分钟</b><br>10 × £0.05 ≈ £0.50</div>
+        <div class="tariff-example"><b>拨打 10 分钟</b><br>10 × £0.20 ≈ £2.00</div>
+        <div class="tariff-example"><b>发送 10 条短信</b><br>10 × £0.10 ≈ £1.00</div>
+        <div class="tariff-example"><b>使用 100MB / 1GB</b><br>约 £0.50 / £5.12（1GB 按 1024MB）</div>
+      </div>
+      <p class="tariff-source">官网资费核对日期：2026-08-03。实际扣费以套餐权益、账单和官网实时规则为准。<a href="https://www.ctexcel.com/uk/tariffQuery/0" target="_blank" rel="noopener noreferrer">查看 CTExcel 官方资费页 ↗</a></p>
+    </section>
+
+    <section class="porting-guide" aria-labelledby="porting-title">
+      <p class="porting-kicker">04 / NUMBER PORTING</p>
+      <h2 id="porting-title">giffgaff 携号转网教程</h2>
+      <p class="porting-intro">把原 giffgaff 号码转入 CTExcel，按下面 3 步提交申请并等待短信通知。</p>
+      <p class="porting-prereq"><b>提交前准备：</b>giffgaff 原号码、PAC 码、giffgaff 绑定邮箱，并确认 CTExcel 号码可以接收短信验证码。</p>
+      <div class="porting-steps">
+        <article class="porting-step">
+          <div class="porting-step-copy">
+            <span class="porting-step-index">01</span>
+            <div><h3>进入携号转网页面</h3><p>登录 CTExcel 个人中心，进入“业务办理”→“携号转网”，填写本页 CTExcel 手机号并获取短信验证码。</p></div>
+          </div>
+          <div class="porting-media"><img src="__PORTING_STEP_1_IMAGE__" width="800" height="641" loading="lazy" decoding="async" alt="giffgaff 携号转网教程第 1 步：进入 CTExcel 携号转网页面并验证号码"></div>
+        </article>
+        <article class="porting-step">
+          <div class="porting-step-copy">
+            <span class="porting-step-index">02</span>
+            <div><h3>填写 giffgaff 原号码资料</h3><p>填写原 giffgaff 手机号和 PAC 码，原运营商选择 giffgaff；再填写 giffgaff 绑定邮箱、预计转网日期和转网原因，确认后提交。</p></div>
+          </div>
+          <div class="porting-media"><img src="__PORTING_STEP_2_IMAGE__" width="800" height="1246" loading="lazy" decoding="async" alt="giffgaff 携号转网教程第 2 步：填写原号码、PAC 码、邮箱和转网日期"></div>
+        </article>
+        <article class="porting-step">
+          <div class="porting-step-copy">
+            <span class="porting-step-index">03</span>
+            <div><h3>提交后等待短信通知</h3><p>页面显示提交成功后等待短信通知。通常约 1–3 个工作日完成，转网期间信号可能短暂中断。</p></div>
+          </div>
+          <div class="porting-media"><img src="__PORTING_STEP_3_IMAGE__" width="800" height="648" loading="lazy" decoding="async" alt="giffgaff 携号转网教程第 3 步：提交成功并等待短信通知"></div>
+        </article>
+      </div>
+      <p class="porting-note">提交后请留意 CTExcel 短信；转网完成前保留原 giffgaff 卡，以便接收必要通知。</p>
     </section>
 
     <section class="gpt-promo" aria-labelledby="gpt-promo-title">

@@ -17,6 +17,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -547,7 +548,7 @@ class TestProviderIsolation:
                 email="a@b.com", password="pw", domain="test.com",
             )
             p._jwt = "tok"
-            p._jwt_at = "2026-07-09T00:00:00"
+            p._jwt_at = datetime.now(timezone.utc).isoformat()
             p.generate_email()
             for call in mock_httpx.post.call_args_list:
                 url = call.args[0] if call.args else call.kwargs.get("url", "")
@@ -589,7 +590,7 @@ class TestProviderIsolation:
                 email="a@b.com", password="pw", domain="test.com",
             )
             p_cm._jwt = "tok"
-            p_cm._jwt_at = "2026-07-09T00:00:00"
+            p_cm._jwt_at = datetime.now(timezone.utc).isoformat()
             mock_httpx.get.return_value.status_code = 200
             mock_httpx.get.return_value.json.return_value = {
                 "data": [
