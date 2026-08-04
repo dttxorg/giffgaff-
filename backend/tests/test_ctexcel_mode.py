@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import sqlite3
 import sys
 import tempfile
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
@@ -417,7 +420,7 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "9000002"
+    assert response.headers["X-Cache-Version"] == "10000002"
     body = response.text
     assert "CTExcel 已激活号码资料" in body
     assert "07942946765" in body
@@ -431,6 +434,20 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     assert "ChatGPT 5x Pro" in body
     assert "ChatGPT 20x Pro" in body
     assert "需要 GPT 代充" in body
+    assert "修改个人信息和邮箱" in body
+    assert "打开我的账户" in body
+    assert "点击修改并保存" in body
+    assert 'class="profile-media"' in body
+    assert 'width="800" height="382"' in body
+    assert "CTExcel 修改个人信息和邮箱教程" in body
+    profile_image = body.split(
+        '<div class="profile-media"><img src="data:image/webp;base64,', 1
+    )[1].split('" width="800" height="382"', 1)[0]
+    with Image.open(BytesIO(base64.b64decode(profile_image))) as decoded:
+        decoded.verify()
+    with Image.open(BytesIO(base64.b64decode(profile_image))) as decoded:
+        assert decoded.format == "WEBP"
+        assert decoded.size == (800, 382)
     assert "到手即可用" in body
     assert "尽量不要接听或拨打电话" in body
     assert "中国大陆漫游资费" in body
@@ -444,12 +461,13 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     assert "giffgaff 携号转网教程" in body
     assert body.count('class="porting-step"') == 3
     assert body.count('class="porting-media"') == 3
-    assert body.count("data:image/webp;base64,") == 3
-    assert body.count('width="800"') == 3
+    assert body.count("data:image/webp;base64,") == 4
+    assert body.count('width="800"') == 4
     assert "PAC 码" in body
     assert "1–3 个工作日" in body
     assert "转网期间信号可能短暂中断" in body
     assert "__PORTING_STEP_" not in body
+    assert "__PERSONAL_INFO_GUIDE_IMAGE__" not in body
     assert (
         'href="https://www.ctexcel.com/uk/login?redirect=/personal/personalHome"'
         in body
@@ -469,7 +487,7 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
 
     version = client.get("/api/public/ctexcel-public-token/version")
     assert version.status_code == 200
-    assert version.json() == {"public_version": 9_000_002}
+    assert version.json() == {"public_version": 10_000_002}
 
 
 def test_ctexcel_admin_edit_keeps_public_token_and_bumps_only_on_change(
@@ -512,7 +530,7 @@ def test_ctexcel_public_card_shows_pending_login_state_without_credentials(
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "9000001"
+    assert response.headers["X-Cache-Version"] == "10000001"
     assert "登录资料等待同步" in response.text
     assert "一键复制登录资料</button>" in response.text
     assert "disabled" in response.text
@@ -548,7 +566,7 @@ def test_legacy_ctexcel_customer_can_lazily_create_fixed_credential_page(
     assert token
     page = client.get(f"/p/{token}")
     assert page.status_code == 200
-    assert page.headers["X-Cache-Version"] == "9000001"
+    assert page.headers["X-Cache-Version"] == "10000001"
     assert "个人中心登录资料" in page.text
     assert "447900000789" in page.text
     assert "Z9x8*WvU" in page.text
@@ -589,7 +607,7 @@ def test_frontend_contains_persistent_ctexcel_mode_and_mode_specific_ui():
     assert "function openCustomerPublicPage" in html_text
     assert "function copyCustomerPublicPage" in html_text
     assert "/public-link/ensure" in html_text
-    assert "const PUBLIC_PAGE_VIEW_VERSION = '9';" in html_text
+    assert "const PUBLIC_PAGE_VIEW_VERSION = '10';" in html_text
     assert "客户扫码后可快捷复制手机号、注册邮箱、个人中心账号和初始密码。" in html_text
     assert "初始密码、订单号和推荐码" not in html_text
     assert "扫码页" in html_text

@@ -38,12 +38,18 @@ _CTEXCEL_PORTING_GUIDE_PATHS = tuple(
     )
     for step in range(1, 4)
 )
+_CTEXCEL_PERSONAL_INFO_GUIDE_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "assets",
+    "public",
+    "ctexcel-personal-info-email-guide.webp",
+)
 ACTIVATION_GUIDE_PUBLIC_TOKEN = "activation-guide-public-page"
 # 代码内教程内容变化时递增。与数据库设置版本组合后，可防止 Worker
 # 比后端更早部署时把旧 HTML 缓存到新 Worker 版本下。
 ACTIVATION_GUIDE_CONTENT_VERSION = 5
 ACTIVATED_CARD_CONTENT_VERSION = 3
-CTEXCEL_CARD_CONTENT_VERSION = 9
+CTEXCEL_CARD_CONTENT_VERSION = 10
 _ACTIVATION_VERSION_FACTOR = 1_000_000
 
 VOICEMAIL_SUPPORT_URL = "https://support2.giffgaff.com/app/ask/International-and-Roaming/Accessing-voicemail-while-abroad/form/"
@@ -520,6 +526,14 @@ def _ctexcel_porting_guide_data_uris() -> tuple[str, str, str]:
     return tuple(images)
 
 
+@lru_cache(maxsize=1)
+def _ctexcel_personal_info_guide_data_uri() -> str:
+    """Embed the redacted personal-information guide for Worker CSP compatibility."""
+    with open(_CTEXCEL_PERSONAL_INFO_GUIDE_PATH, "rb") as image_file:
+        encoded = base64.b64encode(image_file.read()).decode("ascii")
+    return f"data:image/webp;base64,{encoded}"
+
+
 def _render_wechat_guide() -> str:
     return (
         '<section class="wechat-card" aria-labelledby="wechat-title">'
@@ -687,6 +701,10 @@ def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
         .replace(
             "__PERSONAL_CENTER_URL__",
             html.escape(CTEXCEL_PERSONAL_CENTER_URL, quote=True),
+        )
+        .replace(
+            "__PERSONAL_INFO_GUIDE_IMAGE__",
+            _ctexcel_personal_info_guide_data_uri(),
         )
         .replace("__PORTING_STEP_1_IMAGE__", porting_step_images[0])
         .replace("__PORTING_STEP_2_IMAGE__", porting_step_images[1])

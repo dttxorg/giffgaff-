@@ -240,6 +240,32 @@
     .tariff-example b { color: var(--ink); }
     .tariff-source { margin: 14px 0 0; color: var(--muted); font-size: 10px; line-height: 1.65; }
     .tariff-source a { color: var(--blue); font-weight: 900; }
+    .profile-guide {
+      margin: 28px 10px 0;
+      padding: 22px 20px;
+      border: 2px solid var(--ink);
+      border-radius: 24px;
+      background: #fff;
+      box-shadow: 6px 6px 0 #a8d9ff;
+    }
+    .profile-kicker { margin: 0 0 8px; color: var(--blue); font: 900 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .13em; }
+    .profile-guide h2 { font-size: 27px; }
+    .profile-intro { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+    .profile-actions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; margin-top: 15px; }
+    .profile-action { padding: 11px 12px; border: 1px solid #b7cce0; border-radius: 12px; color: #3c5268; background: var(--ice); font-size: 11px; line-height: 1.55; }
+    .profile-action b { display: block; margin-bottom: 3px; color: var(--blue); font-size: 12px; }
+    .profile-media { overflow: hidden; margin-top: 15px; padding: 10px; border: 1px solid var(--line); border-radius: 17px; background: #e8f0f6; }
+    .profile-media img {
+      display: block;
+      width: 100%;
+      height: auto;
+      margin: 0 auto;
+      border-radius: 11px;
+      background: #fff;
+      user-select: none;
+      -webkit-touch-callout: default;
+    }
+    .profile-note { margin: 13px 0 0; color: #5f5235; font-size: 11px; line-height: 1.65; }
     .porting-guide {
       margin: 30px 10px 0;
       padding: 23px 20px;
@@ -368,8 +394,8 @@
     @media (max-width: 380px) {
       body { padding-inline: 8px; }
       .hero { padding-inline: 19px; }
-      .panel, .ready-banner, .porting-guide, .gpt-promo, .notice, .wechat-card { margin-inline: 4px; }
-      .tariff-grid, .tariff-examples { grid-template-columns: 1fr; }
+      .panel, .ready-banner, .profile-guide, .porting-guide, .gpt-promo, .notice, .wechat-card { margin-inline: 4px; }
+      .tariff-grid, .tariff-examples, .profile-actions { grid-template-columns: 1fr; }
       .tariff-item.wide { grid-column: auto; }
       .gpt-plans { grid-template-columns: 1fr; }
       .login-actions { grid-template-columns: 1fr; }
@@ -414,6 +440,18 @@
       <p class="login-note">首次登录使用初始密码；登录后请按页面提示立即修改密码，后续使用账号和新密码登录。</p>
     </section>
 
+    <section class="profile-guide" aria-labelledby="profile-guide-title">
+      <p class="profile-kicker">03 / PERSONAL INFORMATION</p>
+      <h2 id="profile-guide-title">修改个人信息和邮箱</h2>
+      <p class="profile-intro">登录 CTExcel 个人中心后，可在“我的账户”里更新个人信息与电子邮箱。</p>
+      <div class="profile-actions" aria-label="修改个人信息步骤">
+        <div class="profile-action"><b>1 · 打开我的账户</b>点击页面顶部导航栏右侧的“我的账户”。</div>
+        <div class="profile-action"><b>2 · 点击修改并保存</b>保持“个人信息”页签，点击右侧“修改”，更新资料和邮箱后保存。</div>
+      </div>
+      <div class="profile-media"><img src="__PERSONAL_INFO_GUIDE_IMAGE__" width="800" height="382" loading="lazy" decoding="async" alt="CTExcel 修改个人信息和邮箱教程：进入我的账户后点击修改"></div>
+      <p class="profile-note">建议首次登录并修改初始密码后，一并核对电子邮箱，确保后续通知可以正常接收。</p>
+    </section>
+
     <section class="ready-banner" aria-labelledby="ready-title">
       <div class="ready-icon" aria-hidden="true">✓</div>
       <div>
@@ -425,7 +463,7 @@
     </section>
 
     <section class="panel tariff-panel" aria-labelledby="tariff-title">
-      <p class="section-index">03 / CHINA ROAMING</p>
+      <p class="section-index">04 / CHINA ROAMING</p>
       <h2 id="tariff-title">中国大陆漫游资费</h2>
       <p class="caption">依据 CTExcel 官网“国际漫游资费”中的区域 2（中国大陆），以下为余额计费单价。</p>
       <span class="tariff-badge">中国大陆 · 区域 2</span>
@@ -447,7 +485,7 @@
     </section>
 
     <section class="porting-guide" aria-labelledby="porting-title">
-      <p class="porting-kicker">04 / NUMBER PORTING</p>
+      <p class="porting-kicker">05 / NUMBER PORTING</p>
       <h2 id="porting-title">giffgaff 携号转网教程</h2>
       <p class="porting-intro">把原 giffgaff 号码转入 CTExcel，按下面 3 步提交申请并等待短信通知。</p>
       <p class="porting-prereq"><b>提交前准备：</b>giffgaff 原号码、PAC 码、giffgaff 绑定邮箱，并确认 CTExcel 号码可以接收短信验证码。</p>
