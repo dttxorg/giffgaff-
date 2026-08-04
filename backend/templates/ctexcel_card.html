@@ -199,6 +199,15 @@
       line-height: 1.5;
       text-align: center;
     }
+    .ready-warning strong { display: block; font-size: 16px; }
+    .ready-warning > span { display: block; margin-top: 6px; font-size: 11px; font-weight: 800; line-height: 1.65; }
+    .ready-support {
+      padding: 10px 12px;
+      border-radius: 10px;
+      color: #7d2017;
+      background: #fff;
+    }
+    .ready-support b { display: block; margin-top: 3px; color: #c92f22; font: 950 22px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .02em; }
     .tariff-panel { margin-top: 28px; box-shadow: 6px 6px 0 var(--blue); }
     .tariff-badge {
       display: inline-flex;
@@ -459,7 +468,11 @@
         <h2 id="ready-title">到手即可用</h2>
         <p class="ready-copy">本页号码已经激活，插卡并等待网络注册后即可使用；在中国大陆使用时，按 CTExcel 国际漫游区域 2 资费计算。</p>
       </div>
-      <strong class="ready-warning">重要：尽量不要接听或拨打电话</strong>
+      <div class="ready-warning" role="note" aria-label="CTExcel 官方来电重要提醒">
+        <strong>重要提醒：不要接听任何电话</strong>
+        <span>CTExcel 官方不会通过电话通知任何事项。接听任何来电都会按中国大陆漫游资费收费。</span>
+        <span class="ready-support">有问题请使用中国大陆手机拨打 CTExcel 国内客服电话<b>400 828 1800</b></span>
+      </div>
     </section>
 
     <section class="panel tariff-panel" aria-labelledby="tariff-title">
@@ -474,7 +487,7 @@
         <div class="tariff-item"><span>接收短信</span><strong>免费</strong></div>
         <div class="tariff-item wide"><span>手机上网流量</span><strong>£0.005 <small>/ MB</small></strong></div>
       </div>
-      <p class="tariff-alert">接听也会产生漫游费用。若主要用于接收验证码，优先接收短信，尽量不要接听或拨打电话。</p>
+      <p class="tariff-alert">CTExcel 官方不会打电话通知任何事项。接听电话按 £0.05/分钟收取漫游费，请不要接听任何电话；有问题请使用中国大陆手机拨打国内客服电话 400 828 1800。</p>
       <div class="tariff-examples" aria-label="资费计算示例">
         <div class="tariff-example"><b>接听 10 分钟</b><br>10 × £0.05 ≈ £0.50</div>
         <div class="tariff-example"><b>拨打 10 分钟</b><br>10 × £0.20 ≈ £2.00</div>
