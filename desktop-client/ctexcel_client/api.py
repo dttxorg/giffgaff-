@@ -61,7 +61,7 @@ class AdminApi:
         self.server_url = server_url.strip().rstrip("/")
         self.app_password = app_password.strip()
         headers = {
-            "User-Agent": "CTExcelApplyClient/2.5.9",
+            "User-Agent": "CTExcelApplyClient/2.5.11",
             "Accept": "application/json",
         }
         if self.app_password:
