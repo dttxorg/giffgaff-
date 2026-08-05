@@ -149,7 +149,8 @@ ALIPAY_GATEWAY_SELECT_SCRIPT = r"""() => {
   };
   const selected = element => {
     const nodes = [element, element?.parentElement, element?.closest?.(
-      'button,[role="button"],a,label,li'
+      'button,[role="button"],a,label,li,[class*="pay"],[class*="method"],'
+        + '[class*="option"]'
     )].filter(Boolean);
     return nodes.some(node =>
       node.getAttribute?.('aria-checked') === 'true'
@@ -176,7 +177,8 @@ ALIPAY_GATEWAY_SELECT_SCRIPT = r"""() => {
   if (!option) return {found: false, selected: false};
   if (!selected(option)) {
     const target = option.closest(
-      'button,[role="button"],a,label,li'
+      'button,[role="button"],a,label,li,[class*="pay"],[class*="method"],'
+        + '[class*="option"]'
     ) || option;
     target.click();
     return {found: true, selected: false, clicked: true};
