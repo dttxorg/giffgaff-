@@ -132,6 +132,135 @@ PLAN_DETAILS_READY_SCRIPT = r"""() => {
     && text.includes('50GB')
     && hasNext;
 }"""
+
+ALIPAY_GATEWAY_SELECT_SCRIPT = r"""() => {
+  const norm = value => String(value || '')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+  const visible = element => {
+    if (!element || element.hidden) return false;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && Number(style.opacity || 1) > 0
+      && rect.width > 0
+      && rect.height > 0;
+  };
+  const selected = element => {
+    const nodes = [element, element?.parentElement, element?.closest?.(
+      'button,[role="button"],a,label,li'
+    )].filter(Boolean);
+    return nodes.some(node =>
+      node.getAttribute?.('aria-checked') === 'true'
+      || node.getAttribute?.('aria-selected') === 'true'
+      || node.classList?.contains('selected')
+      || node.classList?.contains('active')
+      || node.classList?.contains('checked')
+      || node.classList?.contains('is-active')
+      || node.classList?.contains('is-checked')
+    );
+  };
+  const candidates = Array.from(document.querySelectorAll(
+    'button,[role="button"],a,label,li,div,[class*="pay"],[class*="method"],'
+      + '[class*="option"]'
+  )).filter(visible);
+  const exact = candidates.filter(element =>
+    norm(element.innerText || element.textContent) === '支付宝'
+  );
+  const fallback = candidates.filter(element => {
+    const text = norm(element.innerText || element.textContent);
+    return text.includes('支付宝') && text.length <= 24;
+  });
+  const option = exact[exact.length - 1] || fallback[fallback.length - 1];
+  if (!option) return {found: false, selected: false};
+  if (!selected(option)) {
+    const target = option.closest(
+      'button,[role="button"],a,label,li'
+    ) || option;
+    target.click();
+    return {found: true, selected: false, clicked: true};
+  }
+  return {found: true, selected: true, clicked: false};
+}"""
+
+ALIPAY_GATEWAY_PAY_SCRIPT = r"""(expected) => {
+  const norm = value => String(value || '')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+  const visible = element => {
+    if (!element || element.hidden) return false;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && Number(style.opacity || 1) > 0
+      && rect.width > 0
+      && rect.height > 0;
+  };
+  const amount = norm(expected);
+  const expectedNumber = Number.parseFloat(amount);
+  const candidates = Array.from(document.querySelectorAll(
+    'button,[role="button"],a,[type="submit"],[class*="button"],[class*="btn"]'
+  )).filter(visible);
+  const matches = candidates.filter(element => {
+    const text = norm(element.innerText || element.textContent);
+    const paymentLabel = text.includes('支付') || text.includes('pay');
+    const numbers = text.match(/\d+(?:\.\d{1,2})?/g) || [];
+    const hasAmount = !amount
+      || text.includes(amount)
+      || (
+        Number.isFinite(expectedNumber)
+        && numbers.some(value => Number.parseFloat(value) === expectedNumber)
+      );
+    return paymentLabel && hasAmount && !text.includes('返回');
+  });
+  const button = matches[0];
+  if (!button) return {found: false, enabled: false};
+  const disabled = Boolean(
+    button.disabled
+    || button.getAttribute('aria-disabled') === 'true'
+    || button.classList?.contains('disabled')
+    || button.classList?.contains('is-disabled')
+  );
+  if (disabled) return {found: true, enabled: false};
+  button.click();
+  return {
+    found: true,
+    enabled: true,
+    text: String(button.innerText || button.textContent || '')
+  };
+}"""
+
+ALIPAY_QR_READY_SCRIPT = r"""() => {
+  const text = String(document.body?.innerText || '')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+  const marker = [
+    '扫一扫',
+    '扫码',
+    '扫描二维码',
+    '二维码',
+    'scanqrcode',
+    'scanwithalipay',
+  ].some(value => text.includes(value));
+  const visible = element => {
+    if (!element || element.hidden) return false;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && Number(style.opacity || 1) > 0
+      && rect.width >= 120
+      && rect.height >= 120
+      && rect.width / rect.height >= 0.7
+      && rect.width / rect.height <= 1.45;
+  };
+  const qr = Array.from(document.querySelectorAll(
+    'img,canvas,svg,[class*="qr"],[id*="qr"]'
+  )).some(visible);
+  return marker && qr;
+}"""
 PROXY_BROWSER_RETRY_ATTEMPTS = 3
 PROXY_BROWSER_ERROR_LABELS = (
     ("proxy authentication required", "HTTP ERROR 407（代理认证失败）"),
@@ -2746,12 +2875,16 @@ class CTExcelAutomation:
         self.log("支付条款弹窗已打开")
         self._submit_payment_terms(page, dialog)
         payment_page = self._wait_for_alipay_payment_page(page)
-        order_number = self._page_order_number(payment_page)
         expected = (
             "1.00"
             if self.config.purchase_route == PURCHASE_ROUTE_FREECARD
             else self.config.registration.expected_price_gbp.strip()
         )
+        payment_page = self._complete_alipay_gateway_selection(
+            payment_page,
+            expected_amount=expected,
+        )
+        order_number = self._page_order_number(payment_page)
         page_text = ""
         with contextlib.suppress(Exception):
             page_text = payment_page.locator("body").inner_text(timeout=1000)
@@ -2778,6 +2911,145 @@ class CTExcelAutomation:
             "transaction_amount": expected,
             "payment_method": PAYMENT_METHOD_ALIPAY,
         }
+
+    def _complete_alipay_gateway_selection(
+        self,
+        gateway_page: Page,
+        *,
+        expected_amount: str,
+    ) -> Page:
+        """Select AliPay in the hosted gateway, then open its QR page.
+
+        Citi's hosted checkout first shows card and AliPay tiles.  The AliPay
+        QR page is only opened after the tile is selected and the enabled
+        ``支付 £…`` button is clicked, so merely detecting the gateway URL is
+        not sufficient.
+        """
+        host = (urlsplit(str(gateway_page.url or "")).hostname or "").lower()
+        if host.endswith(".alipay.com") or host == "alipay.com":
+            return gateway_page
+        if self._page_has_alipay_qr(gateway_page):
+            return gateway_page
+
+        self._select_alipay_gateway_option(gateway_page)
+        self._click_alipay_gateway_pay(
+            gateway_page,
+            expected_amount=expected_amount,
+        )
+        return self._wait_for_alipay_qr_page(gateway_page)
+
+    def _select_alipay_gateway_option(self, page: Page) -> None:
+        deadline = time.monotonic() + max(
+            5,
+            self._automation_step_timeout_ms() / 1000,
+        )
+        while time.monotonic() < deadline:
+            self._check_stop()
+            result: Any = None
+            with contextlib.suppress(Exception):
+                result = page.evaluate(ALIPAY_GATEWAY_SELECT_SCRIPT)
+            if isinstance(result, dict) and result.get("found"):
+                if result.get("clicked"):
+                    self.log("支付宝支付方式已在支付网关中选中")
+                else:
+                    self.log("支付宝支付方式已处于选中状态")
+                return
+            self._wait_interruptibly(0.2)
+        raise RetryableStalledPageError(
+            "支付宝支付网关未找到可选择的支付宝支付方式"
+        )
+
+    def _click_alipay_gateway_pay(
+        self,
+        page: Page,
+        *,
+        expected_amount: str,
+    ) -> None:
+        deadline = time.monotonic() + max(
+            5,
+            self._automation_step_timeout_ms() / 1000,
+        )
+        while time.monotonic() < deadline:
+            self._check_stop()
+            result: Any = None
+            with contextlib.suppress(Exception):
+                result = page.evaluate(
+                    ALIPAY_GATEWAY_PAY_SCRIPT,
+                    expected_amount,
+                )
+            if isinstance(result, dict) and result.get("found"):
+                if result.get("enabled"):
+                    self.log(
+                        "支付宝支付方式已确认，已点击支付按钮；"
+                        "等待跳转支付宝二维码"
+                    )
+                    return
+                self._wait_interruptibly(0.2)
+                continue
+            self._wait_interruptibly(0.2)
+        raise RetryableStalledPageError(
+            "支付宝支付网关中的支付按钮未出现或仍处于禁用状态"
+        )
+
+    def _page_has_alipay_qr(self, page: Page) -> bool:
+        with contextlib.suppress(Exception):
+            return bool(page.evaluate(ALIPAY_QR_READY_SCRIPT))
+        return False
+
+    def _wait_for_alipay_qr_page(self, source_page: Page) -> Page:
+        """Wait for the post-selection AliPay QR page or popup."""
+        timeout_ms = max(
+            PAYMENT_PAGE_STALL_TIMEOUT_MS,
+            self._automation_wait_timeout_ms(),
+        )
+        deadline = time.monotonic() + timeout_ms / 1000
+        initial_url = str(source_page.url or "")
+        while time.monotonic() < deadline:
+            self._check_stop()
+            candidates: list[Page] = [source_page]
+            if self.context is not None:
+                with contextlib.suppress(Exception):
+                    for candidate in self.context.pages:
+                        if all(candidate is not item for item in candidates):
+                            candidates.append(candidate)
+            for candidate in reversed(candidates):
+                try:
+                    if candidate.is_closed():
+                        continue
+                    current_url = str(candidate.url or "")
+                    if (
+                        candidate is not source_page
+                        and current_url == "about:blank"
+                    ):
+                        continue
+                    if current_url and current_url != "about:blank":
+                        if not is_payment_gateway_url(current_url):
+                            self.log(
+                                "已忽略非受信任域名的支付宝二维码窗口："
+                                f"{urlsplit(current_url).hostname or '未知'}"
+                            )
+                            continue
+                    if is_ctexcel_url(current_url) and is_payment_success_url(
+                        current_url
+                    ):
+                        return candidate
+                    host = (
+                        urlsplit(current_url).hostname or ""
+                    ).lower()
+                    if host == "alipay.com" or host.endswith(".alipay.com"):
+                        self.log("已跳转到支付宝二维码页面")
+                        return candidate
+                    if self._page_has_alipay_qr(candidate):
+                        self.log("支付宝二维码已在当前支付窗口显示")
+                        return candidate
+                    if current_url != initial_url:
+                        self.log("支付宝支付窗口已更新，等待二维码内容")
+                except Exception:
+                    continue
+            self._wait_interruptibly(0.2)
+        raise RetryableStalledPageError(
+            "点击支付宝支付按钮后超过 45 秒，未进入支付宝二维码页面"
+        )
 
     def _sync_payment_terms_checkbox(self, checkbox: Locator) -> None:
         """Wait until Element Plus and Vue both observe the checked value."""

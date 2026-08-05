@@ -767,6 +767,66 @@ def test_alipay_gateway_wait_accepts_new_checkout_iframe(monkeypatch):
     assert any("支付网关已在当前页面打开" in item for item in messages)
 
 
+def test_alipay_gateway_selects_option_and_clicks_pay_before_qr(monkeypatch):
+    calls = []
+
+    class FakePage:
+        url = "https://na.gateway.spring.citi.com/checkout/pay/SESSION"
+
+        def is_closed(self):
+            return False
+
+        def evaluate(self, script, *args):
+            calls.append((script, args))
+            if "scanqrcode" in script:
+                return len(calls) >= 4
+            if "target.click()" in script:
+                return {"found": True, "clicked": True}
+            if "button.click()" in script:
+                return {"found": True, "enabled": True}
+            raise AssertionError("unexpected gateway script")
+
+    messages = []
+    runner = CTExcelAutomation(
+        AppConfig(payment_method=PAYMENT_METHOD_ALIPAY),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    selected = runner._complete_alipay_gateway_selection(
+        FakePage(),
+        expected_amount="5.95",
+    )
+
+    assert selected.url.endswith("/SESSION")
+    assert len(calls) == 4
+    assert calls[1][1] == ()
+    assert calls[2][1] == ("5.95",)
+    assert any("已点击支付按钮" in item for item in messages)
+
+
+def test_alipay_direct_qr_url_skips_gateway_selection():
+    class FakePage:
+        url = "https://global.alipay.com/qr/SESSION"
+
+        def evaluate(self, _script, *_args):
+            raise AssertionError("direct Alipay QR should not inspect gateway")
+
+    runner = CTExcelAutomation(
+        AppConfig(payment_method=PAYMENT_METHOD_ALIPAY),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    page = FakePage()
+    assert runner._complete_alipay_gateway_selection(
+        page,
+        expected_amount="5.95",
+    ) is page
+
+
 def test_payment_terms_never_retries_a_non_idempotent_submit(monkeypatch):
     state = {"checked": False, "dialog_visible": True, "clicks": 0}
     clock = {"value": 0.0}
