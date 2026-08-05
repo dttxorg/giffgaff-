@@ -29,6 +29,7 @@ from ctexcel_client.automation import (
     normalize_money,
     parse_message_timestamp,
     is_payment_success_url,
+    is_payment_gateway_url,
     is_wechat_payment_url,
     payment_page_has_expected_amount,
     payment_page_content_is_ready,
@@ -44,6 +45,8 @@ from ctexcel_client.automation import (
 )
 from ctexcel_client.config import (
     AppConfig,
+    PAYMENT_METHOD_ALIPAY,
+    PAYMENT_METHOD_WECHAT,
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
     ProxyConfig,
@@ -88,6 +91,18 @@ def test_wechat_payment_url_matches_same_tab_and_popup_routes():
         "https://www.ctexcel.com/freecard/activityPageconfirm",
         PURCHASE_ROUTE_FREECARD,
     )
+
+
+def test_payment_gateway_url_allows_only_https_configured_hosts():
+    assert is_payment_gateway_url(
+        "https://www.ctexcel.com/uk/buycard/buycardsucceed"
+    )
+    assert is_payment_gateway_url(
+        "https://na.gateway.spring.citi.com/checkout"
+    )
+    assert is_payment_gateway_url("https://pay.alipay.com/gateway")
+    assert not is_payment_gateway_url("http://na.gateway.spring.citi.com/checkout")
+    assert not is_payment_gateway_url("https://evil.example.test/payment")
 
 
 def test_success_page_completes_immediately_without_reading_phone():
@@ -136,6 +151,115 @@ def test_success_page_completes_immediately_without_reading_phone():
         },
     )
     assert any("客户端不再读取手机号" in item for item in messages)
+
+
+def test_payment_qr_message_id_is_saved_and_deleted(monkeypatch):
+    calls = []
+
+    class FakeNotifier:
+        def __init__(self, _config):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def send_payment_qr(self, _image, *, caption):
+            calls.append(("send", caption))
+            return {"ok": True, "result": {"message_id": 73}}
+
+        def delete_message(self, message_id):
+            calls.append(("delete", message_id))
+            return {"ok": True, "result": True}
+
+    monkeypatch.setattr(automation_module, "TelegramNotifier", FakeNotifier)
+    config = AppConfig()
+    config.telegram.enabled = True
+    runner = CTExcelAutomation(
+        config,
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(runner, "_capture_payment_qr", lambda _page: b"PNG")
+
+    runner._push_payment_qr(
+        object(),
+        customer_id=480,
+        email="customer@example.test",
+        pending_order={
+            "order_number": "ORDERSUK2026073106180627794025",
+            "transaction_amount": "1.00",
+        },
+    )
+
+    assert runner.payment_qr_message_id == 73
+    runner._delete_payment_qr("测试清理")
+    assert runner.payment_qr_message_id is None
+    assert calls[0][0] == "send"
+    assert calls[1] == ("delete", 73)
+
+
+def test_payment_timeout_deletes_qr_but_keeps_page_until_success(monkeypatch):
+    clock = iter((0.0, 121.0))
+    deleted = []
+    state = {"success": False, "waits": 0}
+
+    class FakePage:
+        @property
+        def url(self):
+            return (
+                "https://www.ctexcel.com/uk/buycard/buycardsucceed"
+                if state["success"]
+                else "https://www.ctexcel.com/uk/buycard/buycardWX"
+            )
+
+        def wait_for_timeout(self, _milliseconds):
+            state["waits"] += 1
+            state["success"] = True
+
+    class FakeApi:
+        def __init__(self):
+            self.saved = None
+
+        def save_payment_checkpoint(self, customer_id, **fields):
+            self.saved = (customer_id, fields)
+            return {"ok": True}
+
+    runner = CTExcelAutomation(
+        AppConfig(payment_timeout_seconds=120),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: next(clock),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_delete_payment_qr",
+        lambda reason: deleted.append(reason),
+    )
+    api = FakeApi()
+
+    result = runner._wait_for_payment_success(
+        FakePage(),
+        api=api,
+        customer_id=480,
+        email="customer@example.test",
+        pending_order={
+            "order_number": "ORDERSUK2026073106180627794025",
+            "transaction_amount": "1.00",
+        },
+    )
+
+    assert result.order_number == "ORDERSUK2026073106180627794025"
+    assert state["waits"] == 1
+    assert deleted == ["支付等待超时", "支付成功"]
 
 
 def test_browser_profile_is_isolated_and_automation_banner_is_removed():
@@ -506,6 +630,141 @@ def test_payment_terms_wait_for_vue_binding_before_next_click(monkeypatch):
     }
     assert any("完成页面状态同步" in item for item in messages)
     assert any("仅提交一次" in item for item in messages)
+
+
+def test_alipay_payment_tile_selects_image_only_gateway(monkeypatch):
+    class FakeCollection:
+        def __init__(self, items):
+            self.items = list(items)
+
+        def count(self):
+            return len(self.items)
+
+        def nth(self, index):
+            return self.items[index]
+
+        def filter(self, *, has_text):
+            return FakeCollection(
+                [item for item in self.items if has_text in item.text]
+            )
+
+    class FakeTile:
+        def __init__(self, text, *, has_image):
+            self.text = text
+            self.has_image = has_image
+            self.active = False
+
+        def is_visible(self):
+            return True
+
+        def inner_text(self):
+            return self.text
+
+        def locator(self, selector):
+            assert selector == "img"
+            return FakeCollection([object()] if self.has_image else [])
+
+        def click(self):
+            self.active = True
+
+        def evaluate(self, _script):
+            return self.active
+
+    class FakeRadio:
+        checked = False
+
+        def is_checked(self):
+            return self.checked
+
+        def check(self):
+            self.checked = True
+
+    class FakePage:
+        def __init__(self):
+            self.radio = FakeRadio()
+            self.tiles = FakeCollection(
+                [
+                    FakeTile("Paypal", has_image=True),
+                    FakeTile("", has_image=True),
+                    FakeTile("微信", has_image=True),
+                ]
+            )
+
+        def get_by_role(self, role, **_kwargs):
+            assert role == "radio"
+            return self.radio
+
+        def locator(self, selector):
+            assert selector == ".pay-method-type > div"
+            return self.tiles
+
+        def get_by_text(self, _text, **_kwargs):
+            return FakeCollection([])
+
+    messages = []
+    runner = CTExcelAutomation(
+        AppConfig(payment_method=PAYMENT_METHOD_ALIPAY),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(runner, "_wait_for_page_ready", lambda *_a, **_k: None)
+
+    page = FakePage()
+    runner._select_payment_method(page)
+
+    assert page.radio.checked is True
+    assert page.tiles.nth(1).active is True
+    assert any("银行卡/支付宝支付网关" in item for item in messages)
+
+
+def test_default_payment_method_remains_wechat_for_existing_configs():
+    assert AppConfig().payment_method == PAYMENT_METHOD_WECHAT
+
+
+def test_alipay_gateway_wait_accepts_new_checkout_iframe(monkeypatch):
+    state = {"iframe_reads": 0}
+
+    class FakeCount:
+        def __init__(self, value):
+            self.value = value
+
+        def count(self):
+            return self.value
+
+    class FakeBody:
+        def inner_text(self, **_kwargs):
+            return "订单确认"
+
+    class FakePage:
+        url = "https://www.ctexcel.com/uk/buycard/buycardlist"
+
+        def is_closed(self):
+            return False
+
+        def locator(self, selector):
+            if selector == "iframe":
+                state["iframe_reads"] += 1
+                return FakeCount(0 if state["iframe_reads"] == 1 else 1)
+            if selector == "body":
+                return FakeBody()
+            if "checkout" in selector or "payment" in selector:
+                return FakeCount(0)
+            raise AssertionError(selector)
+
+    messages = []
+    runner = CTExcelAutomation(
+        AppConfig(payment_method=PAYMENT_METHOD_ALIPAY),
+        log=messages.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    runner.context = SimpleNamespace(pages=[])
+
+    selected = runner._wait_for_alipay_payment_page(FakePage())
+
+    assert selected.url.endswith("/buycardlist")
+    assert any("支付网关已在当前页面打开" in item for item in messages)
 
 
 def test_payment_terms_never_retries_a_non_idempotent_submit(monkeypatch):

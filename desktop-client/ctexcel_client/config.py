@@ -19,6 +19,12 @@ PURCHASE_ROUTES = {
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
 }
+PAYMENT_METHOD_WECHAT = "wechat"
+PAYMENT_METHOD_ALIPAY = "alipay"
+PAYMENT_METHODS = {
+    PAYMENT_METHOD_WECHAT,
+    PAYMENT_METHOD_ALIPAY,
+}
 DEFAULT_APPLICATION_URL = (
     "https://www.ctexcel.com/uk/buyCard/buyCardPackage/1"
     "?recommendCode=NTKWJX"
@@ -254,6 +260,7 @@ class AppConfig:
     app_password: str = ""
     remember_credentials: bool = True
     purchase_route: str = PURCHASE_ROUTE_FREECARD
+    payment_method: str = PAYMENT_METHOD_WECHAT
     continuous_enabled: bool = False
     continuous_count: int = 100
     continuous_workers: int = 1
@@ -377,6 +384,8 @@ def _merge_config(raw: dict[str, Any]) -> AppConfig:
     }
     if values.get("purchase_route") not in PURCHASE_ROUTES:
         values["purchase_route"] = PURCHASE_ROUTE_FREECARD
+    if values.get("payment_method") not in PAYMENT_METHODS:
+        values["payment_method"] = PAYMENT_METHOD_WECHAT
     try:
         values["continuous_count"] = min(
             1000,

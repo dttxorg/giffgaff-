@@ -5,6 +5,8 @@ from ctexcel_client import __version__
 from ctexcel_client.config import (
     AppConfig,
     DEFAULT_PROXY_API_URL,
+    PAYMENT_METHOD_ALIPAY,
+    PAYMENT_METHOD_WECHAT,
     ProxyConfig,
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
@@ -16,6 +18,19 @@ from ctexcel_client.config import (
     save_config,
     split_qg_proxy_api_key,
 )
+
+
+def test_payment_method_round_trip_and_invalid_values_fall_back_to_wechat(
+    tmp_path: Path,
+):
+    target = tmp_path / "config.json"
+    config = AppConfig(payment_method=PAYMENT_METHOD_ALIPAY)
+    save_config(config, target)
+
+    assert load_config(target).payment_method == PAYMENT_METHOD_ALIPAY
+
+    target.write_text('{"payment_method":"unsupported"}', encoding="utf-8")
+    assert load_config(target).payment_method == PAYMENT_METHOD_WECHAT
 
 
 LEGACY_CLIPROXY_API_URL = (
@@ -44,7 +59,10 @@ def test_client_ui_uses_scoped_api_without_hidden_entry_field():
     assert "self.continuous_workers.setRange(1, 10)" in source
     assert '"Telegram 付款提醒"' in source
     assert '"测试推送"' in source
-    assert __version__ == "2.5.9"
+    assert '"支付方式"' in source
+    assert "支付宝（银行卡/支付宝支付网关）" in source
+    assert "微信支付（二维码）" in source
+    assert __version__ == "2.5.11"
     assert 'f"CTExcel 申请工作台 v{__version__}"' in source
 
 

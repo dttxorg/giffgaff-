@@ -17,7 +17,7 @@ import threading
 import tempfile
 import time
 from typing import Any, Callable, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 import uuid
 
 from playwright.sync_api import (
@@ -32,6 +32,8 @@ from .api import AdminApi, ApiError
 from .config import (
     AppConfig,
     FREECARD_APPLICATION_URL,
+    PAYMENT_METHOD_ALIPAY,
+    PAYMENT_METHOD_WECHAT,
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
     RegistrationDefaults,
@@ -67,6 +69,7 @@ PAGE_CLICK_TIMEOUT_MS = 5_000
 # detail DOM settle.  Keep that transition on a wider idle budget so three
 # independent browsers do not mistake a slow response for a dead page.
 PLAN_DETAILS_STALL_TIMEOUT_MS = 45_000
+PAYMENT_PAGE_STALL_TIMEOUT_MS = 45_000
 PAYMENT_TERMS_BIND_TIMEOUT_MS = 1_500
 VERIFICATION_CODE_CACHE_SECONDS = 180
 VERIFICATION_FEEDBACK_TIMEOUT_SECONDS = 5.0
@@ -83,6 +86,7 @@ PURCHASE_LIMIT_MARKERS = (
     "达到上限",
 )
 CTEXCEL_ALLOWED_HOSTS = frozenset({"ctexcel.com", "www.ctexcel.com"})
+PAYMENT_GATEWAY_HOSTS = frozenset({"na.gateway.spring.citi.com"})
 
 SELECT_50GB_PLAN_SCRIPT = r"""() => {
   const norm = value => String(value || '').replace(/\s+/g, '');
@@ -250,6 +254,24 @@ def is_ctexcel_url(value: Any) -> bool:
     )
 
 
+def is_payment_gateway_url(value: Any) -> bool:
+    """Allow only CTExcel or its configured hosted payment providers."""
+    try:
+        parsed = urlsplit(str(value or ""))
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme.lower() == "https"
+        and (
+            host in CTEXCEL_ALLOWED_HOSTS
+            or host in PAYMENT_GATEWAY_HOSTS
+            or host == "alipay.com"
+            or host.endswith(".alipay.com")
+        )
+    )
+
+
 def page_url_matches_path(value: Any, expected_path: str) -> bool:
     """Match a SPA destination without depending on query parameters."""
     try:
@@ -295,6 +317,10 @@ def is_wechat_payment_url(value: Any, purchase_route: str) -> bool:
         else "/buycard/buycardwx"
     )
     return path.endswith(expected)
+
+
+def payment_method_is_alipay(value: Any) -> bool:
+    return str(value or "").strip().lower() == PAYMENT_METHOD_ALIPAY
 
 
 ORDER_PATTERN = re.compile(
@@ -764,6 +790,7 @@ class CTExcelAutomation:
         self.profile_dir: Optional[Path] = None
         self.network_events: list[str] = []
         self.payment_qr_reached = False
+        self.payment_qr_message_id: Optional[int] = None
         self.cached_verification_customer_id: Optional[int] = None
         self.cached_verification_code = ""
         self.cached_verification_at = 0.0
@@ -882,7 +909,7 @@ class CTExcelAutomation:
                             self.stage("浏览器重试失败")
                             raise AutomationError(
                                 "浏览器连续 "
-                                f"{PROXY_BROWSER_RETRY_ATTEMPTS} 次在付款二维码前中断，"
+                                f"{PROXY_BROWSER_RETRY_ATTEMPTS} 次在支付页前中断，"
                                 "当前客户已保留，可重新运行继续"
                             ) from exc
                         next_attempt = attempt + 1
@@ -1100,6 +1127,9 @@ class CTExcelAutomation:
         synchronize_start: bool = True,
     ) -> AutomationResult:
         self.stage("启动浏览器")
+        # A retry or a caller reusing the automation object must not leave a
+        # QR message from an earlier browser run behind in Telegram.
+        self._delete_payment_qr("开始新的浏览器流程")
         self.payment_qr_reached = False
         with sync_playwright() as playwright:
             profile_root = Path(app_config_dir()) / "browser-runs"
@@ -1232,17 +1262,18 @@ class CTExcelAutomation:
                     self._configure_sim(page)
                 self._fill_customer_info(page, api, customer_id, email)
                 self._confirm_order(page)
-                page, pending = self._open_wechat_payment(
+                page, pending = self._open_payment(
                     page,
                     api=api,
                     customer_id=customer_id,
                 )
-                self._push_payment_qr(
-                    page,
-                    customer_id=customer_id,
-                    email=email,
-                    pending_order=pending,
-                )
+                if pending.get("payment_method") == PAYMENT_METHOD_WECHAT:
+                    self._push_payment_qr(
+                        page,
+                        customer_id=customer_id,
+                        email=email,
+                        pending_order=pending,
+                    )
                 result = self._wait_for_payment_success(
                     page,
                     api=api,
@@ -1273,6 +1304,7 @@ class CTExcelAutomation:
 
     def _cleanup_browser_resources(self) -> None:
         """Close a partially initialized browser and remove its profile."""
+        self._delete_payment_qr("浏览器流程结束")
         with contextlib.suppress(Exception):
             if self.context is not None:
                 self.context.close()
@@ -1322,9 +1354,9 @@ class CTExcelAutomation:
             or closed_error
         ):
             raise RetryableStalledPageError(
-                "付款二维码前 20 秒未出现新页面动作"
+                "支付页前 20 秒未出现新页面动作"
                 if isinstance(exc, PlaywrightTimeoutError)
-                else "付款二维码前浏览器页面意外关闭"
+                else "支付页前浏览器页面意外关闭"
             ) from exc
         if diagnostic_page is not None:
             self._preserve_error_page(diagnostic_page, exc)
@@ -2553,6 +2585,15 @@ class CTExcelAutomation:
                 raise AutomationError("£1 预存领卡订单金额校验失败")
             self.log("£1 预存领卡订单金额已核对")
 
+        self._select_payment_method(page)
+
+    def _select_payment_method(self, page: Page) -> None:
+        """Select the configured CTExcel payment tile without re-submitting."""
+        method = str(self.config.payment_method or PAYMENT_METHOD_WECHAT)
+        method = method.strip().lower()
+        if method not in {PAYMENT_METHOD_WECHAT, PAYMENT_METHOD_ALIPAY}:
+            method = PAYMENT_METHOD_WECHAT
+
         other_payment = page.get_by_role(
             "radio",
             name="其他支付方式订购",
@@ -2561,21 +2602,83 @@ class CTExcelAutomation:
         if not other_payment.is_checked():
             other_payment.check()
             self._wait_for_page_ready(page, "切换其他支付方式")
-        wechat = self._visible_locator(
-            page.get_by_text("微信", exact=True),
-            "微信支付方式",
-        )
-        wechat.click()
-        self._wait_for_page_ready(page, "切换微信支付")
-        selected = wechat.evaluate(
+
+        payment_tiles = page.locator(".pay-method-type > div")
+        if method == PAYMENT_METHOD_WECHAT:
+            label = "微信"
+            named_tiles = payment_tiles.filter(has_text="微信")
+            if not named_tiles.count():
+                named_tiles = page.get_by_text("微信", exact=True)
+        else:
+            label = "支付宝"
+            named_tiles = payment_tiles.filter(has_text="支付宝")
+            if not named_tiles.count():
+                named_tiles = page.get_by_text("支付宝", exact=True)
+
+        tile: Optional[Locator] = None
+        if named_tiles.count():
+            with contextlib.suppress(RetryableStalledPageError):
+                tile = self._visible_locator(
+                    named_tiles,
+                    f"{label}支付方式",
+                )
+
+        if tile is None and method == PAYMENT_METHOD_ALIPAY:
+            # Current CTExcel builds render the AliPay/card gateway as an
+            # image-only tile (the image contains Mastercard/Visa/AliPay
+            # logos), so there is no text locator to click.  Distinguish it
+            # from PayPal/WeChat by requiring an image and no text.
+            empty_image_tiles: list[Locator] = []
+            for index in range(payment_tiles.count()):
+                candidate = payment_tiles.nth(index)
+                with contextlib.suppress(Exception):
+                    if (
+                        candidate.is_visible()
+                        and candidate.inner_text().strip() == ""
+                        and candidate.locator("img").count() > 0
+                    ):
+                        empty_image_tiles.append(candidate)
+            if empty_image_tiles:
+                tile = empty_image_tiles[0]
+                self.log(
+                    "页面未提供独立支付宝文字按钮，已选择银行卡/支付宝支付网关"
+                )
+
+        if tile is None:
+            raise RetryableStalledPageError(
+                f"没有找到可见控件：{label}支付方式"
+            )
+        tile.click()
+        self._wait_for_page_ready(page, f"切换{label}支付")
+        selected = tile.evaluate(
             """el => Boolean(
-              el.closest('.actived')
+              el.classList.contains('actived')
+              || el.closest('.actived')
               || el.parentElement?.classList.contains('actived')
             )"""
         )
         if not selected:
-            raise AutomationError("微信支付方式没有进入选中状态")
-        self.log("支付方式已切换为微信")
+            raise AutomationError(f"{label}支付方式没有进入选中状态")
+        self.log(f"支付方式已切换为{label}")
+
+    def _open_payment(
+        self,
+        page: Page,
+        *,
+        api: AdminApi,
+        customer_id: int,
+    ) -> tuple[Page, dict[str, str]]:
+        if payment_method_is_alipay(self.config.payment_method):
+            return self._open_alipay_payment(
+                page,
+                api=api,
+                customer_id=customer_id,
+            )
+        return self._open_wechat_payment(
+            page,
+            api=api,
+            customer_id=customer_id,
+        )
 
     def _open_wechat_payment(
         self,
@@ -2615,7 +2718,7 @@ class CTExcelAutomation:
             f"：{order_number} / £{expected}"
         )
         self.payment_qr_reached = True
-        self.stage("等待人工微信支付")
+        self.stage("等待人工支付")
         self.log(
             f"微信二维码已显示，金额 £{expected}"
             + (f"，订单号 {order_number}" if order_number else "")
@@ -2623,6 +2726,55 @@ class CTExcelAutomation:
         return payment_page, {
             "order_number": order_number,
             "transaction_amount": expected,
+            "payment_method": PAYMENT_METHOD_WECHAT,
+        }
+
+    def _open_alipay_payment(
+        self,
+        page: Page,
+        *,
+        api: AdminApi,
+        customer_id: int,
+    ) -> tuple[Page, dict[str, str]]:
+        """Open CTExcel's AliPay/card gateway and wait for manual payment."""
+        self.stage("确认支付条款")
+        self._click_button(page, "确认支付")
+        dialogs = page.get_by_role("dialog")
+        dialog = self._visible_locator(dialogs, "支付条款弹窗")
+        self.log("支付条款弹窗已打开")
+        self._submit_payment_terms(page, dialog)
+        payment_page = self._wait_for_alipay_payment_page(page)
+        order_number = self._page_order_number(payment_page)
+        expected = (
+            "1.00"
+            if self.config.purchase_route == PURCHASE_ROUTE_FREECARD
+            else self.config.registration.expected_price_gbp.strip()
+        )
+        page_text = ""
+        with contextlib.suppress(Exception):
+            page_text = payment_page.locator("body").inner_text(timeout=1000)
+        # Hosted gateways do not always repeat the CTExcel order amount.  If
+        # they do show a recognizable amount, still reject a mismatched one.
+        if re.search(r"(?:£|GBP)\s*[0-9]", page_text, re.I):
+            if not payment_page_has_expected_amount(page_text, expected):
+                raise AutomationError(
+                    "支付宝支付页的英镑金额与所选申请路线不一致"
+                )
+        api.save_payment_checkpoint(
+            customer_id,
+            order_number=order_number,
+            transaction_amount=expected,
+        )
+        self.payment_qr_reached = True
+        self.stage("等待人工支付")
+        self.log(
+            f"支付宝支付页已打开，金额 £{expected}；"
+            "请在 CTExcel 支付窗口完成付款"
+        )
+        return payment_page, {
+            "order_number": order_number,
+            "transaction_amount": expected,
+            "payment_method": PAYMENT_METHOD_ALIPAY,
         }
 
     def _sync_payment_terms_checkbox(self, checkbox: Locator) -> None:
@@ -2687,6 +2839,107 @@ class CTExcelAutomation:
             "等待付款页或新窗口，避免重复创建订单"
         )
 
+    def _page_order_number(self, page: Page) -> str:
+        """Extract an order number from a gateway URL or rendered page."""
+        values: list[str] = []
+        with contextlib.suppress(Exception):
+            values.append(str(page.url or ""))
+            query = parse_qs(urlsplit(str(page.url or "")).query)
+            for key in ("orderNo", "orderNumber", "order", "transactionId"):
+                values.extend(str(item) for item in query.get(key, []))
+        with contextlib.suppress(Exception):
+            values.append(page.locator("body").inner_text(timeout=1000))
+        for value in values:
+            match = ORDER_PATTERN.search(value)
+            if match:
+                return match.group(0).upper()
+        return ""
+
+    def _wait_for_alipay_payment_page(self, source_page: Page) -> Page:
+        """Follow the hosted AliPay/card gateway opened by CTExcel."""
+        timeout_ms = max(
+            PAYMENT_PAGE_STALL_TIMEOUT_MS,
+            self._automation_wait_timeout_ms(),
+        )
+        deadline = time.monotonic() + timeout_ms / 1000
+        initial_url = str(source_page.url or "")
+        initial_iframes = source_page.locator("iframe").count()
+        while time.monotonic() < deadline:
+            self._check_stop()
+            candidates: list[Page] = [source_page]
+            if self.context is not None:
+                with contextlib.suppress(Exception):
+                    for candidate in self.context.pages:
+                        if all(candidate is not item for item in candidates):
+                            candidates.append(candidate)
+            for candidate in reversed(candidates):
+                try:
+                    if candidate.is_closed():
+                        continue
+                    current_url = str(candidate.url or "")
+                    if current_url and current_url != "about:blank":
+                        if not is_payment_gateway_url(current_url):
+                            self.log(
+                                "已忽略非受信任域名的支付宝支付窗口："
+                                f"{urlsplit(current_url).hostname or '未知'}"
+                            )
+                            continue
+                    if is_payment_success_url(current_url):
+                        return candidate
+                    if (
+                        candidate is not source_page
+                        and current_url != "about:blank"
+                    ):
+                        url_marker = current_url.lower()
+                        if any(
+                            marker in url_marker
+                            for marker in (
+                                "payment",
+                                "checkout",
+                                "citi",
+                                "alipay",
+                            )
+                        ):
+                            self.log(
+                                "支付宝支付页在新窗口打开，已自动切换后续跟踪"
+                            )
+                            return candidate
+                    if candidate is source_page:
+                        if current_url != initial_url:
+                            self.log("已进入支付宝支付页")
+                            return candidate
+                        if candidate.locator("iframe").count() > initial_iframes:
+                            self.log("支付宝支付网关已在当前页面打开")
+                            return candidate
+                        gateway_markers = candidate.locator(
+                            "[id*='checkout'], [class*='checkout'], "
+                            "[id*='payment'], [class*='payment']"
+                        )
+                        if gateway_markers.count() > 0:
+                            self.log("支付宝支付网关已在当前页面打开")
+                            return candidate
+                    text = candidate.locator("body").inner_text(timeout=500)
+                    compact = re.sub(r"\s+", "", text).lower()
+                    if candidate is not source_page and any(
+                        marker in compact
+                        for marker in (
+                            "支付宝",
+                            "alipay",
+                            "信用卡",
+                            "银行卡",
+                            "creditcard",
+                            "payment",
+                        )
+                    ):
+                        self.log("已进入支付宝支付页")
+                        return candidate
+                except Exception:
+                    continue
+            self._wait_interruptibly(0.2)
+        raise RetryableStalledPageError(
+            "支付宝支付页打开超过 45 秒，未检测到支付窗口"
+        )
+
     def _wait_for_payment_page_content(self, payment_page: Page) -> str:
         """Wait for the same readiness contract used to select a payment page."""
         deadline = time.monotonic() + max(
@@ -2734,9 +2987,12 @@ class CTExcelAutomation:
                     if candidate.is_closed():
                         continue
                     open_pages.append(candidate)
-                    if is_wechat_payment_url(
-                        candidate.url,
-                        self.config.purchase_route,
+                    if (
+                        is_ctexcel_url(candidate.url)
+                        and is_wechat_payment_url(
+                            candidate.url,
+                            self.config.purchase_route,
+                        )
                     ):
                         if candidate is not source_page:
                             self.log(
@@ -2787,12 +3043,29 @@ class CTExcelAutomation:
             120,
             int(self.config.payment_timeout_seconds),
         )
-        while time.monotonic() < deadline:
+        timeout_reported = False
+        while True:
             self._check_stop()
-            if is_payment_success_url(page.url):
+            success_page = page
+            if self.context is not None:
+                with contextlib.suppress(Exception):
+                    for candidate in self.context.pages:
+                        if (
+                            not candidate.is_closed()
+                            and is_ctexcel_url(candidate.url)
+                            and is_payment_success_url(candidate.url)
+                        ):
+                            success_page = candidate
+                            break
+            success_url = ""
+            with contextlib.suppress(Exception):
+                success_url = str(success_page.url or "")
+            if is_ctexcel_url(success_url) and is_payment_success_url(success_url):
                 order_number = str(
                     pending_order.get("order_number") or ""
                 ).strip()
+                if not order_number:
+                    order_number = self._page_order_number(success_page)
                 transaction_amount = str(
                     pending_order.get("transaction_amount") or ""
                 ).strip()
@@ -2802,6 +3075,7 @@ class CTExcelAutomation:
                     transaction_amount=transaction_amount,
                     payment_succeeded=True,
                 )
+                self._delete_payment_qr("支付成功")
                 self.log(
                     "支付成功已确认："
                     f"{order_number} / £{transaction_amount}；"
@@ -2814,8 +3088,15 @@ class CTExcelAutomation:
                     phone_number="",
                     transaction_amount=transaction_amount,
                 )
+            if not timeout_reported and time.monotonic() >= deadline:
+                timeout_reported = True
+                self._delete_payment_qr("支付等待超时")
+                self.stage("支付等待超时，二维码已删除")
+                self.log(
+                    "支付等待已达到配置时限；Telegram 支付二维码已删除，"
+                    "浏览器页面继续保留，完成支付后再结束流程"
+                )
             page.wait_for_timeout(1000)
-        raise AutomationError("等待人工支付完成超时，可在客户端重新载入该客户继续")
 
     def _capture_payment_qr(self, page: Page) -> bytes:
         deadline = time.monotonic() + min(
@@ -2911,10 +3192,19 @@ class CTExcelAutomation:
                 f"金额：£{amount}"
             )
             with TelegramNotifier(self.config.telegram) as notifier:
-                notifier.send_payment_qr(
+                response = notifier.send_payment_qr(
                     image,
                     caption=caption,
                 )
+            result = response.get("result") if isinstance(response, dict) else None
+            message_id = result.get("message_id") if isinstance(result, dict) else None
+            try:
+                normalized_message_id = int(message_id)
+            except (TypeError, ValueError):
+                normalized_message_id = 0
+            if normalized_message_id <= 0:
+                raise TelegramError("Telegram 返回中没有有效的二维码消息 ID")
+            self.payment_qr_message_id = normalized_message_id
             self.log(
                 "微信付款二维码已通过直连发送到 Telegram："
                 f"{order_number}"
@@ -2925,6 +3215,29 @@ class CTExcelAutomation:
             self.log(
                 "Telegram 二维码截图失败："
                 f"{type(exc).__name__}: {exc}"
+            )
+
+    def _delete_payment_qr(self, reason: str) -> None:
+        """Best-effort deletion of the Telegram QR message.
+
+        The message ID is cleared before the network call so repeated cleanup
+        paths (success, timeout, stop, and browser teardown) never issue a
+        second delete request for the same message.
+        """
+        message_id = self.payment_qr_message_id
+        self.payment_qr_message_id = None
+        if message_id is None:
+            return
+        try:
+            with TelegramNotifier(self.config.telegram) as notifier:
+                notifier.delete_message(message_id)
+            self.log(f"Telegram 支付二维码已删除（{reason}）")
+        except TelegramError as exc:
+            self.log(f"Telegram 支付二维码删除失败（{reason}）：{exc}")
+        except Exception as exc:
+            self.log(
+                "Telegram 支付二维码删除异常（"
+                f"{reason}）：{type(exc).__name__}: {exc}"
             )
 
     def _visible_locator(self, locator: Locator, label: str) -> Locator:
@@ -3014,7 +3327,7 @@ class CTExcelAutomation:
 
 
 class CTExcelBatchAutomation:
-    """按配置并发运行多单；每个浏览器独立等待人工微信支付。"""
+    """按配置并发运行多单；每个浏览器独立等待人工支付。"""
 
     def __init__(
         self,

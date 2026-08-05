@@ -37,6 +37,8 @@ from .automation import (
 )
 from .config import (
     AppConfig,
+    PAYMENT_METHOD_ALIPAY,
+    PAYMENT_METHOD_WECHAT,
     ProxyConfig,
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
@@ -127,7 +129,7 @@ class MainWindow(QMainWindow):
         "填写客户资料",
         "确认订单",
         "确认支付条款",
-        "等待人工微信支付",
+        "等待人工支付",
         "支付成功",
     ]
 
@@ -582,8 +584,30 @@ class MainWindow(QMainWindow):
     def _workflow_card(self) -> QFrame:
         card, layout = self._card(
             "申请流程",
-            "关键节点清晰分离；微信支付仍由你本人扫码确认。",
+            "关键节点清晰分离；支付页面由你本人完成确认。",
         )
+
+        payment_row = QHBoxLayout()
+        payment_row.addWidget(self._field_label("支付方式"))
+        self.payment_method = QComboBox()
+        self.payment_method.addItem(
+            "支付宝（银行卡/支付宝支付网关）",
+            PAYMENT_METHOD_ALIPAY,
+        )
+        self.payment_method.addItem(
+            "微信支付（二维码）",
+            PAYMENT_METHOD_WECHAT,
+        )
+        self.payment_method.setToolTip(
+            "支付宝会打开 CTExcel 的支付网关；微信会打开二维码页面。"
+            "支付等待超时只删除 Telegram 二维码，浏览器继续保留。"
+        )
+        payment_row.addWidget(self.payment_method)
+        payment_row.addStretch(1)
+        payment_row.addWidget(
+            QLabel("支付宝可避开微信二维码频繁限制"),
+        )
+        layout.addLayout(payment_row)
 
         steps = QHBoxLayout()
         steps.setSpacing(8)
@@ -691,8 +715,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(customer_panel)
 
         note = QLabel(
-            "支付成功页出现后立即完成本单；手机号不参与流程判定，"
-            "订单确认邮件由服务器后台继续识别。"
+            "支付成功页出现后立即完成本单；支付等待超时只删除 Telegram 二维码，"
+            "不会自动关闭支付页；手机号不参与流程判定，订单确认邮件由服务器后台继续识别。"
         )
         note.setObjectName("inlineNote")
         note.setWordWrap(True)
@@ -731,6 +755,8 @@ class MainWindow(QMainWindow):
         self.expected_price.setText(config.registration.expected_price_gbp)
         route_index = self.purchase_route.findData(config.purchase_route)
         self.purchase_route.setCurrentIndex(max(0, route_index))
+        payment_index = self.payment_method.findData(config.payment_method)
+        self.payment_method.setCurrentIndex(max(0, payment_index))
         self.continuous_enabled.setChecked(config.continuous_enabled)
         self.continuous_count.setValue(config.continuous_count)
         self.continuous_workers.setValue(config.continuous_workers)
@@ -814,6 +840,10 @@ class MainWindow(QMainWindow):
             purchase_route=str(
                 self.purchase_route.currentData()
                 or PURCHASE_ROUTE_FREECARD
+            ),
+            payment_method=str(
+                self.payment_method.currentData()
+                or PAYMENT_METHOD_WECHAT
             ),
             continuous_enabled=self.continuous_enabled.isChecked(),
             continuous_count=self.continuous_count.value(),
@@ -1324,6 +1354,7 @@ class MainWindow(QMainWindow):
             self.config.continuous_enabled,
             target,
             self.config.purchase_route,
+            self.config.payment_method,
             self.config.continuous_workers,
             self.config.registration.contact_phone,
             self.config.registration.contact_phone_end,
@@ -1377,6 +1408,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(True)
         self.test_connection_btn.setEnabled(False)
         self.purchase_route.setEnabled(False)
+        self.payment_method.setEnabled(False)
         self.continuous_enabled.setEnabled(False)
         self.continuous_count.setEnabled(False)
         self.continuous_workers.setEnabled(False)
@@ -1516,6 +1548,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.test_connection_btn.setEnabled(True)
         self.purchase_route.setEnabled(True)
+        self.payment_method.setEnabled(True)
         self.continuous_enabled.setEnabled(True)
         self.continuous_count.setEnabled(
             self.continuous_enabled.isChecked()

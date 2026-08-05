@@ -47,6 +47,33 @@ def test_telegram_send_photo_uses_multipart_and_caption():
     assert b"QRDATA" in captured["body"]
 
 
+def test_telegram_delete_message_targets_configured_chat_and_message():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={"ok": True, "result": True},
+        )
+
+    with TelegramNotifier(
+        TelegramConfig(
+            enabled=True,
+            bot_token=TOKEN,
+            chat_id="-1001234567890",
+        ),
+        transport=httpx.MockTransport(handler),
+    ) as notifier:
+        result = notifier.delete_message(42)
+
+    assert result["ok"] is True
+    assert captured["path"].endswith(f"/bot{TOKEN}/deleteMessage")
+    assert b"chat_id=-1001234567890" in captured["body"]
+    assert b"message_id=42" in captured["body"]
+
+
 def test_telegram_test_message_targets_configured_chat():
     captured = {}
 

@@ -35,7 +35,7 @@ class TelegramNotifier:
             timeout=timeout,
             transport=transport,
             trust_env=False,
-            headers={"User-Agent": "CTExcelApplyClient/2.5.9"},
+            headers={"User-Agent": "CTExcelApplyClient/2.5.11"},
         )
 
     def close(self) -> None:
@@ -115,5 +115,21 @@ class TelegramNotifier:
                     image,
                     "image/png",
                 )
+            },
+        )
+
+    def delete_message(self, message_id: int) -> dict:
+        """Delete a previously sent message from the configured chat."""
+        try:
+            normalized_id = int(message_id)
+        except (TypeError, ValueError) as exc:
+            raise TelegramError("Telegram 消息 ID 格式错误") from exc
+        if normalized_id <= 0:
+            raise TelegramError("Telegram 消息 ID 格式错误")
+        return self._request(
+            "deleteMessage",
+            data={
+                "chat_id": self.chat_id,
+                "message_id": str(normalized_id),
             },
         )
