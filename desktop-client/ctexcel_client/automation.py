@@ -1304,7 +1304,9 @@ class CTExcelAutomation:
 
     def _cleanup_browser_resources(self) -> None:
         """Close a partially initialized browser and remove its profile."""
-        self._delete_payment_qr("浏览器流程结束")
+        self._delete_payment_qr(
+            "用户停止" if self.stop_event.is_set() else "浏览器流程结束"
+        )
         with contextlib.suppress(Exception):
             if self.context is not None:
                 self.context.close()
@@ -2877,6 +2879,14 @@ class CTExcelAutomation:
                     if candidate.is_closed():
                         continue
                     current_url = str(candidate.url or "")
+                    if (
+                        candidate is not source_page
+                        and current_url == "about:blank"
+                    ):
+                        # A blank popup is not yet a payment page.  Wait for
+                        # it to navigate to a configured HTTPS gateway host
+                        # before inspecting or accepting its contents.
+                        continue
                     if current_url and current_url != "about:blank":
                         if not is_payment_gateway_url(current_url):
                             self.log(
