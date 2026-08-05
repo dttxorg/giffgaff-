@@ -1797,16 +1797,23 @@ class CTExcelAutomation:
             "SIM 卡配置页",
             stall_timeout_ms=PLAN_DETAILS_STALL_TIMEOUT_MS,
         )
-        page.wait_for_function(
-            """() => {
-              const text = document.body?.innerText || '';
-              return text.includes('SIM卡类型') && text.includes('自动续订');
-            }""",
-            timeout=max(
-                self._automation_wait_timeout_ms(),
-                PLAN_DETAILS_STALL_TIMEOUT_MS,
-            ),
+        sim_config_timeout_ms = max(
+            self._automation_wait_timeout_ms(),
+            PLAN_DETAILS_STALL_TIMEOUT_MS,
         )
+        try:
+            page.wait_for_function(
+                """() => {
+                  const text = document.body?.innerText || '';
+                  return text.includes('SIM卡类型') && text.includes('自动续订');
+                }""",
+                timeout=sim_config_timeout_ms,
+            )
+        except PlaywrightTimeoutError as exc:
+            raise RetryableStalledPageError(
+                "SIM 卡配置页连续 "
+                f"{sim_config_timeout_ms // 1000} 秒没有出现可操作控件"
+            ) from exc
         # “实体SIM卡”与说明文字在同一个 div 中，exact=True 会得到 0 个匹配。
         self._ensure_selected_option(
             page,
