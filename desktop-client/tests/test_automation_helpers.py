@@ -34,6 +34,7 @@ from ctexcel_client.automation import (
     payment_page_content_is_ready,
     page_progress_fingerprint,
     page_url_matches_path,
+    is_ctexcel_url,
     price_is_expected,
     proxy_browser_error_reason,
     recent_verification_code,
@@ -157,6 +158,48 @@ def test_browser_profile_is_isolated_and_automation_banner_is_removed():
     assert "response.text()" in source
     assert "PURCHASE_LIMIT_MARKERS" in source
     assert "error-{stamp}-network.txt" in source
+
+
+def test_browser_launch_failure_removes_partial_profile(monkeypatch, tmp_path):
+    class FakeChromium:
+        def launch_persistent_context(self, *_args, **_kwargs):
+            raise RuntimeError("launch failed")
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    class FakePlaywrightContext:
+        def __enter__(self):
+            return FakePlaywright()
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        automation_module,
+        "sync_playwright",
+        lambda: FakePlaywrightContext(),
+    )
+    monkeypatch.setattr(automation_module, "app_config_dir", lambda: tmp_path)
+    runner = CTExcelAutomation(
+        AppConfig(browser_channel="chromium"),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    with pytest.raises(RuntimeError, match="launch failed"):
+        runner._run_browser(
+            object(),
+            customer_id=1,
+            email="customer@example.test",
+            browser_proxy=None,
+        )
+
+    profile_root = tmp_path / "browser-runs"
+    assert not list(profile_root.glob("order-*"))
+    assert runner.profile_dir is None
+    assert runner.context is None
 
 
 def test_stale_browser_profile_cleanup_preserves_recent_runs(tmp_path: Path):
@@ -1303,6 +1346,98 @@ def test_continuous_runner_supports_ten_safe_parallel_workers():
     assert sorted(completed_ordinals) == list(range(1, 13))
 
 
+def test_parallel_completion_progress_waits_for_contiguous_ordinals():
+    completed_progress = []
+
+    class FakeAutomation:
+        def __init__(self, _config, *, batch_ordinal, **_kwargs):
+            self.ordinal = batch_ordinal
+
+        def run(self):
+            time.sleep({1: 0.06, 2: 0.03, 3: 0.0}[self.ordinal])
+            return AutomationResult(
+                customer_id=self.ordinal,
+                email=f"parallel-{self.ordinal}@example.test",
+            )
+
+        def stop(self):
+            pass
+
+    runner = CTExcelBatchAutomation(
+        AppConfig(
+            continuous_enabled=True,
+            continuous_count=3,
+            continuous_workers=3,
+            continuous_interval_seconds=0,
+        ),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+        item_started=lambda *_args: None,
+        item_completed=lambda result, progress, _total: completed_progress.append(
+            (result.customer_id, progress)
+        ),
+        automation_factory=FakeAutomation,
+    )
+
+    result = runner.run()
+
+    assert result.completed_count == 3
+    assert completed_progress[0] == (3, 0)
+    assert completed_progress[-1] == (1, 3)
+
+
+def test_batch_stop_during_session_creation_stops_without_running_session():
+    factory_ready = threading.Event()
+    release_factory = threading.Event()
+    events = []
+
+    class FakeAutomation:
+        def __init__(self, _config, **_kwargs):
+            factory_ready.set()
+            release_factory.wait(2)
+
+        def run(self):
+            events.append("run")
+            return AutomationResult(customer_id=1, email="stop@example.test")
+
+        def stop(self):
+            events.append("stop")
+
+    runner = CTExcelBatchAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+        item_started=lambda *_args: None,
+        item_completed=lambda *_args: None,
+        automation_factory=FakeAutomation,
+    )
+    outcome = []
+
+    def invoke():
+        try:
+            runner._run_item(
+                ordinal=1,
+                total=1,
+                worker_slot=1,
+                reuse_pending_customer=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - test boundary
+            outcome.append(exc)
+
+    thread = threading.Thread(target=invoke)
+    thread.start()
+    assert factory_ready.wait(2)
+    runner.stop()
+    release_factory.set()
+    thread.join(2)
+
+    assert outcome and isinstance(outcome[0], AutomationError)
+    assert "run" not in events
+    assert events == ["stop"]
+
+
 def test_batch_assigns_distinct_unpaid_customers_before_creating_new(
     monkeypatch,
 ):
@@ -1666,6 +1801,18 @@ def test_progress_fingerprint_and_url_match_ignore_query_noise():
         first["url"],
         "/freecard/activityPagefillInfos",
     )
+    assert page_url_matches_path(
+        "https://www.ctexcel.com/uk/buycard/simcarddetails/1",
+        "/buycard/simcarddetails",
+    )
+    assert not page_url_matches_path(
+        "https://www.ctexcel.com/uk/buycard/simcarddetails-old/1",
+        "/buycard/simcarddetails",
+    )
+    assert is_ctexcel_url("https://www.ctexcel.com/uk/tariffQuery/0")
+    assert is_ctexcel_url("https://ctexcel.com/freecard/home")
+    assert not is_ctexcel_url("http://www.ctexcel.com/uk/tariffQuery/0")
+    assert not is_ctexcel_url("https://example.test/uk/tariffQuery/0")
 
 
 def test_next_click_timeout_continues_when_destination_url_already_loaded(
@@ -1673,7 +1820,7 @@ def test_next_click_timeout_continues_when_destination_url_already_loaded(
 ):
     class FakePage:
         def __init__(self):
-            self.url = "https://example.test/freecard/config"
+            self.url = "https://www.ctexcel.com/freecard/config"
             self.context = SimpleNamespace(pages=[self])
 
         def get_by_role(self, *_args, **_kwargs):
@@ -1692,7 +1839,7 @@ def test_next_click_timeout_continues_when_destination_url_already_loaded(
 
         def click(self, **_kwargs):
             page.url = (
-                "https://example.test/freecard/activityPagefillInfos"
+                "https://www.ctexcel.com/freecard/activityPagefillInfos"
             )
             raise automation_module.PlaywrightTimeoutError("click timeout")
 
@@ -1768,6 +1915,62 @@ def test_transition_accepts_form_marker_when_url_has_not_updated(monkeypatch):
     assert any("目标表单已出现" in item for item in messages)
 
 
+def test_select_plan_accepts_detail_dom_without_waiting_for_navigation(
+    monkeypatch,
+):
+    calls = []
+
+    class FakePage:
+        url = "https://www.ctexcel.com/uk/tariffQuery/0"
+
+        def evaluate(self, script):
+            calls.append(script)
+            return True
+
+        def wait_for_url(self, *_args, **_kwargs):
+            raise AssertionError(
+                "套餐选择应通过页面状态检测，不应阻塞等待 URL"
+            )
+
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_open_registration_entry",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_dismiss_cookie_consent",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_for_page_ready",
+        lambda *_args, **_kwargs: None,
+    )
+    transition = {}
+
+    def fake_transition(_page, **kwargs):
+        transition.update(kwargs)
+
+    monkeypatch.setattr(runner, "_wait_for_page_transition", fake_transition)
+
+    runner._select_plan(FakePage())
+
+    assert calls == [automation_module.SELECT_50GB_PLAN_SCRIPT]
+    assert transition["expected_path"] == "/buycard/simcarddetails"
+    assert transition["ready_script"] == automation_module.PLAN_DETAILS_READY_SCRIPT
+    assert transition["stall_timeout_ms"] == (
+        automation_module.PLAN_DETAILS_STALL_TIMEOUT_MS
+    )
+    assert transition.get("retry_action") is None
+
+
 def test_transition_retries_once_when_first_click_has_no_effect(monkeypatch):
     clock = {"value": 0.0}
 
@@ -1840,6 +2043,114 @@ def test_transition_retries_once_when_first_click_has_no_effect(monkeypatch):
 
     assert locator.retry_count == 1
     assert any("自动重试一次" in item for item in messages)
+
+
+def test_transition_propagates_retry_automation_errors(monkeypatch):
+    clock = {"value": 0.0}
+
+    class FakePage:
+        url = "https://example.test/freecard/config"
+        context = SimpleNamespace(pages=[])
+
+        def evaluate(self, script):
+            if script == "FORM_READY":
+                return False
+            return {
+                "url": self.url,
+                "ready_state": "complete",
+                "loading": False,
+                "text_signature": "same",
+                "field_signature": "same",
+                "visible_content": 3,
+                "field_count": 0,
+            }
+
+        def is_closed(self):
+            return False
+
+    runner = CTExcelAutomation(
+        AppConfig(page_timeout_ms=120000),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_interruptibly",
+        lambda seconds: clock.__setitem__(
+            "value", clock["value"] + seconds
+        ),
+    )
+
+    def failed_retry():
+        raise AutomationError("套餐按钮已离开当前页面")
+
+    with pytest.raises(AutomationError, match="套餐按钮"):
+        runner._wait_for_page_transition(
+            FakePage(),
+            label="套餐详情",
+            expected_path="/buycard/simcarddetails",
+            ready_script="FORM_READY",
+            retry_action=failed_retry,
+        )
+
+
+def test_transition_accepts_slow_detail_dom_with_extended_idle_budget(monkeypatch):
+    clock = {"value": 0.0}
+
+    class FakePage:
+        url = "https://www.ctexcel.com/uk/tariffQuery/0"
+        context = SimpleNamespace(pages=[])
+
+        def evaluate(self, script):
+            if script == "PLAN_DETAILS_READY":
+                return clock["value"] >= 30.0
+            return {
+                "url": self.url,
+                "ready_state": "interactive",
+                "loading": False,
+                "text_signature": "unchanged",
+                "field_signature": "none",
+                "visible_content": 5,
+                "field_count": 0,
+            }
+
+        def is_closed(self):
+            return False
+
+    runner = CTExcelAutomation(
+        AppConfig(page_timeout_ms=120000),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_interruptibly",
+        lambda seconds: clock.__setitem__(
+            "value", clock["value"] + seconds
+        ),
+    )
+
+    runner._wait_for_page_transition(
+        FakePage(),
+        label="套餐详情",
+        expected_path="/buycard/simcarddetails",
+        ready_script="PLAN_DETAILS_READY",
+        stall_timeout_ms=45_000,
+    )
+
+    assert clock["value"] >= 30.0
 
 
 def test_transition_can_exceed_twenty_seconds_while_dom_keeps_progressing(

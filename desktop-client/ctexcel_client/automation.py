@@ -63,6 +63,10 @@ PAGE_READY_STABLE_SECONDS = 0.35
 PAGE_PROGRESS_POLL_SECONDS = 0.2
 PAGE_CLICK_RETRY_SECONDS = 2.0
 PAGE_CLICK_TIMEOUT_MS = 5_000
+# The CTExcel plan page can acknowledge a click before its SPA route and
+# detail DOM settle.  Keep that transition on a wider idle budget so three
+# independent browsers do not mistake a slow response for a dead page.
+PLAN_DETAILS_STALL_TIMEOUT_MS = 45_000
 PAYMENT_TERMS_BIND_TIMEOUT_MS = 1_500
 VERIFICATION_CODE_CACHE_SECONDS = 180
 VERIFICATION_FEEDBACK_TIMEOUT_SECONDS = 5.0
@@ -78,6 +82,52 @@ PURCHASE_LIMIT_MARKERS = (
     "超出限额",
     "达到上限",
 )
+CTEXCEL_ALLOWED_HOSTS = frozenset({"ctexcel.com", "www.ctexcel.com"})
+
+SELECT_50GB_PLAN_SCRIPT = r"""() => {
+  const norm = value => String(value || '').replace(/\s+/g, '');
+  const nodes = Array.from(document.querySelectorAll('*'));
+  const anchors = nodes.filter(el =>
+    el.children.length === 0 && norm(el.textContent) === '50GB'
+  );
+  for (const anchor of anchors) {
+    let card = anchor;
+    for (
+      let depth = 0;
+      depth < 9 && card;
+      depth += 1, card = card.parentElement
+    ) {
+      const text = norm(card.innerText);
+      if (!text.includes('£11.9/30天') || !text.includes('立即订购')) {
+        continue;
+      }
+      const target = Array.from(card.querySelectorAll('*')).find(el =>
+        norm(el.textContent) === '立即订购'
+      );
+      if (target) {
+        target.click();
+        return true;
+      }
+    }
+  }
+  return false;
+}"""
+
+PLAN_DETAILS_READY_SCRIPT = r"""() => {
+  const detail = document.querySelector('.simcarddetails');
+  if (!detail) return false;
+  const text = String(detail.innerText || '').replace(/\s+/g, '');
+  const hasNext = Array.from(
+    detail.querySelectorAll('button,[role="button"]')
+  ).some(button =>
+    String(button.innerText || button.textContent || '')
+      .replace(/\s+/g, '') === '下一步'
+  );
+  return text.includes('SIM卡信息')
+    && text.includes('已选套餐')
+    && text.includes('50GB')
+    && hasNext;
+}"""
 PROXY_BROWSER_RETRY_ATTEMPTS = 3
 PROXY_BROWSER_ERROR_LABELS = (
     ("proxy authentication required", "HTTP ERROR 407（代理认证失败）"),
@@ -188,6 +238,18 @@ def page_progress_fingerprint(snapshot: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def is_ctexcel_url(value: Any) -> bool:
+    """Require HTTPS and the official CTExcel host for browser entry pages."""
+    try:
+        parsed = urlsplit(str(value or ""))
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() in CTEXCEL_ALLOWED_HOSTS
+    )
+
+
 def page_url_matches_path(value: Any, expected_path: str) -> bool:
     """Match a SPA destination without depending on query parameters."""
     try:
@@ -195,7 +257,21 @@ def page_url_matches_path(value: Any, expected_path: str) -> bool:
     except ValueError:
         return False
     expected = str(expected_path or "").rstrip("/").lower()
-    return bool(expected) and actual.endswith(expected)
+    if not expected:
+        return False
+    actual_parts = actual.strip("/").split("/") if actual.strip("/") else []
+    expected_parts = (
+        expected.strip("/").split("/")
+        if expected.strip("/")
+        else []
+    )
+    if not expected_parts or len(expected_parts) > len(actual_parts):
+        return False
+    width = len(expected_parts)
+    return any(
+        actual_parts[index : index + width] == expected_parts
+        for index in range(len(actual_parts) - width + 1)
+    )
 
 
 def tunnel_browser_start_delay(worker_slot: int) -> int:
@@ -703,6 +779,7 @@ class CTExcelAutomation:
             raise AutomationError("用户已停止当前流程")
 
     def run(self) -> AutomationResult:
+        self._check_stop()
         self._validate_registration_defaults()
         route = BrowserProxyRoute(proxy=None)
         leased_customer_id: Optional[int] = None
@@ -1065,38 +1142,42 @@ class CTExcelAutomation:
                 launch_options["channel"] = channel
             if browser_proxy:
                 launch_options["proxy"] = browser_proxy
-            proxy_mode = self.config.proxy.mode.strip().lower()
-            if synchronize_start and proxy_mode == "tunnel":
-                stagger_seconds = tunnel_browser_start_delay(
-                    self.worker_slot
-                )
-                if stagger_seconds:
-                    self.stage("隧道浏览器错峰启动")
-                    self.log(
-                        f"共享隧道线程在建立浏览器前错峰 "
-                        f"{stagger_seconds} 秒，不消耗已建立连接的寿命"
+            try:
+                proxy_mode = self.config.proxy.mode.strip().lower()
+                if synchronize_start and proxy_mode == "tunnel":
+                    stagger_seconds = tunnel_browser_start_delay(
+                        self.worker_slot
                     )
-                    self._wait_interruptibly(stagger_seconds)
-            self.context = playwright.chromium.launch_persistent_context(
-                str(self.profile_dir),
-                **launch_options,
-            )
-            with contextlib.suppress(Exception):
-                self.context.clear_cookies()
-            self.context.add_init_script(
-                """
-                Object.defineProperty(
-                  Navigator.prototype,
-                  'webdriver',
-                  {get: () => undefined, configurable: true}
-                );
-                """
-            )
-            self.context.add_init_script(COOKIE_CONSENT_WATCHER_SCRIPT)
-            self.log(
-                "已启用浏览器兼容模式：每单使用独立临时配置，"
-                "并移除 Chrome/Edge 的自动测试标记"
-            )
+                    if stagger_seconds:
+                        self.stage("隧道浏览器错峰启动")
+                        self.log(
+                            f"共享隧道线程在建立浏览器前错峰 "
+                            f"{stagger_seconds} 秒，不消耗已建立连接的寿命"
+                        )
+                        self._wait_interruptibly(stagger_seconds)
+                self.context = playwright.chromium.launch_persistent_context(
+                    str(self.profile_dir),
+                    **launch_options,
+                )
+                with contextlib.suppress(Exception):
+                    self.context.clear_cookies()
+                self.context.add_init_script(
+                    """
+                    Object.defineProperty(
+                      Navigator.prototype,
+                      'webdriver',
+                      {get: () => undefined, configurable: true}
+                    );
+                    """
+                )
+                self.context.add_init_script(COOKIE_CONSENT_WATCHER_SCRIPT)
+                self.log(
+                    "已启用浏览器兼容模式：每单使用独立临时配置，"
+                    "并移除 Chrome/Edge 的自动测试标记"
+                )
+            except BaseException:
+                self._cleanup_browser_resources()
+                raise
             page: Optional[Page] = None
             try:
                 page = self.context.pages[0] if self.context.pages else self.context.new_page()
@@ -1188,15 +1269,18 @@ class CTExcelAutomation:
                     browser_proxy=browser_proxy,
                 )
             finally:
-                with contextlib.suppress(Exception):
-                    self.context.close()
-                self.context = None
-                if self.profile_dir:
-                    if not remove_browser_profile(self.profile_dir):
-                        self.log(
-                            "浏览器目录仍被系统占用；下次启动会自动清理"
-                        )
-                self.profile_dir = None
+                self._cleanup_browser_resources()
+
+    def _cleanup_browser_resources(self) -> None:
+        """Close a partially initialized browser and remove its profile."""
+        with contextlib.suppress(Exception):
+            if self.context is not None:
+                self.context.close()
+        self.context = None
+        if self.profile_dir:
+            if not remove_browser_profile(self.profile_dir):
+                self.log("浏览器目录仍被系统占用；下次启动会自动清理")
+        self.profile_dir = None
 
     def _handle_browser_failure(
         self,
@@ -1332,7 +1416,10 @@ class CTExcelAutomation:
         current_url = ""
         with contextlib.suppress(Exception):
             current_url = str(page.url or "")
-        if page_url_matches_path(current_url, expected_path):
+        if (
+            is_ctexcel_url(current_url)
+            and page_url_matches_path(current_url, expected_path)
+        ):
             return True, "目标网址已出现"
         with contextlib.suppress(Exception):
             if bool(page.evaluate(ready_script)):
@@ -1347,9 +1434,15 @@ class CTExcelAutomation:
         expected_path: str,
         ready_script: str,
         retry_action: Optional[Callable[[], None]] = None,
+        stall_timeout_ms: Optional[int] = None,
     ) -> None:
-        """Wait until the target appears; only 20 seconds of true idleness fails."""
-        stall_seconds = AUTOMATION_STALL_TIMEOUT_MS / 1000
+        """Wait for a route/DOM target; the default idle budget is 20 seconds."""
+        stall_ms = (
+            AUTOMATION_STALL_TIMEOUT_MS
+            if stall_timeout_ms is None
+            else max(1_000, int(stall_timeout_ms))
+        )
+        stall_seconds = stall_ms / 1000
         total_seconds = max(
             stall_seconds,
             max(1_000, int(self.config.page_timeout_ms)) / 1000,
@@ -1401,12 +1494,23 @@ class CTExcelAutomation:
                 self.log("首次点击未产生页面变化，自动重试一次")
                 try:
                     retry_action()
+                except AutomationError:
+                    raise
                 except Exception as exc:
                     self.log(f"点击重试未返回：{type(exc).__name__}: {exc}")
                 last_progress_at = time.monotonic()
             if now - last_progress_at >= stall_seconds:
+                if stall_ms == AUTOMATION_STALL_TIMEOUT_MS:
+                    message = (
+                        f"{label}连续 20 秒没有 URL、Loading 或表单变化"
+                    )
+                else:
+                    message = (
+                        f"{label}连续 {int(stall_seconds)} 秒没有 URL、"
+                        "Loading 或表单变化"
+                    )
                 raise RetryableStalledPageError(
-                    f"{label}连续 20 秒没有 URL、Loading 或表单变化"
+                    message
                 )
             self._wait_interruptibly(PAGE_PROGRESS_POLL_SECONDS)
         raise RetryableStalledPageError(
@@ -1422,6 +1526,10 @@ class CTExcelAutomation:
         ready_script: str,
     ) -> None:
         """Open an entry page and require useful content within 30 seconds."""
+        if not is_ctexcel_url(url):
+            raise AutomationError(
+                "CTExcel 申请入口必须使用 https://www.ctexcel.com 域名"
+            )
         timeout_ms = self._browser_startup_timeout_ms()
         timeout_seconds = max(1, timeout_ms // 1000)
         started = time.monotonic()
@@ -1550,7 +1658,10 @@ class CTExcelAutomation:
         """保存错误现场，并在可视模式下短暂保留浏览器供人工检查。"""
         diagnostics = Path(app_config_dir()) / "diagnostics"
         diagnostics.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
+        stamp = (
+            f"{time.strftime('%Y%m%d-%H%M%S')}-"
+            f"w{self.worker_slot}-{uuid.uuid4().hex[:8]}"
+        )
         screenshot_path = diagnostics / f"error-{stamp}.png"
         html_path = diagnostics / f"error-{stamp}.html"
         network_path = diagnostics / f"error-{stamp}-network.txt"
@@ -1654,49 +1765,47 @@ class CTExcelAutomation:
         )
         self._dismiss_cookie_consent(page)
         self._wait_for_page_ready(page, "套餐列表")
-        selected = page.evaluate(
-            """() => {
-              const norm = value => String(value || '').replace(/\\s+/g, '');
-              const nodes = Array.from(document.querySelectorAll('*'));
-              const anchors = nodes.filter(el =>
-                el.children.length === 0 && norm(el.textContent) === '50GB'
-              );
-              for (const anchor of anchors) {
-                let card = anchor;
-                for (let depth = 0; depth < 9 && card; depth += 1, card = card.parentElement) {
-                  const text = norm(card.innerText);
-                  if (!text.includes('£11.9/30天') || !text.includes('立即订购')) continue;
-                  const target = Array.from(card.querySelectorAll('*')).find(el =>
-                    norm(el.textContent) === '立即订购'
-                  );
-                  if (target) {
-                    target.click();
-                    return true;
-                  }
-                }
-              }
-              return false;
-            }"""
-        )
+        selected = page.evaluate(SELECT_50GB_PLAN_SCRIPT)
         if not selected:
             raise AutomationError("没有定位到 50GB / £11.9 套餐的立即订购按钮")
-        page.wait_for_url(
-            "**/buycard/simcarddetails/**",
-            timeout=self._automation_wait_timeout_ms(),
+
+        self.log("50GB / £11.9 套餐按钮点击已提交，等待套餐详情")
+
+        # This is a SPA transition: the route can lag behind the rendered
+        # detail DOM, especially while three browser contexts share a link.
+        # Accept the route or the specific detail DOM; a second purchase click
+        # is deliberately avoided while the first navigation may be in flight.
+        self._wait_for_page_transition(
+            page,
+            label="套餐详情",
+            expected_path="/buycard/simcarddetails",
+            ready_script=PLAN_DETAILS_READY_SCRIPT,
+            stall_timeout_ms=PLAN_DETAILS_STALL_TIMEOUT_MS,
         )
-        self._wait_for_page_ready(page, "套餐详情")
+        self._wait_for_page_ready(
+            page,
+            "套餐详情",
+            stall_timeout_ms=PLAN_DETAILS_STALL_TIMEOUT_MS,
+        )
         self.log("已选择 50GB、£11.9/30天套餐")
 
     def _configure_sim(self, page: Page) -> None:
         self.stage("配置 SIM / 套餐")
         self._dismiss_cookie_consent(page)
-        self._wait_for_page_ready(page, "SIM 卡配置页")
+        self._wait_for_page_ready(
+            page,
+            "SIM 卡配置页",
+            stall_timeout_ms=PLAN_DETAILS_STALL_TIMEOUT_MS,
+        )
         page.wait_for_function(
             """() => {
               const text = document.body?.innerText || '';
               return text.includes('SIM卡类型') && text.includes('自动续订');
             }""",
-            timeout=self._automation_wait_timeout_ms(),
+            timeout=max(
+                self._automation_wait_timeout_ms(),
+                PLAN_DETAILS_STALL_TIMEOUT_MS,
+            ),
         )
         # “实体SIM卡”与说明文字在同一个 div 中，exact=True 会得到 0 个匹配。
         self._ensure_selected_option(
@@ -2200,9 +2309,15 @@ class CTExcelAutomation:
         label: str,
         *,
         stable_seconds: float = PAGE_READY_STABLE_SECONDS,
+        stall_timeout_ms: Optional[int] = None,
     ) -> None:
-        """等待 Loading 消失；DOM 有进度时重置 20 秒空闲计时。"""
-        stall_seconds = AUTOMATION_STALL_TIMEOUT_MS / 1000
+        """等待 Loading 消失；DOM 有进度时重置默认 20 秒空闲计时。"""
+        stall_ms = (
+            AUTOMATION_STALL_TIMEOUT_MS
+            if stall_timeout_ms is None
+            else max(1_000, int(stall_timeout_ms))
+        )
+        stall_seconds = stall_ms / 1000
         total_seconds = max(
             stall_seconds,
             max(1_000, int(self.config.page_timeout_ms)) / 1000,
@@ -2256,8 +2371,17 @@ class CTExcelAutomation:
                         self.log(f"页面加载完成：{label}")
                     return
             if now - last_progress_at >= stall_seconds:
+                if stall_ms == AUTOMATION_STALL_TIMEOUT_MS:
+                    message = (
+                        f"{label} 连续 20 秒没有 URL、Loading 或 DOM 变化"
+                    )
+                else:
+                    message = (
+                        f"{label} 连续 {int(stall_seconds)} 秒没有 URL、"
+                        "Loading 或 DOM 变化"
+                    )
                 raise RetryableStalledPageError(
-                    f"{label} 连续 20 秒没有 URL、Loading 或 DOM 变化"
+                    message
                 )
             self._wait_interruptibly(0.1)
         raise RetryableStalledPageError(
@@ -2921,6 +3045,17 @@ class CTExcelBatchAutomation:
         self.resume_customer_ids_by_ordinal: dict[int, int] = {}
         self.resume_assignment_supported = False
         self.legacy_api_serial_required = False
+        self.completed_ordinals: set[int] = set()
+
+    def _set_completed_ordinals(self, completed: int) -> None:
+        self.completed_ordinals = set(range(1, max(0, int(completed)) + 1))
+
+    def _mark_completed_ordinal(self, ordinal: int) -> int:
+        self.completed_ordinals.add(max(1, int(ordinal)))
+        completed = 0
+        while completed + 1 in self.completed_ordinals:
+            completed += 1
+        return completed
 
     def _prepare_resume_customer_ids(
         self,
@@ -3101,11 +3236,22 @@ class CTExcelBatchAutomation:
             browser_start_barrier=browser_start_barrier,
             batch_ordinal=ordinal,
         )
+        if self.stop_event.is_set():
+            with contextlib.suppress(Exception):
+                session.stop()
+            raise AutomationError("用户已停止连续申请")
         with self.sessions_lock:
+            if self.stop_event.is_set():
+                with contextlib.suppress(Exception):
+                    session.stop()
+                raise AutomationError("用户已停止连续申请")
             self.sessions[worker_slot] = session
         if worker_slot == 1:
             self.session = session
         try:
+            if self.stop_event.is_set():
+                session.stop()
+                raise AutomationError("用户已停止连续申请")
             result = session.run()
             result.batch_ordinal = ordinal
             result.worker_slot = worker_slot
@@ -3142,7 +3288,7 @@ class CTExcelBatchAutomation:
                 ),
                 resume_customer_id=resume_customer_id,
             )
-            completed += 1
+            completed = self._mark_completed_ordinal(ordinal)
             self.item_completed(last_result, completed, total)
             if completed >= total:
                 break
@@ -3246,7 +3392,7 @@ class CTExcelBatchAutomation:
                         for pending in futures:
                             pending.cancel()
                         raise
-                    completed += 1
+                    completed = self._mark_completed_ordinal(ordinal)
                     self.item_completed(
                         last_result,
                         completed,
@@ -3267,7 +3413,7 @@ class CTExcelBatchAutomation:
                         available_slots.append(slot)
 
         return AutomationBatchResult(
-            completed_count=completed,
+            completed_count=self._mark_completed_ordinal(total),
             total_count=total,
             last_result=last_result,
         )
@@ -3279,6 +3425,7 @@ class CTExcelBatchAutomation:
         if defaults.contact_phone.strip() and defaults.chinese_address.strip():
             registration_values_for_ordinal(defaults, total)
         completed = min(self.completed_before, total)
+        self._set_completed_ordinals(completed)
         if completed >= total:
             return AutomationBatchResult(
                 completed_count=completed,

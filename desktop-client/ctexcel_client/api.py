@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -90,7 +91,16 @@ class AdminApi:
     def _url(self, path: str) -> str:
         if not self.server_url:
             raise ApiError("请填写服务器地址")
-        if not self.server_url.startswith(("https://", "http://")):
+        try:
+            parsed = urlsplit(self.server_url)
+        except ValueError as exc:
+            raise ApiError("服务器地址需要以 https:// 开头") from exc
+        local_http = (
+            parsed.scheme == "http"
+            and (parsed.hostname or "").lower()
+            in {"localhost", "127.0.0.1", "::1"}
+        )
+        if parsed.scheme != "https" and not local_http:
             raise ApiError("服务器地址需要以 https:// 开头")
         return f"{self.server_url}{path}"
 

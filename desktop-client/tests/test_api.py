@@ -205,6 +205,37 @@ def test_client_api_reports_missing_server_endpoint():
     assert message == "服务器尚未启用 CTExcel 客户端 API"
 
 
+def test_client_api_rejects_plain_http_except_loopback():
+    with AdminApi(
+        "http://manager.example.test",
+        "app-secret",
+        retry_delays=(),
+    ) as api:
+        try:
+            api.connect()
+        except ApiError as exc:
+            assert str(exc) == "服务器地址需要以 https:// 开头"
+        else:
+            raise AssertionError("expected insecure server URL to be rejected")
+
+    with AdminApi(
+        "http://127.0.0.1:8000",
+        "app-secret",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "api_version": 8,
+                    "ctexcel_customer_count": 0,
+                    "pending_customer_count": 0,
+                },
+            )
+        ),
+    ) as api:
+        assert api.connect()["ok"] is True
+
+
 def test_client_api_retries_cloudflare_5xx_before_creating_customer():
     attempts = []
     messages = []
