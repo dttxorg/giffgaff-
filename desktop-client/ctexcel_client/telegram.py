@@ -112,7 +112,7 @@ class TelegramNotifier:
             },
             files={
                 "photo": (
-                    "ctexcel-wechat-payment.png",
+                    "ctexcel-payment.png",
                     image,
                     "image/png",
                 )

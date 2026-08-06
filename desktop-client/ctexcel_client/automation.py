@@ -88,7 +88,12 @@ PURCHASE_LIMIT_MARKERS = (
     "达到上限",
 )
 CTEXCEL_ALLOWED_HOSTS = frozenset({"ctexcel.com", "www.ctexcel.com"})
-PAYMENT_GATEWAY_HOSTS = frozenset({"na.gateway.spring.citi.com"})
+PAYMENT_GATEWAY_HOSTS = frozenset({
+    "na.gateway.spring.citi.com",
+    # Citi's Alipay hand-off uses this HTTPS redirect host before rendering
+    # the QR document.  It is part of the configured payment allow-list.
+    "redirect-euw1.ppro.com",
+})
 
 SELECT_50GB_PLAN_SCRIPT = r"""() => {
   const norm = value => String(value || '').replace(/\s+/g, '');
@@ -521,8 +526,8 @@ ALIPAY_QR_READY_SCRIPT = r"""() => {
     return style.display !== 'none'
       && style.visibility !== 'hidden'
       && Number(style.opacity || 1) > 0
-      && rect.width >= 120
-      && rect.height >= 120
+      && rect.width >= 64
+      && rect.height >= 64
       && rect.width / rect.height >= 0.7
       && rect.width / rect.height <= 1.45;
   };
@@ -1702,13 +1707,12 @@ class CTExcelAutomation:
                     api=api,
                     customer_id=customer_id,
                 )
-                if pending.get("payment_method") == PAYMENT_METHOD_WECHAT:
-                    self._push_payment_qr(
-                        page,
-                        customer_id=customer_id,
-                        email=email,
-                        pending_order=pending,
-                    )
+                self._push_payment_qr(
+                    page,
+                    customer_id=customer_id,
+                    email=email,
+                    pending_order=pending,
+                )
                 result = self._wait_for_payment_success(
                     page,
                     api=api,
@@ -3910,8 +3914,8 @@ class CTExcelAutomation:
                             width = float(box.get("width") or 0)
                             height = float(box.get("height") or 0)
                             if (
-                                width < 120
-                                or height < 120
+                                width < 64
+                                or height < 64
                                 or width > 900
                                 or height > 900
                             ):
@@ -3966,6 +3970,7 @@ class CTExcelAutomation:
         pending_order: dict[str, str],
     ) -> None:
         if not self.config.telegram.enabled:
+            self.log("Telegram 付款二维码推送未启用，已跳过发送")
             return
         try:
             image = self._capture_payment_qr(page)
@@ -3975,8 +3980,14 @@ class CTExcelAutomation:
             amount = str(
                 pending_order.get("transaction_amount") or ""
             ).strip()
+            payment_method = str(
+                pending_order.get("payment_method") or PAYMENT_METHOD_WECHAT
+            ).strip().lower()
+            payment_label = (
+                "支付宝" if payment_method == PAYMENT_METHOD_ALIPAY else "微信"
+            )
             caption = (
-                f"CTExcel 微信付款 · 线程 {self.worker_slot}\n"
+                f"CTExcel {payment_label}付款 · 线程 {self.worker_slot}\n"
                 f"客户：#{customer_id}\n"
                 f"邮箱：{email}\n"
                 f"订单：{order_number}\n"
@@ -3997,7 +4008,7 @@ class CTExcelAutomation:
                 raise TelegramError("Telegram 返回中没有有效的二维码消息 ID")
             self.payment_qr_message_id = normalized_message_id
             self.log(
-                "微信付款二维码已通过直连发送到 Telegram："
+                f"{payment_label}付款二维码已通过直连发送到 Telegram："
                 f"{order_number}"
             )
         except TelegramError as exc:

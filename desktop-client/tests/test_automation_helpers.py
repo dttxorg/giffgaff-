@@ -184,6 +184,9 @@ def test_payment_gateway_url_allows_only_https_configured_hosts():
     assert is_payment_gateway_url(
         "https://na.gateway.spring.citi.com/checkout"
     )
+    assert is_payment_gateway_url(
+        "https://redirect-euw1.ppro.com/payment/SESSION"
+    )
     assert is_payment_gateway_url("https://pay.alipay.com/gateway")
     assert not is_payment_gateway_url("http://na.gateway.spring.citi.com/checkout")
     assert not is_payment_gateway_url("https://evil.example.test/payment")
@@ -276,6 +279,7 @@ def test_payment_qr_message_id_is_saved_and_deleted(monkeypatch):
         pending_order={
             "order_number": "ORDERSUK2026073106180627794025",
             "transaction_amount": "1.00",
+            "payment_method": PAYMENT_METHOD_ALIPAY,
         },
     )
 
@@ -283,7 +287,20 @@ def test_payment_qr_message_id_is_saved_and_deleted(monkeypatch):
     runner._delete_payment_qr("测试清理")
     assert runner.payment_qr_message_id is None
     assert calls[0][0] == "send"
+    assert "支付宝" in calls[0][1]
     assert calls[1] == ("delete", 73)
+
+
+def test_alipay_qr_capture_uses_small_codes_without_a_long_fallback_wait():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ctexcel_client"
+        / "automation.py"
+    ).read_text(encoding="utf-8")
+
+    assert "rect.width >= 64" in source
+    assert "height < 64" in source
+    assert "PAYMENT_METHOD_ALIPAY" in source
 
 
 def test_payment_timeout_deletes_qr_but_keeps_page_until_success(monkeypatch):
@@ -982,6 +999,28 @@ def test_alipay_qr_wait_accepts_alipay_navigation_inside_frame():
 
         def is_closed(self):
             return False
+
+    runner = CTExcelAutomation(
+        AppConfig(payment_method=PAYMENT_METHOD_ALIPAY),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    assert runner._wait_for_alipay_qr_page(FakePage()).url.endswith("SESSION")
+
+
+def test_alipay_qr_wait_accepts_ppro_redirect_qr_page():
+    class FakePage:
+        url = "https://redirect-euw1.ppro.com/payment/SESSION"
+
+        def is_closed(self):
+            return False
+
+        def evaluate(self, script, *_args):
+            if "scanqrcode" in script:
+                return True
+            raise AssertionError("only QR readiness should be evaluated")
 
     runner = CTExcelAutomation(
         AppConfig(payment_method=PAYMENT_METHOD_ALIPAY),
