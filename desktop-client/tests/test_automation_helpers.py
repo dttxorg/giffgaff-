@@ -409,7 +409,9 @@ def test_qr_visual_score_distinguishes_black_white_modules_from_gray_guide():
     assert guide_score == 0.0
 
 
-def test_alipay_qr_capture_sends_full_page_when_only_guide_is_detected():
+def test_alipay_qr_capture_sends_full_page_when_only_guide_is_detected(
+    monkeypatch,
+):
     class FakeCandidate:
         def is_visible(self):
             return True
@@ -453,8 +455,90 @@ def test_alipay_qr_capture_sends_full_page_when_only_guide_is_detected():
         stage=lambda _stage: None,
         customer_created=lambda _payload: None,
     )
+    clock = {"value": 0.0}
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_interruptibly",
+        lambda seconds: clock.__setitem__("value", clock["value"] + 31),
+    )
 
     assert runner._capture_payment_qr(FakePage()) == b"FULL-PAYMENT-PAGE"
+
+
+def test_alipay_qr_capture_waits_for_placeholder_to_become_qr(monkeypatch):
+    state = {"ready": False, "full_page_calls": 0, "waits": 0}
+
+    class FakeCandidate:
+        def is_visible(self):
+            return True
+
+        def bounding_box(self):
+            return {"width": 180, "height": 180}
+
+        def evaluate(self, _script):
+            return {
+                "marker": "qr-code",
+                "context": "",
+                "tag": "canvas",
+                "descendants": 0,
+            }
+
+        def screenshot(self, **_kwargs):
+            return b"QR" if state["ready"] else b"PLACEHOLDER"
+
+    class FakeCandidateList:
+        def count(self):
+            return 1
+
+        def nth(self, _index):
+            return FakeCandidate()
+
+    class FakePage:
+        url = "https://pay.alipay.com/gateway"
+        frames = ()
+
+        def locator(self, selector):
+            if selector == "body":
+                return SimpleNamespace(inner_text=lambda **_kwargs: "支付宝")
+            return FakeCandidateList()
+
+        def screenshot(self, **_kwargs):
+            state["full_page_calls"] += 1
+            return b"FULL-PAYMENT-PAGE"
+
+    clock = {"value": 0.0}
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_qr_visual_score",
+        lambda image: 1.0 if image == b"QR" else 0.0,
+    )
+
+    def wait(seconds):
+        state["waits"] += 1
+        state["ready"] = True
+        clock["value"] += seconds
+
+    monkeypatch.setattr(runner, "_wait_interruptibly", wait)
+
+    assert runner._capture_payment_qr(FakePage()) == b"QR"
+    assert state["waits"] == 1
+    assert state["full_page_calls"] == 0
 
 
 def test_payment_timeout_deletes_qr_but_keeps_page_until_success(monkeypatch):
