@@ -448,6 +448,9 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     with Image.open(BytesIO(base64.b64decode(profile_image))) as decoded:
         assert decoded.format == "WEBP"
         assert decoded.size == (800, 382)
+    assert "04 / SIM CARD ID" in body
+    assert "05 / CHINA ROAMING" in body
+    assert "06 / NUMBER PORTING" in body
     assert "请保存好 ICCID" in body
     assert "申请补卡时需要使用它" in body
     assert "重要提醒：现在拍照并保存 ICCID" in body
