@@ -420,7 +420,7 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "11000002"
+    assert response.headers["X-Cache-Version"] == "12000002"
     body = response.text
     assert "CTExcel 已激活号码资料" in body
     assert "07942946765" in body
@@ -448,6 +448,20 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     with Image.open(BytesIO(base64.b64decode(profile_image))) as decoded:
         assert decoded.format == "WEBP"
         assert decoded.size == (800, 382)
+    assert "请保存好 ICCID" in body
+    assert "申请补卡时需要使用它" in body
+    assert "重要提醒：现在拍照并保存 ICCID" in body
+    assert 'aria-label="ICCID 补卡重要提醒"' in body
+    assert 'class="iccid-media"' in body
+    assert 'width="600" height="379"' in body
+    iccid_image = body.split(
+        '<div class="iccid-media"><img src="data:image/png;base64,', 1
+    )[1].split('" width="600" height="379"', 1)[0]
+    with Image.open(BytesIO(base64.b64decode(iccid_image))) as decoded:
+        decoded.verify()
+    with Image.open(BytesIO(base64.b64decode(iccid_image))) as decoded:
+        assert decoded.format == "PNG"
+        assert decoded.size == (600, 379)
     assert "到手即可用" in body
     assert "重要提醒：不要接听任何电话" in body
     assert "CTExcel 官方不会通过电话通知任何事项" in body
@@ -467,6 +481,7 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     assert body.count('class="porting-step"') == 3
     assert body.count('class="porting-media"') == 3
     assert body.count("data:image/webp;base64,") == 4
+    assert body.count("data:image/png;base64,") == 1
     assert body.count('width="800"') == 4
     assert "PAC 码" in body
     assert "1–3 个工作日" in body
@@ -492,7 +507,7 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
 
     version = client.get("/api/public/ctexcel-public-token/version")
     assert version.status_code == 200
-    assert version.json() == {"public_version": 11_000_002}
+    assert version.json() == {"public_version": 12_000_002}
 
 
 def test_ctexcel_admin_edit_keeps_public_token_and_bumps_only_on_change(
@@ -535,7 +550,7 @@ def test_ctexcel_public_card_shows_pending_login_state_without_credentials(
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "11000001"
+    assert response.headers["X-Cache-Version"] == "12000001"
     assert "登录资料等待同步" in response.text
     assert "一键复制登录资料</button>" in response.text
     assert "disabled" in response.text
@@ -571,7 +586,7 @@ def test_legacy_ctexcel_customer_can_lazily_create_fixed_credential_page(
     assert token
     page = client.get(f"/p/{token}")
     assert page.status_code == 200
-    assert page.headers["X-Cache-Version"] == "11000001"
+    assert page.headers["X-Cache-Version"] == "12000001"
     assert "个人中心登录资料" in page.text
     assert "447900000789" in page.text
     assert "Z9x8*WvU" in page.text
