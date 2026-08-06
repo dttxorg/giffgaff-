@@ -326,9 +326,11 @@ ALIPAY_GATEWAY_PAY_SCRIPT = r"""(expected) => {
       && selected(element);
   });
   if (!alipaySelected) return {found: false, enabled: false};
-  const candidates = Array.from(document.querySelectorAll(
-    'button,[role="button"],a,[type="submit"],[class*="button"],[class*="btn"]'
-  )).filter(visible);
+  const candidateSelector =
+    'button,[role="button"],a,[type="submit"],[class*="button"],[class*="btn"]';
+  const candidateElements = root => Array.from(
+    root.querySelectorAll(candidateSelector)
+  ).filter(visible);
   const moneyValues = text => {
     const values = [];
     const pattern = /(?:£|\$|€|¥)\s*([0-9]+(?:[.,][0-9]{1,2})?)|([0-9]+(?:[.,][0-9]{1,2})?)\s*(?:GBP|英镑)/gi;
@@ -341,7 +343,7 @@ ALIPAY_GATEWAY_PAY_SCRIPT = r"""(expected) => {
   const plainAmount = amount && Number.isFinite(expectedNumber)
     ? new RegExp('(?:^|\\D)' + amount.replace('.', '\\.') + '(?:\\D|$)')
     : null;
-  const matches = candidates.filter(element => {
+  const matchingCandidates = candidates => candidates.filter(element => {
     const text = norm(element.innerText || element.textContent);
     const paymentLabel = text.includes('支付') || text.includes('pay');
     const values = moneyValues(text);
@@ -356,11 +358,31 @@ ALIPAY_GATEWAY_PAY_SCRIPT = r"""(expected) => {
       );
     return paymentLabel && hasAmount && !text.includes('返回');
   });
+  const matches = matchingCandidates(candidateElements(document));
   const alipayMatches = matches.filter(element => {
     const text = norm(element.innerText || element.textContent);
     return text.includes('支付宝') || text.includes('alipay');
   });
-  const button = alipayMatches[0] || matches[0];
+  const selectedAlipay = methodNodes.find(element => {
+    const text = norm(element.innerText || element.textContent);
+    return (text.includes('支付宝') || text.includes('alipay'))
+      && selected(element);
+  });
+  let scopedMatches = [];
+  for (
+    let container = selectedAlipay, depth = 0;
+    container && depth < 7;
+    depth += 1, container = container.parentElement
+  ) {
+    const localMatches = matchingCandidates(candidateElements(container));
+    if (localMatches.length) {
+      scopedMatches = localMatches;
+      break;
+    }
+  }
+  const button = alipayMatches[0]
+    || scopedMatches[0]
+    || (matches.length === 1 ? matches[0] : null);
   if (!button) return {found: false, enabled: false};
   const disabled = Boolean(
     button.disabled
