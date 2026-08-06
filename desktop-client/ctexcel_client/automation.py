@@ -299,6 +299,14 @@ ALIPAY_GATEWAY_PAY_SCRIPT = r"""(expected) => {
       && rect.width > 0
       && rect.height > 0;
   };
+  const textOf = element => String(
+    element?.innerText
+      || element?.textContent
+      || element?.value
+      || element?.getAttribute?.('aria-label')
+      || element?.getAttribute?.('title')
+      || ''
+  );
   const amount = norm(expected);
   const expectedNumber = Number.parseFloat(amount);
   const selected = element => {
@@ -327,7 +335,7 @@ ALIPAY_GATEWAY_PAY_SCRIPT = r"""(expected) => {
       + '[class*="pay-method"]'
   )).filter(visible);
   const alipaySelected = methodNodes.some(element => {
-    const text = norm(element.innerText || element.textContent);
+    const text = norm(textOf(element));
     return (text.includes('支付宝') || text.includes('alipay'))
       && selected(element);
   });
@@ -342,62 +350,137 @@ ALIPAY_GATEWAY_PAY_SCRIPT = r"""(expected) => {
     return {found: false, enabled: false};
   }
   const candidateSelector =
-    'button,[role="button"],a,[type="submit"],[class*="button"],[class*="btn"]';
-  const candidateElements = root => Array.from(
-    root.querySelectorAll(candidateSelector)
-  ).filter(visible);
+    'button,[role="button"],a,[type="submit"],'
+      + 'input[type="button"],input[type="submit"],'
+      + '[class*="button"],[class*="btn"]';
+  const nativeActionSelector =
+    'button,[role="button"],a,[type="submit"],'
+      + 'input[type="button"],input[type="submit"]';
+  const candidateElements = root => {
+    const nodes = Array.from(root.querySelectorAll(candidateSelector))
+      .filter(visible);
+    // Component libraries commonly put a class such as `pay-button` on a
+    // wrapper around the real <button>.  Do not return both nodes: clicking
+    // the wrapper can only expand the payment tile and leaves the checkout
+    // on the same screen.  Keep native/role actions and class-only nodes
+    // that do not contain another native action.
+    return nodes.filter(element => {
+      const native = element.matches(nativeActionSelector);
+      return native || !element.querySelector(nativeActionSelector);
+    });
+  };
   const moneyValues = text => {
     const values = [];
-    const pattern = /(?:£|\$|€|¥)\s*([0-9]+(?:[.,][0-9]{1,2})?)|([0-9]+(?:[.,][0-9]{1,2})?)\s*(?:GBP|英镑)/gi;
+    const pattern = /£\s*([0-9]+(?:[.,][0-9]{1,2})?)|(?:GBP|英镑)\s*([0-9]+(?:[.,][0-9]{1,2})?)|([0-9]+(?:[.,][0-9]{1,2})?)\s*(?:GBP|英镑)/gi;
     let match;
     while ((match = pattern.exec(text))) {
-      values.push(Number.parseFloat((match[1] || match[2]).replace(',', '.')));
+      values.push(Number.parseFloat(
+        (match[1] || match[2] || match[3]).replace(',', '.')
+      ));
     }
     return values;
   };
+  const documentAmountMatches = !amount || moneyValues(bodyText).some(value =>
+    Number.isFinite(expectedNumber)
+    && Math.abs(value - expectedNumber) < 0.005
+  );
   const plainAmount = amount && Number.isFinite(expectedNumber)
     ? new RegExp('(?:^|\\D)' + amount.replace('.', '\\.') + '(?:\\D|$)')
     : null;
   const matchingCandidates = candidates => candidates.filter(element => {
-    const text = norm(element.innerText || element.textContent);
-    const paymentLabel = text.includes('支付') || text.includes('pay');
+    const text = norm(textOf(element));
+    // The expanded AliPay tile itself contains the word “支付宝”.  Treating
+    // that tile as a CTA causes a second tile click and leaves the page on
+    // the same “系统将跳转到支付宝网站” screen.  Remove method names before
+    // checking for an actual action label.
+    const actionText = text.replace(
+      /支付宝|alipay|信用卡或借记卡|信用卡|银行卡/g,
+      ''
+    );
+    const paymentLabel = /支付|pay|continue|proceed|submit/i.test(actionText);
     const values = moneyValues(text);
+    const hasGbpCurrency = /£|gbp|英镑/i.test(text);
     const hasAmount = !amount
       || values.some(value =>
         Number.isFinite(expectedNumber)
         && Math.abs(value - expectedNumber) < 0.005
       )
       || (
+        hasGbpCurrency
+        &&
         plainAmount !== null
         && plainAmount.test(text)
       );
-    return paymentLabel && hasAmount && !text.includes('返回');
+    const amountInExpandedAlipay = documentAmountMatches
+      && (alipaySelected || alipayExpanded);
+    return paymentLabel
+      && (hasAmount || amountInExpandedAlipay)
+      && !text.includes('返回');
   });
   const matches = matchingCandidates(candidateElements(document));
-  const alipayMatches = matches.filter(element => {
-    const text = norm(element.innerText || element.textContent);
-    return text.includes('支付宝') || text.includes('alipay');
-  });
   const selectedAlipay = methodNodes.find(element => {
-    const text = norm(element.innerText || element.textContent);
+    const text = norm(textOf(element));
     return (text.includes('支付宝') || text.includes('alipay'))
       && selected(element);
   });
+  const expansionMarkers = [
+    '系统将跳转到支付宝网站',
+    'redirectedtoalipay',
+    'redirecttoalipay',
+    'paywithalipay',
+  ].map(norm);
+  const expandedAlipay = Array.from(document.querySelectorAll('*'))
+    .filter(visible)
+    .filter(element => {
+      const text = norm(textOf(element));
+      return expansionMarkers.some(marker => text.includes(marker));
+    })
+    .sort((left, right) => {
+      const leftLength = String(left.innerText || left.textContent || '')
+        .length;
+      const rightLength = String(right.innerText || right.textContent || '')
+        .length;
+      return leftLength - rightLength;
+    })[0] || null;
   let scopedMatches = [];
-  for (
-    let container = selectedAlipay, depth = 0;
-    container && depth < 7;
-    depth += 1, container = container.parentElement
-  ) {
-    const localMatches = matchingCandidates(candidateElements(container));
-    if (localMatches.length) {
-      scopedMatches = localMatches;
-      break;
+  const scopes = [selectedAlipay, expandedAlipay].filter(Boolean);
+  for (const scope of scopes) {
+    for (
+      let container = scope, depth = 0;
+      container && depth < 7;
+      depth += 1, container = container.parentElement
+    ) {
+      const localMatches = matchingCandidates(candidateElements(container));
+      if (localMatches.length) {
+        scopedMatches.push(...localMatches);
+        break;
+      }
     }
   }
-  const button = alipayMatches[0]
-    || scopedMatches[0]
-    || (matches.length === 1 ? matches[0] : null);
+  const unique = values => Array.from(new Set(values));
+  const score = element => {
+    const text = norm(textOf(element));
+    let value = 0;
+    if (element.matches('button,[role="button"],a,[type="submit"],input')) {
+      value += 100;
+    }
+    if (text.includes('支付宝') || text.includes('alipay')) value += 1000;
+    if (text.includes('支付') || text.includes('pay')) value += 50;
+    if (/(?:£|\$|€|¥)|gbp|英镑/i.test(text)) value += 25;
+    if (text.includes('返回')) value -= 10_000;
+    return value;
+  };
+  const scoped = unique(scopedMatches).sort((left, right) =>
+    score(right) - score(left)
+  );
+  const alipayMatches = matches.filter(element => {
+    const text = norm(textOf(element));
+    return text.includes('支付宝') || text.includes('alipay');
+  });
+  const button = scoped[0]
+    || alipayMatches.sort((left, right) => score(right) - score(left))[0]
+    || matches.sort((left, right) => score(right) - score(left))[0]
+    || null;
   if (!button) return {found: false, enabled: false};
   const disabled = Boolean(
     button.disabled
@@ -406,11 +489,16 @@ ALIPAY_GATEWAY_PAY_SCRIPT = r"""(expected) => {
     || button.classList?.contains('is-disabled')
   );
   if (disabled) return {found: true, enabled: false};
-  button.click();
+  const marker = 'data-ctexcel-alipay-pay';
+  document.querySelectorAll(`[${marker}]`).forEach(element =>
+    element.removeAttribute(marker)
+  );
+  button.setAttribute(marker, 'true');
   return {
     found: true,
     enabled: true,
-    text: String(button.innerText || button.textContent || '')
+    text: textOf(button),
+    selector: `[${marker}="true"]`
   };
 }"""
 
@@ -3171,9 +3259,10 @@ class CTExcelAutomation:
             expected_amount=expected,
         )
         order_number = self._page_order_number(payment_page)
-        page_text = ""
-        with contextlib.suppress(Exception):
-            page_text = payment_page.locator("body").inner_text(timeout=1000)
+        page_text = "\n".join(
+            self._document_text(document, timeout=1000)
+            for document in self._payment_documents(payment_page)
+        )
         # Hosted gateways do not always repeat the CTExcel order amount.  If
         # they do show a recognizable amount, still reject a mismatched one.
         if re.search(r"(?:£|GBP)\s*[0-9]", page_text, re.I):
@@ -3197,6 +3286,90 @@ class CTExcelAutomation:
             "transaction_amount": expected,
             "payment_method": PAYMENT_METHOD_ALIPAY,
         }
+
+    def _payment_documents(self, page: Page) -> list[Any]:
+        """Return a page and its live frames for hosted-checkout actions.
+
+        Some gateway builds render the payment controls in a cross-origin
+        iframe.  Playwright can evaluate and click inside such a frame even
+        though the browser page itself cannot access its DOM through
+        ``page.evaluate``.  Prefer child frames when they exist: the parent
+        CTExcel document can still contain a stale “确认支付” control while
+        the hosted frame owns the real gateway CTA.  Keep the parent page as
+        the final fallback for same-page gateway builds.
+        """
+        child_frames: list[Any] = []
+        with contextlib.suppress(Exception):
+            frames = getattr(page, "frames", ())
+            if callable(frames):
+                frames = frames()
+            main_frame = getattr(page, "main_frame", None)
+            if callable(main_frame):
+                main_frame = main_frame()
+            for frame in frames or ():
+                if frame is main_frame:
+                    continue
+                if all(frame is not item for item in child_frames):
+                    child_frames.append(frame)
+        return child_frames + [page]
+
+    @staticmethod
+    def _document_url(document: Any) -> str:
+        with contextlib.suppress(Exception):
+            return str(getattr(document, "url", "") or "")
+        return ""
+
+    @staticmethod
+    def _document_text(document: Any, *, timeout: int = 500) -> str:
+        with contextlib.suppress(Exception):
+            return str(document.locator("body").inner_text(timeout=timeout) or "")
+        return ""
+
+    def _is_payment_gateway_document(self, document: Any) -> bool:
+        """Return whether a frame is the configured hosted checkout document."""
+        current_url = self._document_url(document)
+        with contextlib.suppress(ValueError):
+            host = (urlsplit(current_url).hostname or "").lower()
+            if (
+                host in PAYMENT_GATEWAY_HOSTS
+                or host == "alipay.com"
+                or host.endswith(".alipay.com")
+            ):
+                return True
+        text = re.sub(r"\s+", "", self._document_text(document)).lower()
+        return bool(
+            text
+            and any(
+                marker in text
+                for marker in (
+                    "支付宝",
+                    "alipay",
+                    "信用卡",
+                    "银行卡",
+                    "creditcard",
+                    "系统将跳转到支付宝网站",
+                )
+            )
+        )
+
+    def _gateway_action_documents(self, page: Page) -> list[Any]:
+        """Prefer ready hosted frames and avoid stale parent-page CTAs."""
+        documents = self._payment_documents(page)
+        hosted_frames = [
+            document
+            for document in documents
+            if document is not page and self._is_payment_gateway_document(document)
+        ]
+        return hosted_frames or documents
+
+    def _has_payment_gateway_frame(self, page: Page) -> bool:
+        """Detect a hosted payment document embedded in ``page``."""
+        for document in self._payment_documents(page):
+            if document is page:
+                continue
+            if self._is_payment_gateway_document(document):
+                return True
+        return False
 
     def _complete_alipay_gateway_selection(
         self,
@@ -3231,15 +3404,16 @@ class CTExcelAutomation:
         )
         while time.monotonic() < deadline:
             self._check_stop()
-            result: Any = None
-            with contextlib.suppress(Exception):
-                result = page.evaluate(ALIPAY_GATEWAY_SELECT_SCRIPT)
-            if isinstance(result, dict) and result.get("found"):
-                if result.get("clicked"):
-                    self.log("支付宝支付方式已在支付网关中选中")
-                else:
-                    self.log("支付宝支付方式已处于选中状态")
-                return
+            for document in self._gateway_action_documents(page):
+                result: Any = None
+                with contextlib.suppress(Exception):
+                    result = document.evaluate(ALIPAY_GATEWAY_SELECT_SCRIPT)
+                if isinstance(result, dict) and result.get("found"):
+                    if result.get("clicked"):
+                        self.log("支付宝支付方式已在支付网关中选中")
+                    else:
+                        self.log("支付宝支付方式已处于选中状态")
+                    return
             self._wait_interruptibly(0.2)
         raise RetryableStalledPageError(
             "支付宝支付网关未找到可选择的支付宝支付方式"
@@ -3258,19 +3432,39 @@ class CTExcelAutomation:
         )
         while time.monotonic() < deadline:
             self._check_stop()
-            result: Any = None
-            with contextlib.suppress(Exception):
-                result = page.evaluate(
-                    ALIPAY_GATEWAY_PAY_SCRIPT,
-                    normalized_amount,
-                )
-            if isinstance(result, dict) and result.get("found"):
-                if result.get("enabled"):
-                    self.log(
-                        "支付宝支付方式已确认，已点击支付按钮；"
-                        "等待跳转支付宝二维码"
+            saw_disabled = False
+            for document in self._gateway_action_documents(page):
+                result: Any = None
+                with contextlib.suppress(Exception):
+                    result = document.evaluate(
+                        ALIPAY_GATEWAY_PAY_SCRIPT,
+                        normalized_amount,
                     )
-                    return
+                if isinstance(result, dict) and result.get("found"):
+                    if result.get("enabled"):
+                        selector = str(result.get("selector") or "").strip()
+                        if selector:
+                            try:
+                                document.locator(selector).first.click(
+                                    no_wait_after=True,
+                                    timeout=min(
+                                        PAGE_CLICK_TIMEOUT_MS,
+                                        self._automation_step_timeout_ms(),
+                                    ),
+                                )
+                            except PlaywrightTimeoutError:
+                                # The SPA can replace the gateway control
+                                # between marking it and the native click.
+                                # Re-evaluate on the next loop instead of
+                                # claiming that a DOM-only click completed.
+                                continue
+                        self.log(
+                            "支付宝支付方式已确认，已点击支付按钮；"
+                            "等待跳转支付宝二维码"
+                        )
+                        return
+                    saw_disabled = True
+            if saw_disabled:
                 self._wait_interruptibly(0.2)
                 continue
             self._wait_interruptibly(0.2)
@@ -3279,8 +3473,10 @@ class CTExcelAutomation:
         )
 
     def _page_has_alipay_qr(self, page: Page) -> bool:
-        with contextlib.suppress(Exception):
-            return bool(page.evaluate(ALIPAY_QR_READY_SCRIPT))
+        for document in self._payment_documents(page):
+            with contextlib.suppress(Exception):
+                if bool(document.evaluate(ALIPAY_QR_READY_SCRIPT)):
+                    return True
         return False
 
     def _wait_for_alipay_qr_page(self, source_page: Page) -> Page:
@@ -3326,6 +3522,22 @@ class CTExcelAutomation:
                     if host == "alipay.com" or host.endswith(".alipay.com"):
                         self.log("已跳转到支付宝二维码页面")
                         return candidate
+                    for document in self._payment_documents(candidate):
+                        if document is candidate:
+                            continue
+                        frame_url = self._document_url(document)
+                        with contextlib.suppress(ValueError):
+                            frame_host = (
+                                urlsplit(frame_url).hostname or ""
+                            ).lower()
+                            if (
+                                frame_host == "alipay.com"
+                                or frame_host.endswith(".alipay.com")
+                            ):
+                                self.log(
+                                    "支付宝二维码已在支付 iframe 中打开"
+                                )
+                                return candidate
                     if self._page_has_alipay_qr(candidate):
                         self.log("支付宝二维码已在当前支付窗口显示")
                         return candidate
@@ -3403,13 +3615,19 @@ class CTExcelAutomation:
     def _page_order_number(self, page: Page) -> str:
         """Extract an order number from a gateway URL or rendered page."""
         values: list[str] = []
-        with contextlib.suppress(Exception):
-            values.append(str(page.url or ""))
-            query = parse_qs(urlsplit(str(page.url or "")).query)
-            for key in ("orderNo", "orderNumber", "order", "transactionId"):
-                values.extend(str(item) for item in query.get(key, []))
-        with contextlib.suppress(Exception):
-            values.append(page.locator("body").inner_text(timeout=1000))
+        for document in self._payment_documents(page):
+            document_url = self._document_url(document)
+            values.append(document_url)
+            with contextlib.suppress(ValueError):
+                query = parse_qs(urlsplit(document_url).query)
+                for key in (
+                    "orderNo",
+                    "orderNumber",
+                    "order",
+                    "transactionId",
+                ):
+                    values.extend(str(item) for item in query.get(key, []))
+            values.append(self._document_text(document, timeout=1000))
         for value in values:
             match = ORDER_PATTERN.search(value)
             if match:
@@ -3424,7 +3642,6 @@ class CTExcelAutomation:
         )
         deadline = time.monotonic() + timeout_ms / 1000
         initial_url = str(source_page.url or "")
-        initial_iframes = source_page.locator("iframe").count()
         while time.monotonic() < deadline:
             self._check_stop()
             candidates: list[Page] = [source_page]
@@ -3477,8 +3694,11 @@ class CTExcelAutomation:
                         if current_url != initial_url:
                             self.log("已进入支付宝支付页")
                             return candidate
-                        if candidate.locator("iframe").count() > initial_iframes:
-                            self.log("支付宝支付网关已在当前页面打开")
+                        if self._has_payment_gateway_frame(candidate):
+                            self.log(
+                                "支付宝支付网关已在跨域 iframe 中打开，"
+                                "已切换到 iframe 文档跟踪"
+                            )
                             return candidate
                         gateway_markers = candidate.locator(
                             "[id*='checkout'], [class*='checkout'], "
@@ -3674,57 +3894,59 @@ class CTExcelAutomation:
         )
         while time.monotonic() < deadline:
             self._check_stop()
-            candidates = page.locator("img, canvas, svg")
             best: Optional[Locator] = None
             best_score = 0.0
-            for index in range(candidates.count()):
-                candidate = candidates.nth(index)
+            for document in self._payment_documents(page):
                 with contextlib.suppress(Exception):
-                    if not candidate.is_visible():
-                        continue
-                    box = candidate.bounding_box()
-                    if not box:
-                        continue
-                    width = float(box.get("width") or 0)
-                    height = float(box.get("height") or 0)
-                    if (
-                        width < 120
-                        or height < 120
-                        or width > 900
-                        or height > 900
-                    ):
-                        continue
-                    ratio = width / height if height else 0
-                    if not 0.72 <= ratio <= 1.38:
-                        continue
-                    marker = str(
-                        candidate.evaluate(
-                            """node => [
-                              node.id || '',
-                              node.className || '',
-                              node.getAttribute?.('src') || '',
-                              node.getAttribute?.('alt') || ''
-                            ].join(' ').toLowerCase()"""
-                        )
-                        or ""
-                    )
-                    score = width * height
-                    if any(
-                        token in marker
-                        for token in (
-                            "qr",
-                            "qrcode",
-                            "wechat",
-                            "weixin",
-                            "wx",
-                            "二维码",
-                            "data:image",
-                        )
-                    ):
-                        score += 1_000_000
-                    if score > best_score:
-                        best = candidate
-                        best_score = score
+                    candidates = document.locator("img, canvas, svg")
+                    for index in range(candidates.count()):
+                        candidate = candidates.nth(index)
+                        with contextlib.suppress(Exception):
+                            if not candidate.is_visible():
+                                continue
+                            box = candidate.bounding_box()
+                            if not box:
+                                continue
+                            width = float(box.get("width") or 0)
+                            height = float(box.get("height") or 0)
+                            if (
+                                width < 120
+                                or height < 120
+                                or width > 900
+                                or height > 900
+                            ):
+                                continue
+                            ratio = width / height if height else 0
+                            if not 0.72 <= ratio <= 1.38:
+                                continue
+                            marker = str(
+                                candidate.evaluate(
+                                    """node => [
+                                      node.id || '',
+                                      node.className || '',
+                                      node.getAttribute?.('src') || '',
+                                      node.getAttribute?.('alt') || ''
+                                    ].join(' ').toLowerCase()"""
+                                )
+                                or ""
+                            )
+                            score = width * height
+                            if any(
+                                token in marker
+                                for token in (
+                                    "qr",
+                                    "qrcode",
+                                    "wechat",
+                                    "weixin",
+                                    "wx",
+                                    "二维码",
+                                    "data:image",
+                                )
+                            ):
+                                score += 1_000_000
+                            if score > best_score:
+                                best = candidate
+                                best_score = score
             if best is not None:
                 image = best.screenshot(type="png")
                 if image:

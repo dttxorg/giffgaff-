@@ -809,6 +809,9 @@ def test_default_payment_method_remains_wechat_for_existing_configs():
 def test_alipay_gateway_wait_accepts_new_checkout_iframe(monkeypatch):
     state = {"iframe_reads": 0}
 
+    class FakeFrame:
+        url = "https://na.gateway.spring.citi.com/checkout/widget"
+
     class FakeCount:
         def __init__(self, value):
             self.value = value
@@ -822,6 +825,8 @@ def test_alipay_gateway_wait_accepts_new_checkout_iframe(monkeypatch):
 
     class FakePage:
         url = "https://www.ctexcel.com/uk/buycard/buycardlist"
+        frames = [FakeFrame()]
+        main_frame = None
 
         def is_closed(self):
             return False
@@ -848,7 +853,7 @@ def test_alipay_gateway_wait_accepts_new_checkout_iframe(monkeypatch):
     selected = runner._wait_for_alipay_payment_page(FakePage())
 
     assert selected.url.endswith("/buycardlist")
-    assert any("支付网关已在当前页面打开" in item for item in messages)
+    assert any("支付网关已在" in item for item in messages)
 
 
 def test_alipay_gateway_selects_option_and_clicks_pay_before_qr(monkeypatch):
@@ -866,7 +871,7 @@ def test_alipay_gateway_selects_option_and_clicks_pay_before_qr(monkeypatch):
                 return len(calls) >= 4
             if "target.click()" in script:
                 return {"found": True, "clicked": True}
-            if "button.click()" in script:
+            if "data-ctexcel-alipay-pay" in script:
                 return {"found": True, "enabled": True}
             raise AssertionError("unexpected gateway script")
 
@@ -888,6 +893,104 @@ def test_alipay_gateway_selects_option_and_clicks_pay_before_qr(monkeypatch):
     assert calls[1][1] == ()
     assert calls[2][1] == ("5.95",)
     assert any("已点击支付按钮" in item for item in messages)
+
+
+def test_alipay_gateway_controls_are_found_inside_cross_origin_frame():
+    state = {
+        "frame_selected": False,
+        "frame_clicked": False,
+        "outer_selected": False,
+        "outer_clicked": False,
+    }
+
+    class FakeFrame:
+        url = "https://na.gateway.spring.citi.com/checkout/widget"
+
+        def evaluate(self, script, *_args):
+            if "scanqrcode" in script:
+                return state["frame_clicked"]
+            if "target.click()" in script:
+                state["frame_selected"] = True
+                return {"found": True, "clicked": True}
+            if "data-ctexcel-alipay-pay" in script:
+                state["frame_clicked"] = True
+                return {"found": True, "enabled": True}
+            raise AssertionError("unexpected frame script")
+
+    class FakePage:
+        url = "https://na.gateway.spring.citi.com/checkout/pay/SESSION"
+        frames = [FakeFrame()]
+        main_frame = None
+
+        def is_closed(self):
+            return False
+
+        def evaluate(self, script, *_args):
+            if "scanqrcode" in script:
+                return False
+            if "target.click()" in script:
+                state["outer_selected"] = True
+                return {"found": True, "clicked": True}
+            if "data-ctexcel-alipay-pay" in script:
+                state["outer_clicked"] = True
+                return {"found": True, "enabled": True}
+            return {"found": False, "enabled": False}
+
+    runner = CTExcelAutomation(
+        AppConfig(payment_method=PAYMENT_METHOD_ALIPAY),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    selected = runner._complete_alipay_gateway_selection(
+        FakePage(),
+        expected_amount="11.00",
+    )
+
+    assert isinstance(selected, FakePage)
+    assert state == {
+        "frame_selected": True,
+        "frame_clicked": True,
+        "outer_selected": False,
+        "outer_clicked": False,
+    }
+
+
+def test_alipay_gateway_pay_script_supports_input_cta_and_frame_amount_scope():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ctexcel_client"
+        / "automation.py"
+    ).read_text(encoding="utf-8")
+
+    assert "input[type=\"button\"]" in source
+    assert "element?.value" in source
+    assert "documentAmountMatches" in source
+    assert "data-ctexcel-alipay-pay" in source
+    assert "系统将跳转到支付宝网站" in source
+
+
+def test_alipay_qr_wait_accepts_alipay_navigation_inside_frame():
+    class FakeFrame:
+        url = "https://global.alipay.com/qr/SESSION"
+
+    class FakePage:
+        url = "https://na.gateway.spring.citi.com/checkout/pay/SESSION"
+        frames = [FakeFrame()]
+        main_frame = None
+
+        def is_closed(self):
+            return False
+
+    runner = CTExcelAutomation(
+        AppConfig(payment_method=PAYMENT_METHOD_ALIPAY),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    assert runner._wait_for_alipay_qr_page(FakePage()).url.endswith("SESSION")
 
 
 def test_alipay_direct_qr_url_skips_gateway_selection():

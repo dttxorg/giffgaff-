@@ -65,7 +65,7 @@ def test_client_ui_uses_scoped_api_without_hidden_entry_field():
     assert '"支付方式"' in source
     assert "支付宝（银行卡/支付宝支付网关）" in source
     assert "微信支付（二维码）" in source
-    assert __version__ == "2.5.13"
+    assert __version__ == "2.5.14"
     assert 'f"CTExcel 申请工作台 v{__version__}"' in source
 
 
