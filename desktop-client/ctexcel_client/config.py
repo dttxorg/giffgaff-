@@ -15,9 +15,11 @@ APP_NAME = "CTExcelApplyClient"
 CRYPTPROTECT_UI_FORBIDDEN = 0x1
 PURCHASE_ROUTE_50GB = "plan_50gb"
 PURCHASE_ROUTE_FREECARD = "freecard_1gbp"
+PURCHASE_ROUTE_RETURN_HOME_15GB = "plan_return_home_15gb"
 PURCHASE_ROUTES = {
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
+    PURCHASE_ROUTE_RETURN_HOME_15GB,
 }
 PAYMENT_METHOD_WECHAT = "wechat"
 PAYMENT_METHOD_ALIPAY = "alipay"
@@ -30,6 +32,7 @@ DEFAULT_APPLICATION_URL = (
     "?recommendCode=NTKWJX"
 )
 FREECARD_APPLICATION_URL = "https://www.ctexcel.com/freecard/home"
+RETURN_HOME_APPLICATION_URL = "https://www.ctexcel.com/uk/home"
 DEFAULT_PROXY_API_URL = (
     "https://share.proxy.qg.net/get?num=1&distinct=true"
 )

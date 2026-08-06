@@ -26,7 +26,9 @@ from ctexcel_client.automation import (
     cleanup_stale_browser_profiles,
     coupon_rejection_message,
     diagnostic_response_excerpt,
+    expected_route_price,
     normalize_money,
+    normalize_gateway_amount,
     parse_message_timestamp,
     is_payment_success_url,
     is_payment_gateway_url,
@@ -49,6 +51,7 @@ from ctexcel_client.config import (
     PAYMENT_METHOD_WECHAT,
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
+    PURCHASE_ROUTE_RETURN_HOME_15GB,
     ProxyConfig,
     RegistrationDefaults,
 )
@@ -64,6 +67,83 @@ def test_money_and_discount_price_parsing():
         "请使用微信扫描二维码 ¥9.11(1GBP)",
         "1.00",
     )
+
+
+def test_gateway_amount_is_canonical_and_rejects_ambiguous_values():
+    assert normalize_gateway_amount("£5,9") == "5.90"
+    assert normalize_gateway_amount("11 GBP") == "11.00"
+    with pytest.raises(AutomationError, match="支付网关预期金额格式错误"):
+        normalize_gateway_amount("5.95 USD")
+
+
+def test_alipay_helpers_timeout_when_gateway_never_reaches_expected_state(
+    monkeypatch,
+):
+    clock = {"value": 0.0}
+    monkeypatch.setattr(
+        automation_module.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+
+    class FakePage:
+        def evaluate(self, _script, *_args):
+            return {"found": False, "enabled": False}
+
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_wait_interruptibly",
+        lambda seconds: clock.__setitem__(
+            "value", clock["value"] + seconds
+        ),
+    )
+    with pytest.raises(RetryableStalledPageError):
+        runner._select_alipay_gateway_option(FakePage())
+
+    class DisabledPage:
+        def evaluate(self, _script, *_args):
+            return {"found": True, "enabled": False}
+
+    clock["value"] = 0.0
+    with pytest.raises(RetryableStalledPageError):
+        runner._click_alipay_gateway_pay(
+            DisabledPage(),
+            expected_amount="£5,95",
+        )
+
+
+def test_return_home_15gb_route_requires_eleven_pounds_after_coupon():
+    config = AppConfig(
+        purchase_route=PURCHASE_ROUTE_RETURN_HOME_15GB,
+        registration=RegistrationDefaults(
+            expected_price_gbp="5.95",
+        ),
+    )
+
+    assert expected_route_price(config) == "11.00"
+    assert price_is_expected("订单金额：£11.00", expected_route_price(config))
+
+
+def test_return_home_plan_selection_scripts_cover_tab_card_and_details():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ctexcel_client"
+        / "automation.py"
+    ).read_text(encoding="utf-8")
+
+    assert "SELECT_RETURN_HOME_TAB_SCRIPT" in source
+    assert "SELECT_RETURN_HOME_15GB_PLAN_SCRIPT" in source
+    assert "回国年套餐" in source
+    assert "15GB" in source
+    assert "£22.00" in source
+    assert "RETURN_HOME_PLAN_DETAILS_READY_SCRIPT" in source
+    assert "RETURN_HOME_APPLICATION_URL" in source
 
 
 def test_both_purchase_routes_recognize_their_success_page():
@@ -86,6 +166,10 @@ def test_wechat_payment_url_matches_same_tab_and_popup_routes():
     assert is_wechat_payment_url(
         "https://www.ctexcel.com/uk/buycard/buycardWX",
         PURCHASE_ROUTE_50GB,
+    )
+    assert is_wechat_payment_url(
+        "https://www.ctexcel.com/uk/buycard/buycardWX",
+        PURCHASE_ROUTE_RETURN_HOME_15GB,
     )
     assert not is_wechat_payment_url(
         "https://www.ctexcel.com/freecard/activityPageconfirm",

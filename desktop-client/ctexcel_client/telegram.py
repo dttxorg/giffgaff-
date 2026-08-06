@@ -4,6 +4,7 @@ import re
 
 import httpx
 
+from . import __version__
 from .config import TelegramConfig
 
 
@@ -35,7 +36,7 @@ class TelegramNotifier:
             timeout=timeout,
             transport=transport,
             trust_env=False,
-            headers={"User-Agent": "CTExcelApplyClient/2.5.12"},
+            headers={"User-Agent": f"CTExcelApplyClient/{__version__}"},
         )
 
     def close(self) -> None:

@@ -36,6 +36,8 @@ from .config import (
     PAYMENT_METHOD_WECHAT,
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
+    PURCHASE_ROUTE_RETURN_HOME_15GB,
+    RETURN_HOME_APPLICATION_URL,
     RegistrationDefaults,
     app_config_dir,
     is_qg_proxy_api_url,
@@ -117,6 +119,79 @@ SELECT_50GB_PLAN_SCRIPT = r"""() => {
   return false;
 }"""
 
+SELECT_RETURN_HOME_TAB_SCRIPT = r"""() => {
+  const norm = value => String(value || '').replace(/\s+/g, '');
+  const visible = element => {
+    if (!element || element.hidden) return false;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && Number(style.opacity || 1) > 0
+      && rect.width > 0
+      && rect.height > 0;
+  };
+  const candidates = Array.from(document.querySelectorAll('div')).filter(
+    element => norm(element.innerText) === '回国年套餐'
+      && element.querySelector('span')
+      && element.children.length <= 3
+      && visible(element)
+  );
+  const tab = candidates.find(element =>
+    String(element.className || '').includes('tabList')
+      || String(element.parentElement?.className || '').includes('com-tab')
+  ) || candidates[candidates.length - 1];
+  if (!tab) return false;
+  tab.click();
+  return true;
+}"""
+
+SELECT_RETURN_HOME_15GB_PLAN_SCRIPT = r"""() => {
+  const norm = value => String(value || '').replace(/\s+/g, '');
+  const visible = element => {
+    if (!element || element.hidden) return false;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && Number(style.opacity || 1) > 0
+      && rect.width > 0
+      && rect.height > 0;
+  };
+  const nodes = Array.from(document.querySelectorAll('*'));
+  const anchors = nodes.filter(element =>
+    element.children.length === 0 && norm(element.textContent) === '15GB'
+      && visible(element)
+  );
+  for (const anchor of anchors) {
+    let card = anchor;
+    for (
+      let depth = 0;
+      depth < 10 && card;
+      depth += 1, card = card.parentElement
+    ) {
+      const text = norm(card.innerText);
+      if (
+        !visible(card)
+        ||
+        !text.includes('365天')
+        || !text.includes('£22.00')
+        || !text.includes('立即订购')
+      ) {
+        continue;
+      }
+      const target = Array.from(card.querySelectorAll('*')).find(element =>
+        visible(element) && norm(element.textContent) === '立即订购'
+      );
+      if (target) {
+        target.click();
+        return true;
+      }
+    }
+  }
+  return false;
+}"""
+
 PLAN_DETAILS_READY_SCRIPT = r"""() => {
   const detail = document.querySelector('.simcarddetails');
   if (!detail) return false;
@@ -130,6 +205,24 @@ PLAN_DETAILS_READY_SCRIPT = r"""() => {
   return text.includes('SIM卡信息')
     && text.includes('已选套餐')
     && text.includes('50GB')
+    && hasNext;
+}"""
+
+RETURN_HOME_PLAN_DETAILS_READY_SCRIPT = r"""() => {
+  const detail = document.querySelector('.simcarddetails');
+  if (!detail) return false;
+  const text = String(detail.innerText || '').replace(/\s+/g, '');
+  const hasNext = Array.from(
+    detail.querySelectorAll('button,[role="button"]')
+  ).some(button =>
+    String(button.innerText || button.textContent || '')
+      .replace(/\s+/g, '') === '下一步'
+  );
+  return text.includes('SIM卡信息')
+    && text.includes('已选套餐')
+    && text.includes('回国年套餐')
+    && text.includes('£22.00')
+    && text.includes('365天')
     && hasNext;
 }"""
 
@@ -163,8 +256,10 @@ ALIPAY_GATEWAY_SELECT_SCRIPT = r"""() => {
     );
   };
   const candidates = Array.from(document.querySelectorAll(
-    'button,[role="button"],a,label,li,div,[class*="pay"],[class*="method"],'
-      + '[class*="option"]'
+    'button,[role="button"],a,label,li,'
+      + '[class*="pay-option"],[class*="payment-option"],'
+      + '[class*="method-item"],[class*="payment-method"],'
+      + '[class*="pay-method"]'
   )).filter(visible);
   const exact = candidates.filter(element =>
     norm(element.innerText || element.textContent) === '支付宝'
@@ -177,8 +272,9 @@ ALIPAY_GATEWAY_SELECT_SCRIPT = r"""() => {
   if (!option) return {found: false, selected: false};
   if (!selected(option)) {
     const target = option.closest(
-      'button,[role="button"],a,label,li,[class*="pay"],[class*="method"],'
-        + '[class*="option"]'
+      'button,[role="button"],a,label,li,[class*="pay-option"],'
+        + '[class*="payment-option"],[class*="method-item"],'
+        + '[class*="payment-method"],[class*="pay-method"]'
     ) || option;
     target.click();
     return {found: true, selected: false, clicked: true};
@@ -202,22 +298,69 @@ ALIPAY_GATEWAY_PAY_SCRIPT = r"""(expected) => {
   };
   const amount = norm(expected);
   const expectedNumber = Number.parseFloat(amount);
+  const selected = element => {
+    const nodes = [element, element?.parentElement, element?.closest?.(
+      'button,[role="button"],a,label,li,[class*="pay-option"],'
+        + '[class*="payment-option"],[class*="method-item"],'
+        + '[class*="payment-method"],[class*="pay-method"]'
+    )].filter(Boolean);
+    return nodes.some(node =>
+      node.getAttribute?.('aria-checked') === 'true'
+      || node.getAttribute?.('aria-selected') === 'true'
+      || node.classList?.contains('selected')
+      || node.classList?.contains('active')
+      || node.classList?.contains('checked')
+      || node.classList?.contains('is-active')
+      || node.classList?.contains('is-checked')
+    );
+  };
+  const methodNodes = Array.from(document.querySelectorAll(
+    'button,[role="button"],a,label,li,'
+      + '[class*="pay-option"],[class*="payment-option"],'
+      + '[class*="method-item"],[class*="payment-method"],'
+      + '[class*="pay-method"]'
+  )).filter(visible);
+  const alipaySelected = methodNodes.some(element => {
+    const text = norm(element.innerText || element.textContent);
+    return (text.includes('支付宝') || text.includes('alipay'))
+      && selected(element);
+  });
+  if (!alipaySelected) return {found: false, enabled: false};
   const candidates = Array.from(document.querySelectorAll(
     'button,[role="button"],a,[type="submit"],[class*="button"],[class*="btn"]'
   )).filter(visible);
+  const moneyValues = text => {
+    const values = [];
+    const pattern = /(?:£|\$|€|¥)\s*([0-9]+(?:[.,][0-9]{1,2})?)|([0-9]+(?:[.,][0-9]{1,2})?)\s*(?:GBP|英镑)/gi;
+    let match;
+    while ((match = pattern.exec(text))) {
+      values.push(Number.parseFloat((match[1] || match[2]).replace(',', '.')));
+    }
+    return values;
+  };
+  const plainAmount = amount && Number.isFinite(expectedNumber)
+    ? new RegExp('(?:^|\\D)' + amount.replace('.', '\\.') + '(?:\\D|$)')
+    : null;
   const matches = candidates.filter(element => {
     const text = norm(element.innerText || element.textContent);
     const paymentLabel = text.includes('支付') || text.includes('pay');
-    const numbers = text.match(/\d+(?:\.\d{1,2})?/g) || [];
+    const values = moneyValues(text);
     const hasAmount = !amount
-      || text.includes(amount)
-      || (
+      || values.some(value =>
         Number.isFinite(expectedNumber)
-        && numbers.some(value => Number.parseFloat(value) === expectedNumber)
+        && Math.abs(value - expectedNumber) < 0.005
+      )
+      || (
+        plainAmount !== null
+        && plainAmount.test(text)
       );
     return paymentLabel && hasAmount && !text.includes('返回');
   });
-  const button = matches[0];
+  const alipayMatches = matches.filter(element => {
+    const text = norm(element.innerText || element.textContent);
+    return text.includes('支付宝') || text.includes('alipay');
+  });
+  const button = alipayMatches[0] || matches[0];
   if (!button) return {found: false, enabled: false};
   const disabled = Boolean(
     button.disabled
@@ -734,6 +877,36 @@ def normalize_money(value: str) -> Optional[Decimal]:
         return None
 
 
+def normalize_gateway_amount(value: str) -> str:
+    """Normalize a configured payment amount before passing it to browser JS."""
+    raw = str(value or "").strip()
+    match = re.fullmatch(
+        r"(?:£\s*)?([0-9]+(?:[.,][0-9]{1,2})?)(?:\s*(?:GBP|英镑))?",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        raise AutomationError("支付网关预期金额格式错误")
+    try:
+        amount = Decimal(match.group(1).replace(",", "."))
+        if amount < 0:
+            raise InvalidOperation
+        return f"{amount.quantize(Decimal('0.01')):.2f}"
+    except InvalidOperation as exc:
+        raise AutomationError("支付网关预期金额格式错误") from exc
+
+
+def expected_route_price(config: AppConfig) -> str:
+    """Return the exact amount the selected route must reach before payment."""
+    if config.purchase_route == PURCHASE_ROUTE_FREECARD:
+        return "1.00"
+    if config.purchase_route == PURCHASE_ROUTE_RETURN_HOME_15GB:
+        # The 15GB Return-to-China annual plan is £22 before the configured
+        # half-price coupon and must settle at exactly £11.00.
+        return "11.00"
+    return str(config.registration.expected_price_gbp or "").strip()
+
+
 def price_is_expected(page_text: str, expected: str) -> bool:
     target = normalize_money(expected)
     if target is None:
@@ -1240,7 +1413,10 @@ class CTExcelAutomation:
                 defaults.freecard_referrer.strip(),
             ):
                 raise AutomationError("£1 路线推荐人号码格式错误")
-        elif self.config.purchase_route != PURCHASE_ROUTE_50GB:
+        elif self.config.purchase_route not in {
+            PURCHASE_ROUTE_50GB,
+            PURCHASE_ROUTE_RETURN_HOME_15GB,
+        }:
             raise AutomationError("请选择有效的 CTExcel 申请路线")
         if (
             self.config.purchase_route == PURCHASE_ROUTE_50GB
@@ -1388,6 +1564,9 @@ class CTExcelAutomation:
                     self.log("短效节点不等待并发屏障，浏览器就绪后立即操作")
                 if self.config.purchase_route == PURCHASE_ROUTE_FREECARD:
                     self._start_freecard_application(page)
+                elif self.config.purchase_route == PURCHASE_ROUTE_RETURN_HOME_15GB:
+                    self._select_return_home_15gb_plan(page)
+                    self._configure_sim(page)
                 else:
                     self._select_plan(page)
                     self._configure_sim(page)
@@ -1954,6 +2133,73 @@ class CTExcelAutomation:
         )
         self.log("已选择 50GB、£11.9/30天套餐")
 
+    def _select_return_home_15gb_plan(self, page: Page) -> None:
+        """Select the 15GB / 365-day Return-to-China plan from the home page."""
+        self.stage("选择申请路线")
+        self._open_registration_entry(
+            page,
+            RETURN_HOME_APPLICATION_URL,
+            label="回国年套餐列表",
+            ready_script=(
+                "() => document.body"
+                " && document.body.innerText.includes('回国年套餐')"
+            ),
+        )
+        self._dismiss_cookie_consent(page)
+        self._wait_for_page_ready(page, "回国年套餐列表")
+        if not page.evaluate(SELECT_RETURN_HOME_TAB_SCRIPT):
+            raise AutomationError("没有定位到回国年套餐标签")
+        try:
+            page.wait_for_function(
+                "() => document.body?.innerText.includes('15GB')",
+                timeout=self._automation_wait_timeout_ms(),
+            )
+        except PlaywrightTimeoutError as exc:
+            raise RetryableStalledPageError(
+                "回国年套餐标签已点击，但 15GB 套餐没有加载"
+            ) from exc
+        selected = page.evaluate(SELECT_RETURN_HOME_15GB_PLAN_SCRIPT)
+        if not selected:
+            raise AutomationError(
+                "没有定位到回国年套餐 15GB / £22.00/365天的立即订购按钮"
+            )
+        self.log(
+            "回国年套餐 15GB / £22.00/365天按钮点击已提交，"
+            "等待选择 SIM 卡路线"
+        )
+        try:
+            page.wait_for_function(
+                "() => document.body?.innerText.includes('我还没有SIM卡')",
+                timeout=self._automation_step_timeout_ms(),
+            )
+        except PlaywrightTimeoutError as exc:
+            raise RetryableStalledPageError(
+                "回国年套餐 15GB 已点击，但 SIM 卡路线选择没有出现"
+            ) from exc
+        self._click_visible_text(page, "我还没有SIM卡")
+        self._wait_for_page_transition(
+            page,
+            label="回国年套餐 15GB 套餐详情",
+            expected_path="/buycard/simcarddetails",
+            ready_script=RETURN_HOME_PLAN_DETAILS_READY_SCRIPT,
+            stall_timeout_ms=PLAN_DETAILS_STALL_TIMEOUT_MS,
+        )
+        try:
+            page.wait_for_function(
+                RETURN_HOME_PLAN_DETAILS_READY_SCRIPT,
+                timeout=self._automation_step_timeout_ms(),
+            )
+        except PlaywrightTimeoutError as exc:
+            raise AutomationError(
+                "回国年套餐详情页未确认 15GB、£22.00/365天套餐"
+            ) from exc
+        self._wait_for_page_ready(
+            page,
+            "回国年套餐 15GB 套餐详情",
+            stall_timeout_ms=PLAN_DETAILS_STALL_TIMEOUT_MS,
+        )
+        self.log("已选择回国年套餐 15GB、£22/365天套餐")
+
     def _configure_sim(self, page: Page) -> None:
         self.stage("配置 SIM / 套餐")
         self._dismiss_cookie_consent(page)
@@ -1992,12 +2238,13 @@ class CTExcelAutomation:
             exact=True,
             label="免费随机号码",
         )
-        self._ensure_selected_option(
-            page,
-            "1 个月",
-            exact=True,
-            label="订购周期 1 个月",
-        )
+        if self.config.purchase_route != PURCHASE_ROUTE_RETURN_HOME_15GB:
+            self._ensure_selected_option(
+                page,
+                "1 个月",
+                exact=True,
+                label="订购周期 1 个月",
+            )
 
         self._wait_for_page_ready(page, "自动续订开关")
         switch = self._visible_locator(
@@ -2018,7 +2265,15 @@ class CTExcelAutomation:
         switch_class = switch.get_attribute("class") or ""
         if "is-checked" in switch_class:
             raise AutomationError("自动续订仍处于开启状态")
-        self.log("实体 SIM、免费随机号码、1个月、1张，自动续订已关闭")
+        period_note = (
+            "365天"
+            if self.config.purchase_route == PURCHASE_ROUTE_RETURN_HOME_15GB
+            else "1个月"
+        )
+        self.log(
+            f"实体 SIM、免费随机号码、{period_note}、1张，"
+            "自动续订已关闭"
+        )
         self._click_button_and_wait_for_page(
             page,
             "下一步",
@@ -2671,7 +2926,8 @@ class CTExcelAutomation:
         self.stage("确认订单")
         self._wait_for_page_ready(page, "订单确认页")
         defaults = self.config.registration
-        if self.config.purchase_route == PURCHASE_ROUTE_50GB:
+        expected = expected_route_price(self.config)
+        if self.config.purchase_route != PURCHASE_ROUTE_FREECARD:
             coupon_code = defaults.coupon_code.strip()
             if not coupon_code:
                 raise AutomationError("客户端设置中的优惠码为空")
@@ -2685,7 +2941,6 @@ class CTExcelAutomation:
                 raise AutomationError("优惠码没有完整写入结算页输入框")
             self.log(f"优惠码已填入并核对：{coupon_code}")
             self._click_button(page, "使用优惠码")
-            expected = defaults.expected_price_gbp.strip()
             deadline = time.monotonic() + max(
                 5,
                 self._automation_step_timeout_ms() / 1000,
@@ -2714,7 +2969,7 @@ class CTExcelAutomation:
             self.log(f"优惠码已生效，最终价格 £{expected}")
         else:
             body_text = page.locator("body").inner_text()
-            if not price_is_expected(body_text, "1.00"):
+            if not price_is_expected(body_text, expected):
                 raise AutomationError("£1 预存领卡订单金额校验失败")
             self.log("£1 预存领卡订单金额已核对")
 
@@ -2831,11 +3086,7 @@ class CTExcelAutomation:
         self._wait_for_page_ready(payment_page, "微信支付页")
         page_text = payment_page.locator("body").inner_text()
         order = ORDER_PATTERN.search(page_text)
-        expected = (
-            "1.00"
-            if self.config.purchase_route == PURCHASE_ROUTE_FREECARD
-            else self.config.registration.expected_price_gbp.strip()
-        )
+        expected = expected_route_price(self.config)
         if not payment_page_has_expected_amount(page_text, expected):
             raise AutomationError("微信支付页的英镑金额与所选申请路线不一致")
         order_number = order.group(0).upper() if order else ""
@@ -2877,11 +3128,7 @@ class CTExcelAutomation:
         self.log("支付条款弹窗已打开")
         self._submit_payment_terms(page, dialog)
         payment_page = self._wait_for_alipay_payment_page(page)
-        expected = (
-            "1.00"
-            if self.config.purchase_route == PURCHASE_ROUTE_FREECARD
-            else self.config.registration.expected_price_gbp.strip()
-        )
+        expected = expected_route_price(self.config)
         payment_page = self._complete_alipay_gateway_selection(
             payment_page,
             expected_amount=expected,
@@ -2967,6 +3214,7 @@ class CTExcelAutomation:
         *,
         expected_amount: str,
     ) -> None:
+        normalized_amount = normalize_gateway_amount(expected_amount)
         deadline = time.monotonic() + max(
             5,
             self._automation_step_timeout_ms() / 1000,
@@ -2977,7 +3225,7 @@ class CTExcelAutomation:
             with contextlib.suppress(Exception):
                 result = page.evaluate(
                     ALIPAY_GATEWAY_PAY_SCRIPT,
-                    expected_amount,
+                    normalized_amount,
                 )
             if isinstance(result, dict) and result.get("found"):
                 if result.get("enabled"):

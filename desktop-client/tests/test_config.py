@@ -10,6 +10,8 @@ from ctexcel_client.config import (
     ProxyConfig,
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
+    PURCHASE_ROUTE_RETURN_HOME_15GB,
+    RETURN_HOME_APPLICATION_URL,
     RegistrationDefaults,
     TelegramConfig,
     display_qg_proxy_api_url,
@@ -52,6 +54,7 @@ def test_client_ui_uses_scoped_api_without_hidden_entry_field():
     assert "自动申请工作台" in source
     assert '"预存 £1 领卡"' in source
     assert '"50GB · £11.9/30天（优惠后 £5.95）"' in source
+    assert '"回国年套餐 · 15GB / £22/365天（优惠后 £11）"' in source
     assert "£1 路线推荐人号码" in source
     assert '"连续申请"' in source
     assert '"目标数量"' in source
@@ -62,7 +65,7 @@ def test_client_ui_uses_scoped_api_without_hidden_entry_field():
     assert '"支付方式"' in source
     assert "支付宝（银行卡/支付宝支付网关）" in source
     assert "微信支付（二维码）" in source
-    assert __version__ == "2.5.12"
+    assert __version__ == "2.5.13"
     assert 'f"CTExcel 申请工作台 v{__version__}"' in source
 
 
@@ -240,6 +243,20 @@ def test_non_secret_registration_defaults_round_trip(tmp_path: Path):
     assert loaded.telegram.enabled is True
     assert loaded.telegram.chat_id == "-1001234567890"
     assert loaded.app_password == ""
+
+
+def test_return_home_15gb_route_round_trip_and_entry_url(tmp_path: Path):
+    target = tmp_path / "config.json"
+    config = AppConfig(
+        remember_credentials=False,
+        purchase_route=PURCHASE_ROUTE_RETURN_HOME_15GB,
+    )
+
+    save_config(config, target)
+    loaded = load_config(target)
+
+    assert loaded.purchase_route == PURCHASE_ROUTE_RETURN_HOME_15GB
+    assert RETURN_HOME_APPLICATION_URL == "https://www.ctexcel.com/uk/home"
 
 
 def test_invalid_saved_purchase_route_migrates_to_freecard(tmp_path: Path):

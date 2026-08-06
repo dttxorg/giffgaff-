@@ -6,6 +6,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import __version__
+
 
 class ApiError(RuntimeError):
     pass
@@ -61,7 +63,7 @@ class AdminApi:
         self.server_url = server_url.strip().rstrip("/")
         self.app_password = app_password.strip()
         headers = {
-            "User-Agent": "CTExcelApplyClient/2.5.12",
+            "User-Agent": f"CTExcelApplyClient/{__version__}",
             "Accept": "application/json",
         }
         if self.app_password:

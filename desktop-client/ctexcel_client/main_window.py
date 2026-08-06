@@ -42,6 +42,7 @@ from .config import (
     ProxyConfig,
     PURCHASE_ROUTE_50GB,
     PURCHASE_ROUTE_FREECARD,
+    PURCHASE_ROUTE_RETURN_HOME_15GB,
     RegistrationDefaults,
     TelegramConfig,
     display_qg_proxy_api_url,
@@ -538,6 +539,8 @@ class MainWindow(QMainWindow):
         self.freecard_referrer = QLineEdit()
         self.coupon_code = QLineEdit()
         self.expected_price = QLineEdit()
+        self._expected_price_by_route: dict[str, str] = {}
+        self._active_route: str | None = None
         self.purchase_route = QComboBox()
         self.purchase_route.addItem(
             "预存 £1 领卡",
@@ -546,6 +549,13 @@ class MainWindow(QMainWindow):
         self.purchase_route.addItem(
             "50GB · £11.9/30天（优惠后 £5.95）",
             PURCHASE_ROUTE_50GB,
+        )
+        self.purchase_route.addItem(
+            "回国年套餐 · 15GB / £22/365天（优惠后 £11）",
+            PURCHASE_ROUTE_RETURN_HOME_15GB,
+        )
+        self.purchase_route.currentIndexChanged.connect(
+            self._update_route_fields
         )
         self.browser_channel = QComboBox()
         self.browser_channel.addItems(["msedge", "chrome", "chromium"])
@@ -570,16 +580,53 @@ class MainWindow(QMainWindow):
         grid.addWidget(self._field_label("£1 路线推荐人号码"), 10, 1)
         grid.addWidget(self.browser_channel, 11, 0)
         grid.addWidget(self.freecard_referrer, 11, 1)
-        grid.addWidget(self._field_label("50GB 路线推荐码"), 12, 0)
-        grid.addWidget(self._field_label("50GB 路线优惠码"), 12, 1)
+        self.referral_label = self._field_label("50GB 路线推荐码")
+        self.coupon_label = self._field_label("50GB 路线优惠码")
+        self.expected_price_label = self._field_label(
+            "50GB 优惠后金额（GBP）"
+        )
+        grid.addWidget(self.referral_label, 12, 0)
+        grid.addWidget(self.coupon_label, 12, 1)
         grid.addWidget(self.referral_code, 13, 0)
         grid.addWidget(self.coupon_code, 13, 1)
-        grid.addWidget(self._field_label("50GB 优惠后金额（GBP）"), 14, 0, 1, 2)
+        grid.addWidget(self.expected_price_label, 14, 0, 1, 2)
         grid.addWidget(self.expected_price, 15, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
         return card
+
+    def _update_route_fields(self, *_args: object) -> None:
+        """Keep route-specific guidance and the fixed annual target visible."""
+        route = str(self.purchase_route.currentData() or "")
+        previous_route = self._active_route
+        if previous_route and previous_route != route:
+            previous_value = self.expected_price.text().strip()
+            if previous_value:
+                self._expected_price_by_route[previous_route] = previous_value
+        self._active_route = route
+        if route == PURCHASE_ROUTE_RETURN_HOME_15GB:
+            self.referral_label.setText("回国年套餐路线推荐码")
+            self.coupon_label.setText("回国年套餐半价优惠码")
+            self.expected_price_label.setText(
+                "回国年套餐优惠后金额（GBP，必须为 11.00）"
+            )
+            # The route has a fixed £22 -> £11 approval target.  Do not carry
+            # the 50GB default into a newly selected annual application.
+            self.expected_price.setText("11.00")
+        elif route == PURCHASE_ROUTE_FREECARD:
+            self.referral_label.setText("£1 路线推荐人号码")
+            self.coupon_label.setText("付费路线优惠码（£1 路线不使用）")
+            self.expected_price_label.setText("付费路线优惠后金额（GBP）")
+        else:
+            self.referral_label.setText("50GB 路线推荐码")
+            self.coupon_label.setText("50GB 路线优惠码")
+            self.expected_price_label.setText("50GB 优惠后金额（GBP）")
+            saved_value = self._expected_price_by_route.get(route)
+            if saved_value:
+                self.expected_price.setText(saved_value)
+            elif self.expected_price.text().strip() in {"", "11.00"}:
+                self.expected_price.setText("5.95")
 
     def _workflow_card(self) -> QFrame:
         card, layout = self._card(
@@ -755,6 +802,7 @@ class MainWindow(QMainWindow):
         self.expected_price.setText(config.registration.expected_price_gbp)
         route_index = self.purchase_route.findData(config.purchase_route)
         self.purchase_route.setCurrentIndex(max(0, route_index))
+        self._update_route_fields()
         payment_index = self.payment_method.findData(config.payment_method)
         self.payment_method.setCurrentIndex(max(0, payment_index))
         self.continuous_enabled.setChecked(config.continuous_enabled)
