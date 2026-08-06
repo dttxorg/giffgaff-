@@ -73,6 +73,7 @@ PAGE_CLICK_TIMEOUT_MS = 5_000
 PLAN_DETAILS_STALL_TIMEOUT_MS = 45_000
 PAYMENT_PAGE_STALL_TIMEOUT_MS = 45_000
 PAYMENT_TERMS_BIND_TIMEOUT_MS = 1_500
+PAYMENT_QR_CAPTURE_WAIT_SECONDS = 10
 VERIFICATION_CODE_CACHE_SECONDS = 180
 VERIFICATION_FEEDBACK_TIMEOUT_SECONDS = 5.0
 TUNNEL_BROWSER_STAGGER_SECONDS = 5
@@ -531,9 +532,41 @@ ALIPAY_QR_READY_SCRIPT = r"""() => {
       && rect.width / rect.height >= 0.7
       && rect.width / rect.height <= 1.45;
   };
-  const qr = Array.from(document.querySelectorAll(
-    'img,canvas,svg,[class*="qr"],[id*="qr"]'
-  )).some(visible);
+  const markerOf = element => {
+    const parts = [];
+    for (
+      let current = element, depth = 0;
+      current && depth < 5;
+      depth += 1, current = current.parentElement
+    ) {
+      parts.push(
+        current.id || '',
+        current.className || '',
+        current.getAttribute?.('src') || '',
+        current.getAttribute?.('alt') || '',
+        current.getAttribute?.('style') || '',
+        current.getAttribute?.('aria-label') || '',
+        current.getAttribute?.('data-testid') || ''
+      );
+    }
+    return parts.join(' ').toLowerCase();
+  };
+  const visual = Array.from(document.querySelectorAll(
+    'img,canvas,svg,'
+      + '[id*="qr" i],[class*="qr" i],'
+      + '[data-testid*="qr" i],[data-test*="qr" i],'
+      + '[style*="background-image" i]'
+  )).filter(visible);
+  const hasSemanticQr = element => {
+    const marker = markerOf(element);
+    const negative = /guide|instruction|tutorial|help|说明|步骤|提示|how[- ]?to/i;
+    const positive = /qrcode|qr[-_ ]?code|payment[-_ ]?code|pay[-_ ]?code|barcode|alipay[-_ ]?qr|二维码/i;
+    return positive.test(marker) && !negative.test(marker);
+  };
+  // Some Alipay builds paint the QR into a canvas/background without a QR
+  // class.  When both square visual elements are present, let the capture
+  // routine inspect the page instead of treating the guide image as the QR.
+  const qr = visual.some(hasSemanticQr) || visual.length >= 2;
   return marker && qr;
 }"""
 PROXY_BROWSER_RETRY_ATTEMPTS = 3
@@ -3893,16 +3926,93 @@ class CTExcelAutomation:
 
     def _capture_payment_qr(self, page: Page) -> bytes:
         deadline = time.monotonic() + min(
-            30,
+            PAYMENT_QR_CAPTURE_WAIT_SECONDS,
             max(5, int(self.config.step_timeout_ms) / 1000),
         )
+        candidate_selector = (
+            'img,canvas,svg,'
+            '[id*="qr" i],[class*="qr" i],'
+            '[data-testid*="qr" i],[data-test*="qr" i],'
+            '[style*="background-image" i]'
+        )
+        metadata_script = r"""node => {
+          const parts = [];
+          const textParts = [];
+          for (
+            let current = node, depth = 0;
+            current && depth < 5;
+            depth += 1, current = current.parentElement
+          ) {
+            parts.push(
+              current.id || '',
+              current.className || '',
+              current.getAttribute?.('src') || '',
+              current.getAttribute?.('alt') || '',
+              current.getAttribute?.('style') || '',
+              current.getAttribute?.('aria-label') || '',
+              current.getAttribute?.('data-testid') || ''
+            );
+            textParts.push(String(
+              current.innerText || current.textContent || ''
+            ).slice(0, 300));
+          }
+          return {
+            marker: parts.join(' ').toLowerCase(),
+            context: textParts.join(' ').toLowerCase(),
+            tag: String(node.tagName || '').toLowerCase(),
+            descendants: node.querySelectorAll
+              ? node.querySelectorAll('img,canvas,svg').length
+              : 0,
+          };
+        }"""
+        positive_markers = (
+            "qrcode",
+            "qr-code",
+            "qr_code",
+            "qr code",
+            "payment-code",
+            "payment_code",
+            "payment code",
+            "pay-code",
+            "pay_code",
+            "barcode",
+            "alipay-qr",
+            "alipay_qr",
+            "二维码",
+        )
+        negative_markers = (
+            "guide",
+            "instruction",
+            "tutorial",
+            "help",
+            "how-to",
+            "howto",
+            "说明",
+            "步骤",
+            "提示",
+        )
+        documents = self._payment_documents(page)
+        is_alipay_page = False
+        for document in documents:
+            document_url = self._document_url(document).lower()
+            if "alipay" in document_url:
+                is_alipay_page = True
+                break
+            with contextlib.suppress(Exception):
+                document_text = self._document_text(document, timeout=500)
+                if "支付宝" in document_text or "alipay" in document_text.lower():
+                    is_alipay_page = True
+                    break
         while time.monotonic() < deadline:
             self._check_stop()
-            best: Optional[Locator] = None
-            best_score = 0.0
-            for document in self._payment_documents(page):
+            best_semantic: Optional[Locator] = None
+            best_semantic_score = float("-inf")
+            best_generic: Optional[Locator] = None
+            best_generic_score = float("-inf")
+            saw_candidate = False
+            for document in documents:
                 with contextlib.suppress(Exception):
-                    candidates = document.locator("img, canvas, svg")
+                    candidates = document.locator(candidate_selector)
                     for index in range(candidates.count()):
                         candidate = candidates.nth(index)
                         with contextlib.suppress(Exception):
@@ -3923,38 +4033,77 @@ class CTExcelAutomation:
                             ratio = width / height if height else 0
                             if not 0.72 <= ratio <= 1.38:
                                 continue
-                            marker = str(
-                                candidate.evaluate(
-                                    """node => [
-                                      node.id || '',
-                                      node.className || '',
-                                      node.getAttribute?.('src') || '',
-                                      node.getAttribute?.('alt') || ''
-                                    ].join(' ').toLowerCase()"""
-                                )
-                                or ""
+                            saw_candidate = True
+                            metadata = candidate.evaluate(metadata_script) or {}
+                            if not isinstance(metadata, dict):
+                                metadata = {"marker": str(metadata)}
+                            marker = str(metadata.get("marker") or "").lower()
+                            context_text = str(
+                                metadata.get("context") or ""
+                            ).lower()
+                            is_negative = any(
+                                token in marker for token in negative_markers
                             )
-                            score = width * height
-                            if any(
-                                token in marker
-                                for token in (
-                                    "qr",
-                                    "qrcode",
-                                    "wechat",
-                                    "weixin",
-                                    "wx",
-                                    "二维码",
-                                    "data:image",
+                            is_semantic = (
+                                any(
+                                    token in marker
+                                    for token in positive_markers
                                 )
+                                and not is_negative
+                            )
+                            area = width * height
+                            tag = str(metadata.get("tag") or "").lower()
+                            descendants = int(
+                                metadata.get("descendants") or 0
+                            )
+                            # Prefer an explicitly named QR node, and prefer
+                            # the smallest/deepest matching node when a QR
+                            # wrapper and its child are both selectable.
+                            if is_semantic:
+                                specificity = sum(
+                                    1
+                                    for token in positive_markers
+                                    if token in marker
+                                )
+                                score = (
+                                    1_000_000
+                                    + specificity * 10_000
+                                    - min(area, 900_000) / 100
+                                    - descendants * 100
+                                )
+                                if score > best_semantic_score:
+                                    best_semantic = candidate
+                                    best_semantic_score = score
+                                continue
+                            # Generic image/canvas candidates remain a useful
+                            # fallback for WeChat.  An Alipay guide image is
+                            # deliberately not selected without QR semantics.
+                            generic_score = area
+                            if tag in {"canvas", "svg"}:
+                                generic_score += 5_000
+                            if any(
+                                token in context_text
+                                for token in ("二维码", "扫码", "扫一扫")
                             ):
-                                score += 1_000_000
-                            if score > best_score:
-                                best = candidate
-                                best_score = score
-            if best is not None:
-                image = best.screenshot(type="png")
+                                generic_score += 10_000
+                            if is_negative:
+                                generic_score -= 100_000
+                            if generic_score > best_generic_score:
+                                best_generic = candidate
+                                best_generic_score = generic_score
+            selected = best_semantic
+            if selected is None and not is_alipay_page:
+                selected = best_generic
+            if selected is not None:
+                image = selected.screenshot(type="png")
                 if image:
                     return image
+            # The Alipay page commonly exposes a QR and a separate square
+            # guide image.  Sending the whole page is safer than sending the
+            # guide alone when the QR has no DOM marker (for example, a
+            # canvas/background generated by the hosted cashier).
+            if is_alipay_page and saw_candidate:
+                return page.screenshot(type="png", full_page=False)
             self._wait_interruptibly(1)
         self.log(
             "付款页未识别到独立二维码元素，改为发送当前付款页截图"

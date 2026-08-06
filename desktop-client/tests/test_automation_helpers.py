@@ -303,6 +303,116 @@ def test_alipay_qr_capture_uses_small_codes_without_a_long_fallback_wait():
     assert "PAYMENT_METHOD_ALIPAY" in source
 
 
+def test_alipay_qr_capture_prefers_qr_container_over_guide_image():
+    class FakeCandidate:
+        def __init__(self, marker, image, size):
+            self.metadata = {
+                "marker": marker,
+                "context": "",
+                "tag": "img",
+                "descendants": 0,
+            }
+            self.image = image
+            self.size = size
+
+        def is_visible(self):
+            return True
+
+        def bounding_box(self):
+            return {"width": self.size, "height": self.size}
+
+        def evaluate(self, _script):
+            return self.metadata
+
+        def screenshot(self, **_kwargs):
+            return self.image
+
+    class FakeCandidateList:
+        def __init__(self, candidates):
+            self.candidates = candidates
+
+        def count(self):
+            return len(self.candidates)
+
+        def nth(self, index):
+            return self.candidates[index]
+
+    class FakeDocument:
+        url = "https://pay.alipay.com/gateway"
+
+        def __init__(self, candidates):
+            self.candidates = candidates
+
+        def locator(self, selector):
+            if selector == "body":
+                return SimpleNamespace(inner_text=lambda **_kwargs: "支付宝")
+            return FakeCandidateList(self.candidates)
+
+    class FakePage(FakeDocument):
+        def screenshot(self, **_kwargs):
+            return b"FULL-PAYMENT-PAGE"
+
+    guide = FakeCandidate("alipay-guide data:image/png;base64,guide", b"GUIDE", 180)
+    qr = FakeCandidate("qr-code data:image/png;base64,qr", b"QR", 120)
+    page = FakePage([guide, qr])
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    assert runner._capture_payment_qr(page) == b"QR"
+
+
+def test_alipay_qr_capture_sends_full_page_when_only_guide_is_detected():
+    class FakeCandidate:
+        def is_visible(self):
+            return True
+
+        def bounding_box(self):
+            return {"width": 180, "height": 180}
+
+        def evaluate(self, _script):
+            return {
+                "marker": "alipay-guide data:image/png;base64,guide",
+                "context": "",
+                "tag": "img",
+                "descendants": 0,
+            }
+
+        def screenshot(self, **_kwargs):
+            return b"GUIDE"
+
+    class FakeCandidateList:
+        def count(self):
+            return 1
+
+        def nth(self, _index):
+            return FakeCandidate()
+
+    class FakePage:
+        url = "https://pay.alipay.com/gateway"
+        frames = ()
+
+        def locator(self, selector):
+            if selector == "body":
+                return SimpleNamespace(inner_text=lambda **_kwargs: "支付宝")
+            return FakeCandidateList()
+
+        def screenshot(self, **_kwargs):
+            return b"FULL-PAYMENT-PAGE"
+
+    runner = CTExcelAutomation(
+        AppConfig(),
+        log=lambda _message: None,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+
+    assert runner._capture_payment_qr(FakePage()) == b"FULL-PAYMENT-PAGE"
+
+
 def test_payment_timeout_deletes_qr_but_keeps_page_until_success(monkeypatch):
     clock = iter((0.0, 121.0))
     deleted = []
