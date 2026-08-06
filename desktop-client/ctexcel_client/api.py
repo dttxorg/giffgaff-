@@ -73,6 +73,10 @@ class AdminApi:
             follow_redirects=False,
             transport=transport,
             headers=headers,
+            # Registration browser proxies must never affect the customer
+            # management API.  In particular, a stale HTTP(S)_PROXY can
+            # turn a healthy Cloudflare endpoint into an origin 502.
+            trust_env=False,
         )
         self.retry_callback = retry_callback
         self.retry_delays = tuple(

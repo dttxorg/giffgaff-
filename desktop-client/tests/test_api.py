@@ -7,6 +7,25 @@ import httpx
 from ctexcel_client.api import AdminApi, ApiError
 
 
+def test_client_api_does_not_inherit_system_proxy_environment():
+    with AdminApi(
+        "https://manager.example.test",
+        "app-secret",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "api_version": 8,
+                    "ctexcel_customer_count": 0,
+                    "pending_customer_count": 0,
+                },
+            )
+        ),
+    ) as api:
+        assert api.client._trust_env is False
+
+
 def test_scoped_api_connection_customer_creation_and_verification_flow():
     requests: list[tuple[str, str]] = []
 
