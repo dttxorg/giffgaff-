@@ -248,6 +248,9 @@ ALIPAY_GATEWAY_SELECT_SCRIPT = r"""() => {
     return nodes.some(node =>
       node.getAttribute?.('aria-checked') === 'true'
       || node.getAttribute?.('aria-selected') === 'true'
+      || node.getAttribute?.('aria-expanded') === 'true'
+      || node.getAttribute?.('data-selected') === 'true'
+      || node.getAttribute?.('data-active') === 'true'
       || node.classList?.contains('selected')
       || node.classList?.contains('active')
       || node.classList?.contains('checked')
@@ -307,6 +310,9 @@ ALIPAY_GATEWAY_PAY_SCRIPT = r"""(expected) => {
     return nodes.some(node =>
       node.getAttribute?.('aria-checked') === 'true'
       || node.getAttribute?.('aria-selected') === 'true'
+      || node.getAttribute?.('aria-expanded') === 'true'
+      || node.getAttribute?.('data-selected') === 'true'
+      || node.getAttribute?.('data-active') === 'true'
       || node.classList?.contains('selected')
       || node.classList?.contains('active')
       || node.classList?.contains('checked')
@@ -325,7 +331,16 @@ ALIPAY_GATEWAY_PAY_SCRIPT = r"""(expected) => {
     return (text.includes('支付宝') || text.includes('alipay'))
       && selected(element);
   });
-  if (!alipaySelected) return {found: false, enabled: false};
+  const bodyText = norm(document.body?.innerText || '');
+  const alipayExpanded = [
+    '系统将跳转到支付宝网站',
+    'redirectedtoalipay',
+    'redirecttoalipay',
+    'paywithalipay',
+  ].some(marker => bodyText.includes(norm(marker)));
+  if (!alipaySelected && !alipayExpanded) {
+    return {found: false, enabled: false};
+  }
   const candidateSelector =
     'button,[role="button"],a,[type="submit"],[class*="button"],[class*="btn"]';
   const candidateElements = root => Array.from(
