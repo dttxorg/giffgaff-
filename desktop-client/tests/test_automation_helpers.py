@@ -1,10 +1,13 @@
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
+import binascii
 from pathlib import Path
 import os
+import struct
 import threading
 import time
 from types import SimpleNamespace
+import zlib
 
 import pytest
 
@@ -303,7 +306,7 @@ def test_alipay_qr_capture_uses_small_codes_without_a_long_fallback_wait():
     assert "PAYMENT_METHOD_ALIPAY" in source
 
 
-def test_alipay_qr_capture_prefers_qr_container_over_guide_image():
+def test_alipay_qr_capture_prefers_qr_container_over_guide_image(monkeypatch):
     class FakeCandidate:
         def __init__(self, marker, image, size):
             self.metadata = {
@@ -361,8 +364,49 @@ def test_alipay_qr_capture_prefers_qr_container_over_guide_image():
         stage=lambda _stage: None,
         customer_created=lambda _payload: None,
     )
+    monkeypatch.setattr(
+        runner,
+        "_qr_visual_score",
+        lambda image: 1.0 if image == b"QR" else 0.1,
+    )
 
     assert runner._capture_payment_qr(page) == b"QR"
+
+
+def test_qr_visual_score_distinguishes_black_white_modules_from_gray_guide():
+    def png(fill):
+        width = height = 64
+        rows = []
+        for y in range(height):
+            row = bytearray([0])
+            for x in range(width):
+                if fill == "qr":
+                    value = 0 if (x // 2 + y // 2) % 2 else 255
+                else:
+                    value = 128
+                row.extend((value, value, value, 255))
+            rows.append(bytes(row))
+
+        def chunk(kind, value):
+            return (
+                struct.pack(">I", len(value))
+                + kind
+                + value
+                + struct.pack(">I", binascii.crc32(kind + value) & 0xFFFFFFFF)
+            )
+
+        body = b"".join(rows)
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(body))
+            + chunk(b"IEND", b"")
+        )
+
+    qr_score = CTExcelAutomation._qr_visual_score(png("qr"))
+    guide_score = CTExcelAutomation._qr_visual_score(png("guide"))
+    assert qr_score >= 0.35
+    assert guide_score == 0.0
 
 
 def test_alipay_qr_capture_sends_full_page_when_only_guide_is_detected():

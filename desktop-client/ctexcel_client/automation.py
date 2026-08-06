@@ -13,12 +13,14 @@ import contextlib
 from pathlib import Path
 import re
 import shutil
+import struct
 import threading
 import tempfile
 import time
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlsplit
 import uuid
+import zlib
 
 from playwright.sync_api import (
     BrowserContext,
@@ -74,6 +76,7 @@ PLAN_DETAILS_STALL_TIMEOUT_MS = 45_000
 PAYMENT_PAGE_STALL_TIMEOUT_MS = 45_000
 PAYMENT_TERMS_BIND_TIMEOUT_MS = 1_500
 PAYMENT_QR_CAPTURE_WAIT_SECONDS = 10
+PAYMENT_QR_VISUAL_SCORE_THRESHOLD = 0.35
 VERIFICATION_CODE_CACHE_SECONDS = 180
 VERIFICATION_FEEDBACK_TIMEOUT_SECONDS = 5.0
 TUNNEL_BROWSER_STAGGER_SECONDS = 5
@@ -3924,6 +3927,150 @@ class CTExcelAutomation:
                 )
             page.wait_for_timeout(1000)
 
+    @staticmethod
+    def _qr_visual_score(image: bytes) -> float:
+        """Score a PNG crop by its black/white QR-like pattern.
+
+        Hosted Alipay pages have used both a named QR canvas and an unnamed
+        image next to the instructional illustration.  DOM names alone are
+        therefore not reliable.  This small PNG reader keeps the client
+        dependency-free and measures the high-contrast module pattern that a
+        QR code has, while the gray/blue guide image scores close to zero.
+        """
+        if not isinstance(image, (bytes, bytearray)) or len(image) < 32:
+            return 0.0
+        png_signature = b"\x89PNG\r\n\x1a\n"
+        if not image.startswith(png_signature):
+            return 0.0
+        width = height = bit_depth = color_type = 0
+        compressed = bytearray()
+        offset = len(png_signature)
+        try:
+            while offset + 12 <= len(image):
+                length = struct.unpack(">I", image[offset : offset + 4])[0]
+                chunk_start = offset + 8
+                chunk_end = chunk_start + length
+                if chunk_end + 4 > len(image):
+                    return 0.0
+                chunk_type = image[offset + 4 : offset + 8]
+                chunk = image[chunk_start:chunk_end]
+                offset = chunk_end + 4
+                if chunk_type == b"IHDR":
+                    if len(chunk) != 13:
+                        return 0.0
+                    width, height, bit_depth, color_type = struct.unpack(
+                        ">IIBB", chunk[:10]
+                    )
+                    if (
+                        not width
+                        or not height
+                        or bit_depth != 8
+                        or color_type not in (2, 6)
+                    ):
+                        return 0.0
+                elif chunk_type == b"IDAT":
+                    compressed.extend(chunk)
+                elif chunk_type == b"IEND":
+                    break
+            if not width or not height or not compressed:
+                return 0.0
+            bytes_per_pixel = 4 if color_type == 6 else 3
+            stride = width * bytes_per_pixel
+            decoded = zlib.decompress(bytes(compressed))
+            expected_length = height * (stride + 1)
+            if len(decoded) < expected_length:
+                return 0.0
+        except (ValueError, TypeError, struct.error, zlib.error):
+            return 0.0
+
+        # Undo PNG row filters.  Playwright emits non-interlaced 8-bit PNGs;
+        # rejecting other layouts above keeps this parser deterministic.
+        rows: list[bytes] = []
+        cursor = 0
+        previous = bytearray(stride)
+        for _ in range(height):
+            filter_type = decoded[cursor]
+            cursor += 1
+            row = bytearray(decoded[cursor : cursor + stride])
+            cursor += stride
+            if filter_type == 1:  # Sub
+                for index in range(stride):
+                    left = row[index - bytes_per_pixel] if index >= bytes_per_pixel else 0
+                    row[index] = (row[index] + left) & 0xFF
+            elif filter_type == 2:  # Up
+                for index in range(stride):
+                    row[index] = (row[index] + previous[index]) & 0xFF
+            elif filter_type == 3:  # Average
+                for index in range(stride):
+                    left = row[index - bytes_per_pixel] if index >= bytes_per_pixel else 0
+                    row[index] = (row[index] + ((left + previous[index]) // 2)) & 0xFF
+            elif filter_type == 4:  # Paeth
+                for index in range(stride):
+                    left = row[index - bytes_per_pixel] if index >= bytes_per_pixel else 0
+                    up = previous[index]
+                    upper_left = (
+                        previous[index - bytes_per_pixel]
+                        if index >= bytes_per_pixel
+                        else 0
+                    )
+                    predictor = left + up - upper_left
+                    distance_left = abs(predictor - left)
+                    distance_up = abs(predictor - up)
+                    distance_upper_left = abs(predictor - upper_left)
+                    if (
+                        distance_left <= distance_up
+                        and distance_left <= distance_upper_left
+                    ):
+                        paeth = left
+                    elif distance_up <= distance_upper_left:
+                        paeth = up
+                    else:
+                        paeth = upper_left
+                    row[index] = (row[index] + paeth) & 0xFF
+            elif filter_type != 0:
+                return 0.0
+            rows.append(bytes(row))
+            previous = row
+
+        sample_width = min(128, width)
+        sample_height = min(128, height)
+        grid: list[list[int]] = []
+        for sample_y in range(sample_height):
+            source_y = min(height - 1, sample_y * height // sample_height)
+            row = rows[source_y]
+            values: list[int] = []
+            for sample_x in range(sample_width):
+                source_x = min(width - 1, sample_x * width // sample_width)
+                pixel = source_x * bytes_per_pixel
+                red, green, blue = row[pixel : pixel + 3]
+                values.append((299 * red + 587 * green + 114 * blue) // 1000)
+            grid.append(values)
+        total = sample_width * sample_height
+        # Alipay's guide uses a large slate-gray circle.  Keep the dark
+        # threshold near-black so that gray guidance art does not look like
+        # QR modules.
+        dark = sum(value < 70 for row in grid for value in row) / total
+        light = sum(value > 210 for row in grid for value in row) / total
+        if dark < 0.04 or light < 0.12:
+            return 0.0
+        horizontal = sum(
+            (left < 120) != (right < 120)
+            for row in grid
+            for left, right in zip(row, row[1:])
+        )
+        vertical = sum(
+            (top < 120) != (bottom < 120)
+            for top_row, bottom_row in zip(grid, grid[1:])
+            for top, bottom in zip(top_row, bottom_row)
+        )
+        edge_count = max(
+            1,
+            sample_height * max(0, sample_width - 1)
+            + max(0, sample_height - 1) * sample_width,
+        )
+        transitions = (horizontal + vertical) / edge_count
+        return min(3.0, min(dark, light) * 4 + transitions * 2)
+
     def _capture_payment_qr(self, page: Page) -> bytes:
         deadline = time.monotonic() + min(
             PAYMENT_QR_CAPTURE_WAIT_SECONDS,
@@ -4007,8 +4154,12 @@ class CTExcelAutomation:
             self._check_stop()
             best_semantic: Optional[Locator] = None
             best_semantic_score = float("-inf")
+            best_semantic_visual = 0.0
+            best_semantic_image = b""
             best_generic: Optional[Locator] = None
             best_generic_score = float("-inf")
+            best_generic_visual = 0.0
+            best_generic_image = b""
             saw_candidate = False
             for document in documents:
                 with contextlib.suppress(Exception):
@@ -4034,6 +4185,10 @@ class CTExcelAutomation:
                             if not 0.72 <= ratio <= 1.38:
                                 continue
                             saw_candidate = True
+                            candidate_image = b""
+                            with contextlib.suppress(Exception):
+                                candidate_image = candidate.screenshot(type="png")
+                            visual_score = self._qr_visual_score(candidate_image)
                             metadata = candidate.evaluate(metadata_script) or {}
                             if not isinstance(metadata, dict):
                                 metadata = {"marker": str(metadata)}
@@ -4070,15 +4225,20 @@ class CTExcelAutomation:
                                     + specificity * 10_000
                                     - min(area, 900_000) / 100
                                     - descendants * 100
+                                    + visual_score * 1_000_000
                                 )
                                 if score > best_semantic_score:
                                     best_semantic = candidate
                                     best_semantic_score = score
+                                    best_semantic_visual = visual_score
+                                    best_semantic_image = candidate_image
                                 continue
                             # Generic image/canvas candidates remain a useful
                             # fallback for WeChat.  An Alipay guide image is
                             # deliberately not selected without QR semantics.
-                            generic_score = area
+                            generic_score = (
+                                visual_score * 1_000_000 + area / 100
+                            )
                             if tag in {"canvas", "svg"}:
                                 generic_score += 5_000
                             if any(
@@ -4091,11 +4251,20 @@ class CTExcelAutomation:
                             if generic_score > best_generic_score:
                                 best_generic = candidate
                                 best_generic_score = generic_score
+                                best_generic_visual = visual_score
+                                best_generic_image = candidate_image
             selected = best_semantic
-            if selected is None and not is_alipay_page:
+            selected_image = best_semantic_image
+            selected_visual = best_semantic_visual
+            if best_generic_visual > selected_visual:
                 selected = best_generic
+                selected_image = best_generic_image
+                selected_visual = best_generic_visual
+            if is_alipay_page and selected_visual < PAYMENT_QR_VISUAL_SCORE_THRESHOLD:
+                selected = None
+                selected_image = b""
             if selected is not None:
-                image = selected.screenshot(type="png")
+                image = selected_image or selected.screenshot(type="png")
                 if image:
                     return image
             # The Alipay page commonly exposes a QR and a separate square
