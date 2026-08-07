@@ -75,7 +75,10 @@ PAGE_CLICK_TIMEOUT_MS = 5_000
 PLAN_DETAILS_STALL_TIMEOUT_MS = 45_000
 PAYMENT_PAGE_STALL_TIMEOUT_MS = 45_000
 PAYMENT_TERMS_BIND_TIMEOUT_MS = 1_500
-PAYMENT_QR_CAPTURE_WAIT_SECONDS = 30
+# This is a recognition window, not a delay before taking a page screenshot.
+# A Telegram image is emitted only after a QR-like crop passes the visual
+# detector; a timeout is reported and the payment page remains open.
+PAYMENT_QR_DETECTION_TIMEOUT_SECONDS = 30
 PAYMENT_QR_VISUAL_SCORE_THRESHOLD = 0.35
 VERIFICATION_CODE_CACHE_SECONDS = 180
 VERIFICATION_FEEDBACK_TIMEOUT_SECONDS = 5.0
@@ -566,10 +569,16 @@ ALIPAY_QR_READY_SCRIPT = r"""() => {
     const positive = /qrcode|qr[-_ ]?code|payment[-_ ]?code|pay[-_ ]?code|barcode|alipay[-_ ]?qr|二维码/i;
     return positive.test(marker) && !negative.test(marker);
   };
-  // Some Alipay builds paint the QR into a canvas/background without a QR
-  // class.  When both square visual elements are present, let the capture
-  // routine inspect the page instead of treating the guide image as the QR.
-  const qr = visual.some(hasSemanticQr) || visual.length >= 2;
+  // Two square elements are not enough: the hosted page often shows an
+  // Alipay logo and a gray instruction illustration before the QR exists.
+  // A canvas is a useful unnamed QR candidate, while pixel recognition
+  // remains the final gate in _capture_payment_qr().
+  const canvasCandidate = visual.some(element => {
+    const marker = markerOf(element);
+    return element.tagName?.toLowerCase() === 'canvas'
+      && !/guide|instruction|tutorial|help|说明|步骤|提示|how[- ]?to/i.test(marker);
+  });
+  const qr = visual.some(hasSemanticQr) || canvasCandidate;
   return marker && qr;
 }"""
 PROXY_BROWSER_RETRY_ATTEMPTS = 3
@@ -936,6 +945,12 @@ class RetryableBlankPageError(RetryableBrowserError):
 
 class RetryableStalledPageError(RetryableBrowserError):
     """No browser-side progress was observed before the pre-payment limit."""
+
+    pass
+
+
+class PaymentQrNotDetectedError(AutomationError):
+    """No standalone payment QR crop passed recognition before the window."""
 
     pass
 
@@ -4073,7 +4088,7 @@ class CTExcelAutomation:
 
     def _capture_payment_qr(self, page: Page) -> bytes:
         deadline = time.monotonic() + min(
-            PAYMENT_QR_CAPTURE_WAIT_SECONDS,
+            PAYMENT_QR_DETECTION_TIMEOUT_SECONDS,
             max(5, int(self.config.page_timeout_ms) / 1000),
         )
         candidate_selector = (
@@ -4138,18 +4153,6 @@ class CTExcelAutomation:
             "步骤",
             "提示",
         )
-        initial_documents = self._payment_documents(page)
-        is_alipay_page = False
-        for document in initial_documents:
-            document_url = self._document_url(document).lower()
-            if "alipay" in document_url:
-                is_alipay_page = True
-                break
-            with contextlib.suppress(Exception):
-                document_text = self._document_text(document, timeout=500)
-                if "支付宝" in document_text or "alipay" in document_text.lower():
-                    is_alipay_page = True
-                    break
         while time.monotonic() < deadline:
             self._check_stop()
             best_semantic: Optional[Locator] = None
@@ -4261,21 +4264,26 @@ class CTExcelAutomation:
                 selected = best_generic
                 selected_image = best_generic_image
                 selected_visual = best_generic_visual
-            if is_alipay_page and selected_visual < PAYMENT_QR_VISUAL_SCORE_THRESHOLD:
+            # Never send a guide, logo, payment panel, or any other square
+            # placeholder.  Every payment method must pass the same pixel
+            # recognition gate before Telegram receives an image.
+            if selected_visual < PAYMENT_QR_VISUAL_SCORE_THRESHOLD:
                 selected = None
                 selected_image = b""
             if selected is not None:
                 image = selected_image or selected.screenshot(type="png")
-                if image:
+                if (
+                    image
+                    and self._qr_visual_score(image)
+                    >= PAYMENT_QR_VISUAL_SCORE_THRESHOLD
+                ):
                     return image
             # A square Alipay guide is often inserted before the QR pixels
-            # arrive.  Keep polling instead of sending that placeholder page;
-            # the full-page fallback below is reserved for a genuine timeout.
+            # arrive.  Keep polling instead of sending that placeholder.
             self._wait_interruptibly(1)
-        self.log(
-            "付款页未识别到独立二维码元素，改为发送当前付款页截图"
+        raise PaymentQrNotDetectedError(
+            "付款页在识别窗口内未检测到有效二维码；已跳过整页截图"
         )
-        return page.screenshot(type="png", full_page=False)
 
     def _push_payment_qr(
         self,
@@ -4327,6 +4335,8 @@ class CTExcelAutomation:
                 f"{payment_label}付款二维码已通过直连发送到 Telegram："
                 f"{order_number}"
             )
+        except PaymentQrNotDetectedError as exc:
+            self.log(f"Telegram 未发送付款图片：{exc}")
         except TelegramError as exc:
             self.log(f"Telegram 二维码推送失败：{exc}")
         except Exception as exc:

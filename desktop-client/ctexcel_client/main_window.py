@@ -309,7 +309,7 @@ class MainWindow(QMainWindow):
     def _telegram_card(self) -> QFrame:
         card, layout = self._card(
             "Telegram 付款提醒",
-            "微信付款页生成后自动截取二维码，并发送到指定 Bot 会话。",
+            "支付宝或微信付款页识别到有效二维码后，仅截取二维码并发送到指定 Bot 会话。",
         )
         self.telegram_enabled = QCheckBox("启用付款二维码推送")
         self.telegram_enabled.toggled.connect(
@@ -939,7 +939,7 @@ class MainWindow(QMainWindow):
         ):
             widget.setEnabled(enabled)
         self.telegram_status.setText(
-            "付款二维码生成后会自动发送，并附带线程、客户、订单和金额。"
+            "识别到有效二维码后会自动发送；识别失败时跳过整页截图。"
             if enabled
             else "Telegram 推送当前未启用。"
         )

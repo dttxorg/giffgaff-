@@ -18,6 +18,7 @@ from ctexcel_client.automation import (
     AutomationError,
     CTExcelBatchAutomation,
     CTExcelAutomation,
+    PaymentQrNotDetectedError,
     RetryableBlankPageError,
     RetryableProxyBrowserError,
     RetryableStalledPageError,
@@ -294,6 +295,42 @@ def test_payment_qr_message_id_is_saved_and_deleted(monkeypatch):
     assert calls[1] == ("delete", 73)
 
 
+def test_payment_qr_not_detected_skips_telegram_without_page_capture(monkeypatch):
+    calls = []
+
+    class UnexpectedNotifier:
+        def __init__(self, _config):
+            raise AssertionError("二维码未识别时不应创建 Telegram 客户端")
+
+    monkeypatch.setattr(automation_module, "TelegramNotifier", UnexpectedNotifier)
+    config = AppConfig()
+    config.telegram.enabled = True
+    runner = CTExcelAutomation(
+        config,
+        log=calls.append,
+        stage=lambda _stage: None,
+        customer_created=lambda _payload: None,
+    )
+    def not_detected(_page):
+        raise PaymentQrNotDetectedError("未检测到有效二维码")
+
+    monkeypatch.setattr(runner, "_capture_payment_qr", not_detected)
+
+    runner._push_payment_qr(
+        object(),
+        customer_id=480,
+        email="customer@example.test",
+        pending_order={
+            "order_number": "ORDER-QR-NOT-READY",
+            "transaction_amount": "5.95",
+            "payment_method": PAYMENT_METHOD_ALIPAY,
+        },
+    )
+
+    assert runner.payment_qr_message_id is None
+    assert any("未发送付款图片" in item for item in calls)
+
+
 def test_alipay_qr_capture_uses_small_codes_without_a_long_fallback_wait():
     source = (
         Path(__file__).resolve().parents[1]
@@ -409,9 +446,11 @@ def test_qr_visual_score_distinguishes_black_white_modules_from_gray_guide():
     assert guide_score == 0.0
 
 
-def test_alipay_qr_capture_sends_full_page_when_only_guide_is_detected(
+def test_alipay_qr_capture_skips_full_page_when_only_guide_is_detected(
     monkeypatch,
 ):
+    state = {"full_page_calls": 0}
+
     class FakeCandidate:
         def is_visible(self):
             return True
@@ -447,6 +486,7 @@ def test_alipay_qr_capture_sends_full_page_when_only_guide_is_detected(
             return FakeCandidateList()
 
         def screenshot(self, **_kwargs):
+            state["full_page_calls"] += 1
             return b"FULL-PAYMENT-PAGE"
 
     runner = CTExcelAutomation(
@@ -467,7 +507,12 @@ def test_alipay_qr_capture_sends_full_page_when_only_guide_is_detected(
         lambda seconds: clock.__setitem__("value", clock["value"] + 31),
     )
 
-    assert runner._capture_payment_qr(FakePage()) == b"FULL-PAYMENT-PAGE"
+    with pytest.raises(
+        PaymentQrNotDetectedError,
+        match="未检测到有效二维码",
+    ):
+        runner._capture_payment_qr(FakePage())
+    assert state["full_page_calls"] == 0
 
 
 def test_alipay_qr_capture_waits_for_placeholder_to_become_qr(monkeypatch):
