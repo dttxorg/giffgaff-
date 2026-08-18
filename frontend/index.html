@@ -1899,12 +1899,740 @@
       .copy-row-label { flex-basis: 100%; }
       .copy-row-val { min-width: 0; }
     }
+    /* ============================================================
+       Customer management visual refresh — calm operations console
+       ============================================================ */
+    :root {
+      --workspace-nav: 208px;
+      --workspace-header: 96px;
+      --workspace-line: #e5e3eb;
+      --workspace-canvas: #f7f7fb;
+      --workspace-ink: #272335;
+      --workspace-muted: #747080;
+      --workspace-purple: #5b3ea4;
+      --workspace-purple-dark: #472d86;
+      --workspace-purple-soft: #f1edfa;
+    }
+    .sr-only {
+      position: absolute !important;
+      width: 1px !important;
+      height: 1px !important;
+      padding: 0 !important;
+      margin: -1px !important;
+      overflow: hidden !important;
+      clip: rect(0, 0, 0, 0) !important;
+      white-space: nowrap !important;
+      border: 0 !important;
+    }
+    html { background: var(--workspace-canvas); }
+    body {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: var(--workspace-nav) minmax(0, 1fr);
+      grid-template-rows: var(--workspace-header) minmax(0, 1fr);
+      overflow: hidden;
+      background: var(--workspace-canvas);
+      color: var(--workspace-ink);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header {
+      grid-column: 2;
+      grid-row: 1;
+      min-width: 0;
+      min-height: var(--workspace-header);
+      padding: 20px 28px 16px;
+      position: relative;
+      top: auto;
+      z-index: 45;
+      gap: 24px;
+      background: #fff;
+      color: var(--workspace-ink);
+      border-bottom: 1px solid #efedf3;
+      box-shadow: none;
+    }
+    header h1 {
+      color: #262133;
+      font-size: 24px;
+      font-weight: 780;
+      line-height: 1.2;
+      letter-spacing: -.45px;
+    }
+    header > div > span,
+    header .page-heading > span {
+      margin-top: 5px;
+      color: var(--workspace-muted);
+      font-size: 12.5px;
+      line-height: 1.35;
+      opacity: 1;
+    }
+    .page-heading { min-width: 220px; }
+    .header-actions {
+      min-width: 0;
+      margin-left: auto;
+      gap: 9px;
+      flex-wrap: nowrap;
+      color: var(--workspace-muted);
+    }
+    .header-actions > span {
+      margin: 0 3px 0 8px;
+      color: var(--workspace-muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .app-mode-switch {
+      min-height: 40px;
+      padding: 0;
+      overflow: hidden;
+      border: 1px solid #ddd9e7;
+      border-radius: 8px;
+      background: #fff;
+    }
+    .app-mode-switch button {
+      min-height: 38px;
+      padding: 7px 15px;
+      border: 0;
+      border-right: 1px solid #e5e2eb;
+      border-radius: 0;
+      color: #656071;
+      background: #fff;
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .app-mode-switch button:last-child { border-right: 0; }
+    .app-mode-switch button:hover { background: #faf9fc; color: #4e4660; }
+    .app-mode-switch button.active {
+      color: var(--workspace-purple-dark);
+      background: #fff;
+      box-shadow: inset 0 0 0 1px var(--workspace-purple);
+    }
+    .app-mode-switch button:focus-visible,
+    .btn-header:focus-visible,
+    .customer-add-primary:focus-visible,
+    .customer-page-controls button:focus-visible,
+    .customer-ledger-filters button:focus-visible {
+      outline: 2px solid rgba(91, 62, 164, .42);
+      outline-offset: 2px;
+    }
+    .btn-header {
+      min-height: 40px;
+      padding: 8px 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      border: 1px solid #ddd9e7;
+      border-radius: 8px;
+      background: #fff;
+      color: #4d4859;
+      font-size: 12px;
+      font-weight: 700;
+      box-shadow: 0 1px 1px rgba(35, 28, 52, .02);
+    }
+    .btn-header:hover { border-color: #c9c2d7; background: #faf9fc; color: var(--workspace-purple-dark); }
+    .btn-header svg { width: 15px; height: 15px; flex: 0 0 auto; }
+
+    .container { display: contents; }
+    .container > .tabs {
+      grid-column: 1;
+      grid-row: 1 / span 2;
+      width: var(--workspace-nav);
+      height: 100vh;
+      min-height: 100vh;
+      margin: 0;
+      padding: 24px 14px;
+      position: relative;
+      top: auto;
+      align-self: stretch;
+      overflow-y: auto;
+      gap: 5px;
+      background: #fff;
+      border-right: 1px solid #e8e6ed;
+      box-shadow: 8px 0 30px rgba(35, 28, 52, .025);
+    }
+    .sidebar-brand {
+      min-height: 54px;
+      padding: 2px 10px 25px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      color: #272234;
+    }
+    .sidebar-brand strong {
+      font-size: 25px;
+      font-weight: 850;
+      line-height: 1;
+      letter-spacing: -1.5px;
+    }
+    .sidebar-brand small {
+      margin-top: 7px;
+      color: #9a95a4;
+      font-size: 9px;
+      font-weight: 750;
+      letter-spacing: 1.3px;
+      text-transform: uppercase;
+    }
+    .container > .tabs .tab {
+      width: 100%;
+      min-height: 47px;
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      position: relative;
+      border: 0;
+      border-radius: 9px;
+      background: transparent;
+      color: #474153;
+      text-align: left;
+      font-size: 13px;
+      font-weight: 680;
+      transition: color .16s ease, background .16s ease, transform .16s ease;
+    }
+    .container > .tabs .tab svg {
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
+      color: #696273;
+      stroke-width: 1.75;
+    }
+    .container > .tabs .tab:hover:not(.active) { background: #f8f7fa; color: #302a3c; transform: translateX(1px); }
+    .container > .tabs .tab.active {
+      border-color: transparent;
+      background: var(--workspace-purple-soft);
+      color: var(--workspace-purple-dark);
+    }
+    .container > .tabs .tab.active::before {
+      content: '';
+      width: 3px;
+      height: 28px;
+      position: absolute;
+      left: 0;
+      top: 50%;
+      border-radius: 0 3px 3px 0;
+      background: var(--workspace-purple);
+      transform: translateY(-50%);
+    }
+    .container > .tabs .tab.active svg { color: var(--workspace-purple); }
+    .container > .tab-content {
+      grid-column: 2;
+      grid-row: 2;
+      min-width: 0;
+      min-height: 0;
+      max-height: calc(100vh - var(--workspace-header));
+      padding: 24px 28px 28px;
+      overflow: auto;
+      background: var(--workspace-canvas);
+    }
+    #tab-customers.active {
+      height: auto;
+      min-height: 0;
+      max-height: calc(100vh - var(--workspace-header));
+      padding: 8px 28px 24px;
+      overflow: hidden;
+      background: var(--workspace-canvas);
+    }
+    .customer-list-pane {
+      height: 100%;
+      min-height: 0;
+      overflow: hidden;
+      background: transparent;
+    }
+    .customer-list-pane .card { margin: 0; }
+    .customer-add-card {
+      margin-bottom: 12px !important;
+      overflow: hidden;
+      border: 1px solid #dfdbe7 !important;
+      border-radius: 12px !important;
+      background: #fff !important;
+      box-shadow: 0 8px 24px rgba(38, 29, 58, .06) !important;
+    }
+    .customer-add-card .customer-add-toggle {
+      min-height: 48px;
+      padding: 13px 16px;
+      background: #fff;
+      color: #352e43;
+    }
+    .customer-add-card .card-body { background: #fff; }
+    .customer-list-card {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+      border: 1px solid #dedbe6 !important;
+      border-radius: 14px !important;
+      background: #fff !important;
+      box-shadow: 0 1px 2px rgba(35, 28, 52, .025), 0 10px 34px rgba(35, 28, 52, .035) !important;
+    }
+    .customer-list-header {
+      min-height: 68px;
+      padding: 11px 12px;
+      position: relative;
+      top: auto;
+      z-index: 12;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: nowrap;
+      background: #fff;
+      border-bottom: 1px solid var(--workspace-line);
+      backdrop-filter: none;
+    }
+    .customer-list-title { display: none; }
+    .customer-list-header .search-box {
+      order: 1;
+      width: auto;
+      min-width: 260px;
+      height: 44px;
+      flex: 1 1 340px;
+      padding: 0 12px;
+      border: 1px solid #dedbe6;
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 1px 1px rgba(35, 28, 52, .02);
+    }
+    .customer-list-header .search-box:focus-within {
+      border-color: #7a5bb8;
+      box-shadow: 0 0 0 3px rgba(91, 62, 164, .1);
+    }
+    .search-box > svg { width: 16px; height: 16px; color: #8b8595; }
+    .search-box input { color: #302b39; font-size: 12.5px; }
+    .search-box input::placeholder { color: #8f8997; }
+    .customer-ledger-filters {
+      order: 2;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow: visible;
+    }
+    .customer-ledger-filters select {
+      width: auto;
+      min-width: 112px;
+      height: 44px;
+      padding: 8px 30px 8px 11px;
+      border: 1px solid #dedbe6;
+      border-radius: 8px;
+      background-color: #fff;
+      color: #4f4959;
+      font-size: 12px;
+      font-weight: 620;
+      box-shadow: 0 1px 1px rgba(35, 28, 52, .02);
+    }
+    .customer-ledger-filters button {
+      min-height: 44px;
+      padding: 8px 12px;
+      border: 1px solid #d8d4e1;
+      border-radius: 8px;
+      color: #5b5368;
+      font-size: 12px;
+      font-weight: 680;
+    }
+    .customer-list-header > .customer-add-primary {
+      order: 3;
+      min-height: 44px;
+      padding: 8px 15px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      border: 1px solid var(--workspace-purple);
+      border-radius: 8px;
+      background: var(--workspace-purple);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 760;
+      box-shadow: 0 5px 14px rgba(91, 62, 164, .16);
+    }
+    .customer-list-header > .customer-add-primary:hover { background: var(--workspace-purple-dark); }
+    .customer-add-primary svg { width: 16px; height: 16px; }
+    #tab-customers .table-wrap {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      background: #fff;
+      scrollbar-color: #c7c2ce transparent;
+      scrollbar-width: thin;
+    }
+    #tab-customers .customer-ledger-table {
+      width: 100%;
+      min-width: 1088px;
+      table-layout: fixed;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 12px;
+    }
+    #tab-customers .customer-ledger-table thead { display: table-header-group; }
+    #tab-customers .customer-ledger-table thead th {
+      height: 54px;
+      padding: 9px 13px;
+      position: sticky;
+      top: 0;
+      z-index: 4;
+      border-right: 1px solid #eceaf0;
+      border-bottom: 1px solid #dedbe5;
+      background: #fbfbfd;
+      color: #4b4657;
+      font-size: 11px;
+      font-weight: 760;
+      line-height: 1.25;
+      white-space: nowrap;
+      text-align: left;
+      letter-spacing: .1px;
+    }
+    #tab-customers .customer-ledger-table thead th > span {
+      display: block;
+      margin-top: 4px;
+      color: #94909c;
+      font-size: 9.5px;
+      font-weight: 540;
+      letter-spacing: 0;
+    }
+    #tab-customers .customer-ledger-table thead th:last-child { border-right: 0; }
+    #tab-customers .customer-ledger-table .th-customer { width: 178px; }
+    #tab-customers .customer-ledger-table .th-address { width: 195px; }
+    #tab-customers .customer-ledger-table .th-account { width: 168px; }
+    #tab-customers .customer-ledger-table .th-sim { width: 96px; }
+    #tab-customers .customer-ledger-table .th-payment { width: 104px; }
+    #tab-customers .customer-ledger-table .th-order { width: 188px; }
+    #tab-customers .customer-ledger-table .th-logistics { width: 198px; }
+    #tab-customers .customer-ledger-table .th-date { width: 90px; }
+    #tab-customers .customer-ledger-table .th-action { width: 88px; text-align: center; }
+    #tab-customers tbody tr {
+      background: #fff;
+      cursor: pointer;
+      outline: none;
+      transition: background .14s ease, box-shadow .14s ease;
+    }
+    #tab-customers tbody tr:hover { background: #faf9fc; }
+    #tab-customers tbody tr:focus-visible {
+      position: relative;
+      z-index: 2;
+      box-shadow: inset 0 0 0 2px rgba(91, 62, 164, .48);
+    }
+    #tab-customers tbody tr.is-selected { background: #f5f1fb; box-shadow: inset 3px 0 0 var(--workspace-purple); }
+    #tab-customers .customer-ledger-table tbody td {
+      height: 48px;
+      padding: 6px 13px;
+      overflow: hidden;
+      border-right: 1px solid #f0eef3;
+      border-bottom: 1px solid #eceaf0;
+      color: #403b49;
+      vertical-align: middle;
+      line-height: 1.3;
+    }
+    #tab-customers .customer-ledger-table tbody td:last-child { border-right: 0; }
+    #tab-customers .customer-ledger-table tbody tr:last-child td { border-bottom: 0; }
+    .ledger-customer,
+    .ledger-order,
+    .ledger-logistics {
+      min-width: 0;
+    }
+    .ledger-customer,
+    .ledger-order,
+    .ledger-logistics,
+    .ledger-status-stack {
+      line-height: 1.22;
+    }
+    .ledger-secondary {
+      display: block;
+      min-width: 0;
+      margin-top: 4px;
+      overflow: hidden;
+      color: #77717f;
+      font-size: 10.5px;
+      font-weight: 500;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .ledger-primary {
+      min-width: 0;
+      overflow: hidden;
+      color: #4a4453;
+      font-size: 11.5px;
+      font-weight: 620;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .ledger-address {
+      color: #5f5968 !important;
+      font-size: 11.5px;
+      line-height: 1.35;
+    }
+    .ledger-status-stack {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    #tab-customers .badge {
+      min-height: 22px;
+      padding: 3px 7px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      font-size: 10.5px;
+      font-weight: 720;
+      line-height: 1;
+      letter-spacing: 0;
+    }
+    #tab-customers .badge::before {
+      content: '';
+      width: 5px;
+      height: 5px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: .72;
+    }
+    #tab-customers .badge-status-received,
+    #tab-customers .badge-activation-ready {
+      border-color: #d5eadb;
+      background: #f0f8f2;
+      color: #2f7a48;
+    }
+    #tab-customers .badge-activation-done,
+    #tab-customers .badge-manual {
+      border-color: #e3dcef;
+      background: #f5f1fa;
+      color: #68508f;
+    }
+    #tab-customers .badge-activation-running {
+      border-color: #d4e5f4;
+      background: #f0f7fc;
+      color: #2d6f9f;
+    }
+    #tab-customers .badge-activation-waiting,
+    #tab-customers .badge-warning {
+      border-color: #f1dfc7;
+      background: #fff8ee;
+      color: #a86117;
+    }
+    #tab-customers .badge-activation-failed,
+    #tab-customers .badge-danger {
+      border-color: #efd9dd;
+      background: #fff2f3;
+      color: #b44958;
+    }
+    #tab-customers .customer-phone-link {
+      min-height: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: #513888;
+      font: inherit;
+      font-size: 11.5px;
+      font-weight: 760;
+      text-decoration: underline;
+      text-decoration-color: #b5a8d0;
+      text-underline-offset: 2px;
+      box-shadow: none;
+    }
+    #tab-customers .customer-phone-link:hover { color: #352060; background: transparent; }
+    .ledger-date { color: #6f6977 !important; font-size: 11px; white-space: nowrap; }
+    .ledger-action { justify-content: center; gap: 5px; }
+    .customer-list-view,
+    .customer-list-public {
+      min-height: 30px;
+      padding: 5px 10px;
+      border: 1px solid #d9d5e1;
+      border-radius: 7px;
+      background: #fff;
+      color: #594c6b;
+      font-size: 11px;
+      font-weight: 700;
+      box-shadow: 0 1px 1px rgba(35, 28, 52, .02);
+    }
+    .customer-list-view:hover,
+    .customer-list-public:hover { border-color: #bdb4cd; background: #f7f4fb; color: #49356f; }
+    #tab-customers th:last-child,
+    #tab-customers td:last-child {
+      position: sticky;
+      right: 0;
+      z-index: 2;
+      background: inherit;
+      box-shadow: -1px 0 0 #e8e5ed;
+    }
+    #tab-customers th:last-child { z-index: 5; background: #fbfbfd; }
+    #tab-customers tr:hover td:last-child { background: #faf9fc; }
+    #tab-customers tr.is-selected td:last-child { background: #f5f1fb; }
+    .customer-pagination {
+      min-height: 54px;
+      padding: 8px 12px;
+      border-top: 1px solid var(--workspace-line);
+      background: #fff;
+      color: #77717f;
+      font-size: 11.5px;
+    }
+    .customer-page-controls,
+    .customer-page-buttons { gap: 7px; }
+    .customer-page-controls button,
+    .customer-page-buttons button {
+      min-width: 32px;
+      min-height: 34px;
+      padding: 5px 10px;
+      border: 1px solid #dcd8e3;
+      border-radius: 7px;
+      background: #fff;
+      color: #5b5467;
+      font-size: 11.5px;
+    }
+    .customer-page-controls button:hover,
+    .customer-page-buttons button:hover { border-color: #bfb7cd; background: #f8f6fb; }
+    .customer-page-controls button:disabled { background: #f7f6f8; color: #aaa6b0; opacity: 1; }
+    .customer-page-buttons button.active {
+      border-color: var(--workspace-purple);
+      background: var(--workspace-purple);
+      color: #fff;
+      box-shadow: 0 3px 10px rgba(91, 62, 164, .15);
+    }
+    #customer-page-size {
+      width: auto;
+      height: 34px;
+      padding: 5px 29px 5px 10px;
+      border: 1px solid #dcd8e3;
+      border-radius: 7px;
+      color: #5b5467;
+      font-size: 11.5px;
+    }
+
+    @media (max-width: 1200px) {
+      :root { --workspace-nav: 188px; }
+      header { padding-inline: 22px; }
+      #tab-customers.active { padding-inline: 22px; }
+      .customer-list-header { flex-wrap: wrap; }
+      .customer-list-header .search-box { flex: 1 1 calc(100% - 132px); }
+      .customer-list-header > .customer-add-primary { order: 2; }
+      .customer-ledger-filters { order: 3; width: 100%; }
+      .customer-ledger-filters select { flex: 1 1 0; }
+    }
+
+    @media (max-width: 900px) {
+      body { min-height: 100vh; display: block; overflow: auto; }
+      header {
+        min-height: 0;
+        padding: 15px 16px;
+        position: sticky;
+        top: 0;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+      header h1 { font-size: 20px; }
+      .page-heading { min-width: 0; }
+      .header-actions { width: 100%; margin-left: 0; overflow-x: auto; justify-content: flex-start; }
+      .container { display: block; }
+      .container > .tabs {
+        width: 100%;
+        height: auto;
+        min-height: 0;
+        padding: 8px 12px;
+        position: sticky;
+        top: 118px;
+        z-index: 40;
+        display: flex;
+        flex-direction: row;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--workspace-line);
+        box-shadow: 0 5px 18px rgba(35, 28, 52, .035);
+      }
+      .sidebar-brand { display: none; }
+      .container > .tabs .tab { width: auto; min-height: 38px; padding: 7px 11px; flex: 0 0 auto; }
+      .container > .tabs .tab.active::before { width: 22px; height: 3px; left: 50%; top: auto; bottom: 0; transform: translateX(-50%); }
+      .container > .tab-content { min-height: 0; max-height: none; padding: 16px; overflow: visible; }
+      #tab-customers.active { min-height: 0; max-height: none; padding: 14px; overflow: visible; }
+      .customer-list-pane { height: auto; min-height: 0; overflow: visible; display: block; }
+      .customer-list-card { display: block; overflow: visible; border: 0 !important; background: transparent !important; box-shadow: none !important; }
+      .customer-list-header {
+        margin-bottom: 12px;
+        padding: 12px;
+        border: 1px solid var(--workspace-line);
+        border-radius: 12px;
+        background: #fff;
+      }
+      .customer-list-header .search-box { width: 100%; flex-basis: calc(100% - 126px); }
+      .customer-ledger-filters { display: grid; grid-template-columns: 1fr 1fr; }
+      .customer-ledger-filters select { width: 100%; min-width: 0; }
+      .customer-ledger-filters button { grid-column: 1 / -1; }
+      #tab-customers .table-wrap { overflow: visible; background: transparent; }
+      #tab-customers .customer-ledger-table,
+      #tab-customers .customer-ledger-table tbody { display: block; width: 100%; min-width: 0; }
+      #tab-customers .customer-ledger-table thead { display: none; }
+      #tab-customers .customer-ledger-table tbody tr {
+        margin-bottom: 12px;
+        padding: 14px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px 14px;
+        overflow: hidden;
+        border: 1px solid var(--workspace-line);
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 5px 18px rgba(35, 28, 52, .035);
+      }
+      #tab-customers .customer-ledger-table tbody td {
+        min-width: 0;
+        height: auto;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+        overflow: visible;
+        border: 0;
+      }
+      #tab-customers .customer-ledger-table tbody td::before {
+        content: attr(data-label);
+        color: #9993a1;
+        font-size: 9.5px;
+        font-weight: 700;
+        letter-spacing: .2px;
+      }
+      #tab-customers .customer-ledger-table .ledger-customer,
+      #tab-customers .customer-ledger-table .ledger-address,
+      #tab-customers .customer-ledger-table .ledger-status-stack,
+      #tab-customers .customer-ledger-table .ledger-logistics,
+      #tab-customers .customer-ledger-table .ledger-action,
+      #tab-customers .customer-ledger-table .empty-state { grid-column: 1 / -1; }
+      #tab-customers .customer-ledger-table .ledger-address { white-space: normal; }
+      #tab-customers th:last-child,
+      #tab-customers td:last-child { position: static; box-shadow: none; background: transparent; }
+      #tab-customers .customer-ledger-table .ledger-action { flex-direction: row; align-items: stretch; }
+      #tab-customers .customer-ledger-table .customer-list-view,
+      #tab-customers .customer-ledger-table .customer-list-public { flex: 1 1 0; }
+      #tab-customers .customer-ledger-table .empty-state::before { content: none; }
+      .customer-pagination {
+        padding: 10px 2px;
+        align-items: flex-start;
+        flex-direction: column;
+        border-top: 0;
+        background: transparent;
+      }
+      .customer-page-controls { width: 100%; flex-wrap: wrap; }
+      #customer-page-size { margin-left: auto; }
+    }
+
+    @media (max-width: 560px) {
+      header .page-heading { width: 100%; }
+      .header-actions > span { display: none; }
+      .btn-header { min-width: 40px; padding-inline: 9px; }
+      .container > .tabs { top: 116px; }
+      .container > .tabs .tab svg { display: none; }
+      .customer-list-header .search-box { flex-basis: 100%; }
+      .customer-list-header > .customer-add-primary { width: 100%; order: 2; }
+      .customer-ledger-filters { grid-template-columns: 1fr; }
+      .customer-ledger-filters button { grid-column: auto; }
+      #tab-customers .customer-ledger-table tbody tr { grid-template-columns: 1fr; }
+      #tab-customers .customer-ledger-table tbody td { grid-column: 1 / -1; }
+    }
   </style>
 </head>
 <body>
 <header>
-  <div>
-    <h1><span id="app-brand-name">giffgaff</span> 客户收件箱 <span class="brand-en">/ Customer Inbox</span></h1>
+  <div class="page-heading">
+    <h1>客户管理<span class="sr-only"> / Customer Inbox</span></h1>
     <span id="app-brand-subtitle">客户资料、邮箱收件箱与标签打印</span>
   </div>
   <div class="header-actions">
@@ -1913,10 +2641,10 @@
       <button type="button" id="mode-ctexcel" onclick="switchAppMode('ctexcel')">CTExcel</button>
     </div>
     <span id="total-count"></span>
-    <button class="btn-header" type="button" onclick="exportData()">导出</button>
-    <button class="btn-header" type="button" onclick="$('import-file').click()">导入</button>
+    <button class="btn-header" type="button" onclick="exportData()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 17v2h14v-2" stroke-linecap="round" stroke-linejoin="round"/></svg>导出</button>
+    <button class="btn-header" type="button" onclick="$('import-file').click()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 15V4m0 0 4 4m-4-4L8 8M5 17v2h14v-2" stroke-linecap="round" stroke-linejoin="round"/></svg>导入</button>
     <input type="file" id="import-file" accept=".json" style="display:none" onchange="importData(this)">
-    <button class="btn-header" type="button" onclick="openSettings()">设置</button>
+    <button class="btn-header" type="button" onclick="openSettings()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1.03H3v-4h.08A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.05V3h4v.05a1.7 1.7 0 0 0 1.03 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.8 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z" stroke-linecap="round" stroke-linejoin="round"/></svg>设置</button>
     <button class="btn-header" type="button" id="logout-btn" style="display:none" onclick="logout()">退出</button>
   </div>
 </header>
@@ -1940,13 +2668,14 @@
 </div>
 
 <div class="container">
-  <div class="tabs">
-    <button class="tab active" id="tab-btn-customers" type="button" onclick="switchTab('customers', this)">客户列表</button>
-    <button class="tab" id="tab-btn-sim-codes" data-mode-only="giffgaff" type="button" onclick="switchTab('sim-codes', this)">SIM 激活码</button>
-    <button class="tab" id="tab-btn-labels" type="button" onclick="switchTab('labels', this)">标签模板</button>
-    <button class="tab" id="tab-btn-settings" type="button" onclick="switchTab('settings', this)">系统设置</button>
-    <button class="tab" id="tab-btn-email-providers" type="button" onclick="switchTab('email-providers', this)">邮箱服务商</button>
-    <button class="tab" id="tab-btn-worker" type="button" onclick="switchTab('worker', this)">Worker 部署</button>
+  <div class="tabs" aria-label="主要功能">
+    <div class="sidebar-brand"><strong id="app-brand-name">giffgaff</strong><small>Operations</small></div>
+    <button class="tab active" id="tab-btn-customers" type="button" onclick="switchTab('customers', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm13 10v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" stroke-linecap="round" stroke-linejoin="round"/></svg><span>客户列表</span></button>
+    <button class="tab" id="tab-btn-sim-codes" data-mode-only="giffgaff" type="button" onclick="switchTab('sim-codes', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 2h9l4 4v16H6V2Z" stroke-linejoin="round"/><path d="M9 13h2v4H9zm5 0h2v4h-2zM9 8h6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>SIM 激活码</span></button>
+    <button class="tab" id="tab-btn-labels" type="button" onclick="switchTab('labels', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m20.6 13.6-7 7a2 2 0 0 1-2.8 0L3.4 13.2A2 2 0 0 1 3 12V5a2 2 0 0 1 2-2h7a2 2 0 0 1 1.4.6l7.2 7.2a2 2 0 0 1 0 2.8Z"/><circle cx="8" cy="8" r="1"/></svg><span>标签模板</span></button>
+    <button class="tab" id="tab-btn-settings" type="button" onclick="switchTab('settings', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1.03H3v-4h.08A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.05V3h4v.05a1.7 1.7 0 0 0 1.03 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.8 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z" stroke-linecap="round" stroke-linejoin="round"/></svg><span>系统设置</span></button>
+    <button class="tab" id="tab-btn-email-providers" type="button" onclick="switchTab('email-providers', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>邮箱服务商</span></button>
+    <button class="tab" id="tab-btn-worker" type="button" onclick="switchTab('worker', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16v13H4zM8 7V4h8v3M8 12h8M8 16h5" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Worker 部署</span></button>
   </div>
 
   <section id="tab-customers" class="tab-content active">
@@ -1993,14 +2722,15 @@
     <div class="card customer-list-card">
       <div class="card-header customer-list-header">
         <div class="customer-list-title"><strong>客户列表</strong><span id="list-count" class="muted"></span></div>
-        <button type="button" class="small" onclick="toggleAddCustomer(true)">添加客户</button>
+        <button type="button" class="small customer-add-primary" onclick="toggleAddCustomer(true)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M15 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M8.5 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM19 8v6m3-3h-6" stroke-linecap="round" stroke-linejoin="round"/></svg>添加客户</button>
         <div class="search-box" id="customer-search-box">
-          <input type="search" id="customer-search-input" placeholder="搜索 手机号 / 快递单号 / 订单号 / 邮箱" autocomplete="off" spellcheck="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4" stroke-linecap="round"/></svg>
+          <input type="search" id="customer-search-input" placeholder="搜索手机号、邮箱、订单号或快递单号" autocomplete="off" spellcheck="false">
           <button class="search-clear" type="button" id="customer-search-clear" aria-label="清除搜索">×</button>
         </div>
         <div class="customer-ledger-filters">
           <select id="customer-phone-filter" aria-label="号码状态筛选">
-            <option value="">全部号码状态</option>
+            <option value="">号码状态</option>
             <option value="激活">激活</option>
             <option value="封号">封号</option>
             <option value="投诉">投诉</option>
@@ -2009,7 +2739,7 @@
             <option value="作废">作废</option>
           </select>
           <select id="customer-activation-filter" data-mode-only="giffgaff" aria-label="激活状态筛选">
-            <option value="">全部激活状态</option>
+            <option value="">激活状态</option>
             <option value="未开始">未开始</option>
             <option value="已分配激活码">已分配激活码</option>
             <option value="激活中">激活中</option>
@@ -2019,14 +2749,14 @@
             <option value="失败">失败</option>
           </select>
           <select id="customer-payment-filter" data-mode-only="giffgaff" aria-label="解绑查询筛选">
-            <option value="">全部解绑查询</option>
+            <option value="">解绑查询</option>
             <option value="changed">已解绑</option>
             <option value="updated">已更新</option>
             <option value="checked">未发现</option>
             <option value="unqueried">未查询</option>
           </select>
           <select id="customer-shipping-filter" aria-label="快递筛选">
-            <option value="">全部快递状态</option>
+            <option value="">快递状态</option>
             <option value="shipped">已录快递单</option>
             <option value="address">仅录地址</option>
             <option value="empty">未录发货资料</option>
@@ -2038,19 +2768,14 @@
         <table class="customer-ledger-table">
           <thead>
             <tr>
-              <th class="th-phone">手机号</th>
-              <th class="th-email">邮箱</th>
+              <th class="th-customer">客户信息<span>手机号 / 邮箱</span></th>
               <th class="th-address">收货地址</th>
-              <th class="th-status">号码状态</th>
-              <th class="th-activation" data-mode-only="giffgaff">激活状态</th>
+              <th class="th-account">账号状态<span data-mode-only="giffgaff">号码状态 / 激活状态</span><span data-mode-only="ctexcel">号码状态 / 邮件同步</span></th>
               <th class="th-sim" data-mode-only="giffgaff">SIM 激活码</th>
-              <th class="th-payment" data-mode-only="giffgaff">解绑查询</th>
-              <th class="th-order" data-mode-only="ctexcel">CTExcel 订单号</th>
-              <th class="th-amount" data-mode-only="ctexcel">付款金额</th>
-              <th class="th-sync" data-mode-only="ctexcel">邮件同步</th>
-              <th class="th-courier">快递公司</th>
-              <th class="th-tracking">快递单号</th>
-              <th class="th-date">开通日期</th>
+              <th class="th-payment" data-mode-only="giffgaff">解绑 / 支付<span>解绑查询</span></th>
+              <th class="th-order" data-mode-only="ctexcel">订单信息<span>订单号 / 金额</span></th>
+              <th class="th-logistics">订单与物流<span>快递公司 / 快递单号</span></th>
+              <th class="th-date">开通时间</th>
               <th class="th-action">操作</th>
             </tr>
           </thead>
@@ -3192,7 +3917,7 @@ function renderCustomers() {
   if (!visibleCustomers.length) {
     const row = document.createElement('tr');
     const cell = document.createElement('td');
-    cell.colSpan = 11;
+    cell.colSpan = appMode === 'ctexcel' ? 7 : 8;
     cell.className = 'empty-state';
     cell.textContent = currentSearch || filtersActive
       ? `没有符合当前搜索或筛选条件的客户`
@@ -3501,44 +4226,32 @@ function buildCustomerRow(c, index) {
     return cell;
   };
 
-  const phoneCell = addCell('手机号', 'ledger-phone');
+  const customerCell = addCell('客户信息', 'ledger-customer');
   const phoneButton = makeButton(c.phone_number || `客户 #${c.id}`, (event) => {
     event?.stopPropagation?.();
     viewCustomer(c.id);
   }, 'customer-phone-link');
   phoneButton.title = `打开客户 #${c.id} 详情`;
-  phoneCell.appendChild(phoneButton);
+  customerCell.appendChild(phoneButton);
 
-  const emailCell = addCell('邮箱', 'ledger-email mono ledger-ellipsis');
-  emailCell.title = `${c.email || '邮箱待补充'} · ${c.is_moemail_auto ? 'MoEmail 自动生成' : '手填邮箱'}`;
-  highlightInto(emailCell, c.email || '邮箱待补充', currentSearch);
+  const emailLine = document.createElement('span');
+  emailLine.className = 'ledger-secondary mono';
+  emailLine.title = `${c.email || '邮箱待补充'} · ${c.is_moemail_auto ? 'MoEmail 自动生成' : '手填邮箱'}`;
+  highlightInto(emailLine, c.email || '邮箱待补充', currentSearch);
+  customerCell.appendChild(emailLine);
 
   const addressCell = addCell('收货地址', 'ledger-address ledger-ellipsis');
   const shippingAddress = String(c.shipping_address || '').replace(/\s*\n\s*/g, ' ').trim();
   addressCell.textContent = shippingAddress || '—';
   addressCell.title = c.shipping_address || '未填写收货地址';
 
-  const phoneStatusCell = addCell('号码状态', 'ledger-status');
+  const accountStatusCell = addCell('账号状态', 'ledger-status-stack');
   const phoneBadge = document.createElement('span');
   phoneBadge.className = `badge ${phoneStatusBadgeClass(c.phone_status)}`;
   phoneBadge.textContent = normalizePhoneStatus(c.phone_status);
-  phoneStatusCell.appendChild(phoneBadge);
+  accountStatusCell.appendChild(phoneBadge);
 
   if (normalizeProductType(c.product_type) === 'ctexcel') {
-    const orderCell = addCell('CTExcel 订单号', 'mono ledger-order ledger-ellipsis');
-    if (c.ctexcel_order_number) highlightInto(orderCell, c.ctexcel_order_number, currentSearch);
-    else orderCell.textContent = '—';
-    orderCell.title = c.ctexcel_order_number || '等待从订单邮件同步';
-
-    const amountCell = addCell('付款金额', 'mono ledger-amount');
-    amountCell.textContent = c.ctexcel_transaction_amount
-      ? `£${c.ctexcel_transaction_amount}`
-      : '—';
-    amountCell.title = c.ctexcel_transaction_amount
-      ? `客户端或订单邮件记录的付款金额：£${c.ctexcel_transaction_amount}`
-      : '等待客户端或订单邮件回写付款金额';
-
-    const syncCell = addCell('邮件同步', 'ledger-status');
     const syncBadge = document.createElement('span');
     if (c.ctexcel_order_number && c.phone_number) {
       syncBadge.className = 'badge badge-activation-done';
@@ -3556,13 +4269,27 @@ function buildCustomerRow(c, index) {
     syncBadge.title = c.ctexcel_last_checked_at
       ? `最近扫描：${formatShortDate(c.ctexcel_last_checked_at)}`
       : '打开详情后自动扫描订单邮件';
-    syncCell.appendChild(syncBadge);
+    accountStatusCell.appendChild(syncBadge);
+
+    const orderCell = addCell('订单信息', 'ledger-order');
+    const orderNumber = document.createElement('div');
+    orderNumber.className = 'ledger-primary mono';
+    if (c.ctexcel_order_number) highlightInto(orderNumber, c.ctexcel_order_number, currentSearch);
+    else orderNumber.textContent = '—';
+    orderNumber.title = c.ctexcel_order_number || '等待从订单邮件同步';
+    orderCell.appendChild(orderNumber);
+    const amountLine = document.createElement('span');
+    amountLine.className = 'ledger-secondary mono';
+    amountLine.textContent = c.ctexcel_transaction_amount ? `£${c.ctexcel_transaction_amount}` : '金额待同步';
+    amountLine.title = c.ctexcel_transaction_amount
+      ? `客户端或订单邮件记录的付款金额：£${c.ctexcel_transaction_amount}`
+      : '等待客户端或订单邮件回写付款金额';
+    orderCell.appendChild(amountLine);
   } else {
-    const activationCell = addCell('激活状态', 'ledger-status');
     const activationBadge = document.createElement('span');
     activationBadge.className = `badge ${activationBadgeClass(c.activation_status)}`;
     activationBadge.textContent = c.activation_status || '未开始';
-    activationCell.appendChild(activationBadge);
+    accountStatusCell.appendChild(activationBadge);
 
     const simCell = addCell('SIM 激活码', 'mono ledger-ellipsis');
     simCell.textContent = c.sim_activation_code || '—';
@@ -3572,14 +4299,18 @@ function buildCustomerRow(c, index) {
     paymentCell.appendChild(buildPaymentStatusBadge(c));
   }
 
-  const courierCell = addCell('快递公司', 'ledger-ellipsis');
-  courierCell.textContent = c.courier_company || '—';
-  courierCell.title = c.courier_company || '未填写快递公司';
-
-  const trackingCell = addCell('快递单号', 'mono ledger-ellipsis');
-  if (c.tracking_number) highlightInto(trackingCell, c.tracking_number, currentSearch);
-  else trackingCell.textContent = '—';
-  trackingCell.title = c.tracking_number || (c.shipping_address ? '已录地址，未填写快递单号' : '未录发货资料');
+  const logisticsCell = addCell('订单与物流', 'ledger-logistics');
+  const courierLine = document.createElement('div');
+  courierLine.className = 'ledger-primary';
+  courierLine.textContent = c.courier_company || '—';
+  courierLine.title = c.courier_company || '未填写快递公司';
+  logisticsCell.appendChild(courierLine);
+  const trackingLine = document.createElement('span');
+  trackingLine.className = 'ledger-secondary mono';
+  if (c.tracking_number) highlightInto(trackingLine, c.tracking_number, currentSearch);
+  else trackingLine.textContent = c.shipping_address ? '快递单号待补充' : '发货资料待补充';
+  trackingLine.title = c.tracking_number || (c.shipping_address ? '已录地址，未填写快递单号' : '未录发货资料');
+  logisticsCell.appendChild(trackingLine);
 
   const dateCell = addCell('开通日期', 'ledger-date');
   dateCell.textContent = c.activation_date || '—';
