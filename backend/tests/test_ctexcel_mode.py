@@ -475,7 +475,7 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "14000002"
+    assert response.headers["X-Cache-Version"] == "15000002"
     body = response.text
     assert "CTExcel 已激活号码资料" in body
     assert "07942946765" in body
@@ -505,23 +505,14 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     with Image.open(BytesIO(base64.b64decode(profile_image))) as decoded:
         assert decoded.format == "WEBP"
         assert decoded.size == (800, 382)
-    assert "04 / SIM CARD ID" in body
-    assert "05 / CHINA ROAMING" in body
-    assert "06 / NUMBER PORTING" in body
-    assert "请保存好 ICCID" in body
-    assert "申请补卡时需要使用它" in body
-    assert "重要提醒：现在拍照并保存 ICCID" in body
-    assert 'aria-label="ICCID 补卡重要提醒"' in body
-    assert 'class="iccid-media"' in body
-    assert 'width="600" height="379"' in body
-    iccid_image = body.split(
-        '<div class="iccid-media"><img src="data:image/png;base64,', 1
-    )[1].split('" width="600" height="379"', 1)[0]
-    with Image.open(BytesIO(base64.b64decode(iccid_image))) as decoded:
-        decoded.verify()
-    with Image.open(BytesIO(base64.b64decode(iccid_image))) as decoded:
-        assert decoded.format == "PNG"
-        assert decoded.size == (600, 379)
+    assert "04 / CHINA ROAMING" in body
+    assert "05 / NUMBER PORTING" in body
+    assert "SIM CARD ID" not in body
+    assert "请保存好 ICCID" not in body
+    assert "重要提醒：现在拍照并保存 ICCID" not in body
+    assert 'aria-label="ICCID 补卡重要提醒"' not in body
+    assert 'class="iccid-media"' not in body
+    assert 'width="600" height="379"' not in body
     assert "到手即可用" in body
     assert "重要提醒：不要接听任何电话" in body
     assert "CTExcel 官方不会通过电话通知任何事项" in body
@@ -541,7 +532,7 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     assert body.count('class="porting-step"') == 3
     assert body.count('class="porting-media"') == 3
     assert body.count("data:image/webp;base64,") == 4
-    assert body.count("data:image/png;base64,") == 1
+    assert body.count("data:image/png;base64,") == 0
     assert body.count('width="800"') == 4
     assert "PAC 码" in body
     assert "1–3 个工作日" in body
@@ -567,7 +558,7 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
 
     version = client.get("/api/public/ctexcel-public-token/version")
     assert version.status_code == 200
-    assert version.json() == {"public_version": 14_000_002}
+    assert version.json() == {"public_version": 15_000_002}
 
 
 def test_ctexcel_admin_edit_keeps_public_token_and_bumps_only_on_change(
@@ -577,6 +568,7 @@ def test_ctexcel_admin_edit_keeps_public_token_and_bumps_only_on_change(
     customer_id = _insert_ctexcel_customer(db_path)
     before = client.get(f"/api/customers/{customer_id}").json()
     payload = {
+        "phone_number": "07942946765",
         "ctexcel_login_account": "447900000456",
         "ctexcel_initial_password": "Q2w3*ErT",
     }
@@ -588,12 +580,19 @@ def test_ctexcel_admin_edit_keeps_public_token_and_bumps_only_on_change(
 
     assert first.status_code == 200
     assert repeated.status_code == 200
+    assert after["phone_number"] == "07942946765"
     assert after["ctexcel_login_account"] == "447900000456"
     assert after["ctexcel_initial_password"] == "Q2w3*ErT"
     assert after["public_token"] == before["public_token"]
     assert after["public_version"] == before["public_version"] + 1
     assert final["public_token"] == before["public_token"]
     assert final["public_version"] == after["public_version"]
+    page = client.get("/p/ctexcel-public-token")
+    assert page.status_code == 200
+    assert page.headers["X-Cache-Version"] == "15000002"
+    assert "07942946765" in page.text
+    assert "447900000456" in page.text
+    assert "Q2w3*ErT" in page.text
     with sqlite3.connect(db_path) as connection:
         assert connection.execute(
             "SELECT public_token FROM customers WHERE id = ?",
@@ -610,7 +609,7 @@ def test_ctexcel_public_card_shows_pending_login_state_without_credentials(
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "14000001"
+    assert response.headers["X-Cache-Version"] == "15000001"
     assert "登录资料等待同步" in response.text
     assert "一键复制登录资料</button>" in response.text
     assert "disabled" in response.text
@@ -646,7 +645,7 @@ def test_legacy_ctexcel_customer_can_lazily_create_fixed_credential_page(
     assert token
     page = client.get(f"/p/{token}")
     assert page.status_code == 200
-    assert page.headers["X-Cache-Version"] == "14000001"
+    assert page.headers["X-Cache-Version"] == "15000001"
     assert "个人中心登录资料" in page.text
     assert "447900000789" in page.text
     assert "Z9x8*WvU" in page.text

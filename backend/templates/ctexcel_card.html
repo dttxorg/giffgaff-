@@ -275,30 +275,6 @@
       -webkit-touch-callout: default;
     }
     .profile-note { margin: 13px 0 0; color: #5f5235; font-size: 11px; line-height: 1.65; }
-    .iccid-guide {
-      margin: 28px 10px 0;
-      padding: 22px 20px;
-      border: 2px solid var(--ink);
-      border-radius: 24px;
-      background: #fff;
-      box-shadow: 6px 6px 0 #ffd063;
-    }
-    .iccid-kicker { margin: 0 0 8px; color: var(--blue); font: 900 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .13em; }
-    .iccid-guide h2 { font-size: 29px; }
-    .iccid-intro { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
-    .iccid-alert {
-      margin-top: 16px;
-      padding: 13px 14px;
-      border-left: 5px solid #d94032;
-      border-radius: 10px;
-      color: #672218;
-      background: #ffe8e3;
-      font-size: 12px;
-      line-height: 1.65;
-    }
-    .iccid-alert strong { display: block; color: #c92f22; font-size: 15px; }
-    .iccid-media { overflow: hidden; margin-top: 15px; padding: 10px; border: 1px solid var(--line); border-radius: 17px; background: #e8f0f6; }
-    .iccid-media img { display: block; width: 100%; height: auto; margin: 0 auto; border-radius: 11px; background: #fff; user-select: none; -webkit-touch-callout: default; }
     .porting-guide {
       margin: 30px 10px 0;
       padding: 23px 20px;
@@ -427,7 +403,7 @@
     @media (max-width: 380px) {
       body { padding-inline: 8px; }
       .hero { padding-inline: 19px; }
-      .panel, .ready-banner, .profile-guide, .iccid-guide, .porting-guide, .gpt-promo, .notice, .wechat-card { margin-inline: 4px; }
+      .panel, .ready-banner, .profile-guide, .porting-guide, .gpt-promo, .notice, .wechat-card { margin-inline: 4px; }
       .tariff-grid, .tariff-examples, .profile-actions { grid-template-columns: 1fr; }
       .tariff-item.wide { grid-column: auto; }
       .gpt-plans { grid-template-columns: 1fr; }
@@ -484,17 +460,6 @@
       <p class="profile-note">建议首次登录并修改初始密码后，一并核对电子邮箱，确保后续通知可以正常接收。</p>
     </section>
 
-    <section class="iccid-guide" aria-labelledby="iccid-guide-title">
-      <p class="iccid-kicker">04 / SIM CARD ID</p>
-      <h2 id="iccid-guide-title">请保存好 ICCID</h2>
-      <p class="iccid-intro">ICCID 是这张 SIM 卡的唯一识别号码。如果 SIM 卡丢失、损坏或失效，申请补卡时需要使用它。</p>
-      <div class="iccid-alert" role="note" aria-label="ICCID 补卡重要提醒">
-        <strong>重要提醒：现在拍照并保存 ICCID</strong>
-        <span>请把下方卡片上的 ICCID 与卡片一起妥善保存；补卡时客服会用它核对原卡资料。</span>
-      </div>
-      <div class="iccid-media"><img src="__ICCID_GUIDE_IMAGE__" width="600" height="379" loading="lazy" decoding="async" alt="CTExcel SIM 卡 ICCID 位置示意图"></div>
-    </section>
-
     <section class="ready-banner" aria-labelledby="ready-title">
       <div class="ready-icon" aria-hidden="true">✓</div>
       <div>
@@ -510,7 +475,7 @@
     </section>
 
     <section class="panel tariff-panel" aria-labelledby="tariff-title">
-      <p class="section-index">05 / CHINA ROAMING</p>
+      <p class="section-index">04 / CHINA ROAMING</p>
       <h2 id="tariff-title">中国大陆漫游资费</h2>
       <p class="caption">依据 CTExcel 官网“国际漫游资费”中的区域 2（中国大陆），以下为余额计费单价。</p>
       <span class="tariff-badge">中国大陆 · 区域 2</span>
@@ -532,7 +497,7 @@
     </section>
 
     <section class="porting-guide" aria-labelledby="porting-title">
-      <p class="porting-kicker">06 / NUMBER PORTING</p>
+      <p class="porting-kicker">05 / NUMBER PORTING</p>
       <h2 id="porting-title">giffgaff 携号转网教程</h2>
       <p class="porting-intro">把原 giffgaff 号码转入 CTExcel，按下面 3 步提交申请并等待短信通知。</p>
       <p class="porting-prereq"><b>提交前准备：</b>giffgaff 原号码、PAC 码、giffgaff 绑定邮箱，并确认 CTExcel 号码可以接收短信验证码。</p>
