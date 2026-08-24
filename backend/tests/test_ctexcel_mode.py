@@ -286,6 +286,25 @@ def test_ctexcel_esim_email_parses_raw_code_for_lpa_completion():
     )
 
 
+def test_ctexcel_esim_email_tolerates_control_chars_in_subject_and_body():
+    parsed = main._extract_ctexcel_order_info(
+        {
+            "subject": "【CTExcel】您的eSI\x00\x00M激活请查收，快来扫码启用吧",
+            "text": (
+                "订单号：ORDER2026082411300999197112\n"
+                "eSIM手机号：447529292998\n"
+                "激活码：1$sm-v4-010-a-gtm.pr.go-esim.com$"
+                "AEF6BEA9549C6274D6143175ACD15119\x00"
+            ),
+        }
+    )
+
+    assert parsed["esim_raw_code"] == (
+        "1$sm-v4-010-a-gtm.pr.go-esim.com$"
+        "AEF6BEA9549C6274D6143175ACD15119"
+    )
+
+
 def test_ctexcel_activation_email_parses_login_with_special_character_password():
     parsed = main._extract_ctexcel_order_info(
         {
@@ -686,6 +705,8 @@ def test_frontend_contains_persistent_ctexcel_mode_and_mode_specific_ui():
     assert "d-ctexcel-esim-lpa" in html_text
     assert "已复制 eSIM LPA" in html_text
     assert "function buildEsimLpa" in html_text
+    assert "|| !activeCustomer.esim_raw_code" in html_text
+    assert "activeCustomer.esim_raw_code = String(data.esim_lpa)" in html_text
     assert (
         "https://www.ctexcel.com/uk/login?redirect=/personal/personalHome"
         in html_text

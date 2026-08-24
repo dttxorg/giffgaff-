@@ -4398,6 +4398,7 @@ async function viewCustomer(id, focusTarget='') {
       && (
         !activeCustomer.phone_number
         || !activeCustomer.ctexcel_order_number
+        || !activeCustomer.esim_raw_code
         || !activeCustomer.ctexcel_login_account
         || !activeCustomer.ctexcel_initial_password
       )
@@ -4795,7 +4796,10 @@ function renderEsimDetail(customer) {
 }
 
 function buildEsimLpa(raw) {
-  const value = String(raw || '').trim().replace(/^LPA:\s*/i, '');
+  const value = String(raw || '')
+    .replace(/[\u0000-\u001F\u007F\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+    .replace(/^LPA:\s*/i, '');
   const match = value.match(/^1\$([^$\s]+)\$([^\s]+)$/);
   return match ? `LPA:1$${match[1]}$${match[2]}` : '';
 }
@@ -4929,6 +4933,12 @@ async function refreshCTExcelOrderForActive(options={}) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || 'CTExcel 订单资料扫描失败');
     activeCustomer = await getCustomer(activeCustomer.id);
+    if (!activeCustomer.esim_raw_code && data.esim_lpa) {
+      activeCustomer.esim_raw_code = String(data.esim_lpa)
+        .replace(/[\u0000-\u001F\u007F\u200B-\u200D\uFEFF]/g, '')
+        .replace(/^LPA:\s*/i, '')
+        .trim();
+    }
     $('d-phone-input').value = activeCustomer.phone_number || '';
     renderDetailHeader(activeCustomer);
     renderRegistrationQuick(activeCustomer);

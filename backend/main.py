@@ -780,7 +780,13 @@ def _extract_ctexcel_order_info(message: dict) -> dict:
     text = _message_search_text(message)
     if not text:
         return {}
-    normalized = html.unescape(text).replace("\u00a0", " ")
+    # 邮箱服务偶尔会把 UTF-16 控制字符混入主题或正文，例如 eSI\x00\x00M。
+    # 清理不可见字符后再匹配，避免 eSIM 邮件字段漏读。
+    normalized = re.sub(
+        r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200d\ufeff]",
+        "",
+        html.unescape(text),
+    ).replace("\u00a0", " ")
     if _looks_like_html(normalized):
         normalized = _plain_text_from_html(normalized)
     # 订单字段不依赖 Markdown 粗体，但账号密码必须保留值内部的单个 *。
