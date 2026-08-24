@@ -2882,6 +2882,11 @@
               <code id="d-ctexcel-initial-password">—</code>
               <button type="button" class="small blue" onclick="copyElText('d-ctexcel-initial-password', '已复制初始密码')">复制</button>
             </div>
+            <div class="registration-quick-item">
+              <span>eSIM 完整 LPA</span>
+              <code id="d-ctexcel-esim-lpa">—</code>
+              <button type="button" class="small blue" id="d-ctexcel-esim-copy" onclick="copyElText('d-ctexcel-esim-lpa', '已复制 eSIM LPA')" disabled>复制</button>
+            </div>
           </div>
           <form class="inline-form ctexcel-login-form" id="ctexcel-login-form">
             <div>
@@ -2899,7 +2904,8 @@
             <button type="button" class="small blue" id="d-ctexcel-public-page-open" onclick="openCTExcelPublicPageForActive()">打开已激活号码资料扫码页</button>
             <button type="button" class="small ghost" id="d-ctexcel-public-page-copy" onclick="copyCTExcelPublicPageForActive()">复制扫码页链接</button>
           </div>
-          <div class="code-meta" id="d-ctexcel-public-page-status">扫码页可快捷复制手机号、注册邮箱、个人中心账号和初始密码。</div>
+          <div class="code-meta" id="d-ctexcel-public-page-status">扫码页可快捷复制手机号、个人中心账号和初始密码。</div>
+          <div class="code-meta" id="d-ctexcel-esim-meta">检测到 eSIM 邮件后会自动补全 LPA: 前缀；实体 SIM 可忽略。</div>
           <div class="code-meta" id="d-ctexcel-meta">点击扫描，或刷新验证码时自动同步。</div>
         </div>
       </div>
@@ -4606,7 +4612,7 @@ function renderPublicLinkBox(c) {
   box.hidden = false;
   $('d-public-link-title').textContent = isCTExcel ? 'CTExcel 已激活号码资料扫码页' : '已激活号码资料扫码页';
   $('d-public-link-description').textContent = isCTExcel
-    ? '与 giffgaff 客户页一致；客户扫码后可快捷复制手机号、注册邮箱、个人中心账号和初始密码。'
+    ? '客户扫码后可快捷复制手机号、个人中心账号和初始密码；注册邮箱不会显示在扫码页。'
     : '客户扫码后可复制 giffgaff 手机号码和初始注册邮箱，不会暴露客户管理后台。';
   const copyBtn = $('d-public-link-copy');
   const openBtn = $('d-public-link-open');
@@ -4788,6 +4794,12 @@ function renderEsimDetail(customer) {
   }
 }
 
+function buildEsimLpa(raw) {
+  const value = String(raw || '').trim().replace(/^LPA:\s*/i, '');
+  const match = value.match(/^1\$([^$\s]+)\$([^\s]+)$/);
+  return match ? `LPA:1$${match[1]}$${match[2]}` : '';
+}
+
 async function generateEsimQr() {
   if (!activeCustomer) {
     toast('请先打开客户详情', 'error');
@@ -4878,6 +4890,12 @@ function renderCTExcelOrderBox(c) {
   $('d-ctexcel-referral-code').textContent = c.ctexcel_referral_code || '—';
   $('d-ctexcel-login-account').textContent = c.ctexcel_login_account || '—';
   $('d-ctexcel-initial-password').textContent = c.ctexcel_initial_password || '—';
+  const esimLpa = buildEsimLpa(c.esim_raw_code);
+  $('d-ctexcel-esim-lpa').textContent = esimLpa || '—';
+  $('d-ctexcel-esim-copy').disabled = !esimLpa;
+  $('d-ctexcel-esim-meta').textContent = esimLpa
+    ? '已从 eSIM 邮件自动补全 LPA: 前缀，可直接复制。'
+    : '未检测到 eSIM 激活码；实体 SIM 可忽略。';
   $('d-ctexcel-login-account-input').value = c.ctexcel_login_account || '';
   $('d-ctexcel-initial-password-input').value = c.ctexcel_initial_password || '';
   $('d-ctexcel-public-page-status').textContent = c.public_token
@@ -4903,7 +4921,7 @@ async function refreshCTExcelOrderForActive(options={}) {
   const meta = $('d-ctexcel-meta');
   button.disabled = true;
   button.textContent = '扫描中...';
-  meta.textContent = '正在读取 MoEmail / CloudMail 邮件并提取号码及个人中心登录资料...';
+  meta.textContent = '正在读取 MoEmail / CloudMail 邮件并提取号码、个人中心登录资料及 eSIM LPA...';
   try {
     const res = await fetch(`${API}/customers/${activeCustomer.id}/ctexcel-order-info`, {
       cache: 'no-store',

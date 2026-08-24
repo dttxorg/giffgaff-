@@ -751,6 +751,30 @@ def _payment_info_email_kind(message: dict) -> Optional[str]:
     return None
 
 
+def _canonicalize_esim_raw_code(value: Optional[str]) -> Optional[str]:
+    """Return the stable raw eSIM payload without an LPA prefix."""
+    if not value:
+        return None
+    parsed = parse_esim_raw(str(value).strip())
+    if not parsed:
+        return None
+    smdp, activation_code = (part.strip() for part in parsed)
+    if not smdp or not activation_code:
+        return None
+    return f"1${smdp}${activation_code}"
+
+
+def _build_esim_lpa(value: Optional[str]) -> Optional[str]:
+    """Return the complete LPA string used by eSIM activation and QR codes."""
+    raw = _canonicalize_esim_raw_code(value)
+    if not raw:
+        return None
+    parsed = parse_esim_raw(raw)
+    if not parsed:
+        return None
+    return build_lpa_string(*parsed)
+
+
 def _extract_ctexcel_order_info(message: dict) -> dict:
     """从 CTExcel 订单/激活邮件的纯文本或 HTML 正文中提取关键资料。"""
     text = _message_search_text(message)
@@ -786,7 +810,7 @@ def _extract_ctexcel_order_info(message: dict) -> dict:
         r"(?:订单号|order\s*(?:number|no\.?))\s*[:：]\s*\**\s*([A-Z0-9][A-Z0-9-]{7,})"
     )
     phone_number = find(
-        r"(?:手机号码|电话号码|mobile\s*(?:number|no\.?))\s*[:：]\s*\**\s*((?:\+?44|0)7\d{9})"
+        r"(?:eSIM\s*)?(?:手机号码|手机号|电话号码|mobile\s*(?:number|no\.?))\s*[:：]\s*\**\s*((?:\+?44|0)7\d{9})"
     )
     transaction_amount = find(
         r"(?:交易金额|订单金额|付款金额|支付金额|预存金额|"
@@ -801,6 +825,11 @@ def _extract_ctexcel_order_info(message: dict) -> dict:
     )
     if referral_link:
         referral_link = referral_link.rstrip(".,;，。；")
+    esim_raw_code = find(
+        r"(?:eSIM\s*)?(?:激活码|activation\s*code)\s*[:：]\s*\**\s*"
+        r"((?:LPA:\s*)?1\$[A-Za-z0-9._:+/=~\-]+\$[A-Za-z0-9._:+/=~\-]+)"
+    )
+    esim_raw_code = _canonicalize_esim_raw_code(esim_raw_code)
 
     login_account = None
     initial_password = None
@@ -829,6 +858,7 @@ def _extract_ctexcel_order_info(message: dict) -> dict:
         "transaction_amount": transaction_amount,
         "referral_code": referral_code,
         "referral_link": referral_link,
+        "esim_raw_code": esim_raw_code,
         "login_account": login_account,
         "initial_password": initial_password,
     }
@@ -1663,10 +1693,9 @@ async def save_customer_esim_code(customer_id: int, data: EsimCodeUpdate):
     c = await get_customer(customer_id)
     if not c:
         raise HTTPException(status_code=404, detail="客户不存在")
-    if _normalize_product_type(c.get("product_type")) == "ctexcel":
-        raise HTTPException(status_code=400, detail="CTExcel 客户不使用 eSIM 激活码二维码")
-    raw = (data.code or "").strip()
-    if raw and not parse_esim_raw(raw):
+    supplied = (data.code or "").strip()
+    raw = _canonicalize_esim_raw_code(supplied)
+    if supplied and not raw:
         raise HTTPException(status_code=400, detail="eSIM 激活码格式无效，需为 1$SM-DP+$激活码")
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute(
@@ -1682,8 +1711,6 @@ async def get_customer_esim_qr(customer_id: int):
     c = await get_customer(customer_id)
     if not c:
         raise HTTPException(status_code=404, detail="客户不存在")
-    if _normalize_product_type(c.get("product_type")) == "ctexcel":
-        raise HTTPException(status_code=400, detail="CTExcel 客户不使用 eSIM 激活码二维码")
     raw = (c.get("esim_raw_code") or "").strip()
     if not raw:
         raise HTTPException(status_code=404, detail="该客户尚未保存 eSIM 激活码")
@@ -2633,7 +2660,7 @@ async def _sync_ctexcel_order_info(
     c: dict,
     limit: int = 50,
 ) -> CTExcelOrderInfoOut:
-    """读取一个 CTExcel 客户邮箱，并持久化订单号、号码和推荐资料。"""
+    """读取一个 CTExcel 客户邮箱，并持久化订单、登录资料和 eSIM LPA。"""
     customer_id = int(c["id"])
     account_id, client = await _resolve_inbox_provider(c)
     limit = min(max(1, limit), 100)
@@ -2647,6 +2674,7 @@ async def _sync_ctexcel_order_info(
             "transaction_amount": None,
             "referral_code": None,
             "referral_link": None,
+            "esim_raw_code": _canonicalize_esim_raw_code(c.get("esim_raw_code")),
             "login_account": None,
             "initial_password": None,
         }
@@ -2658,7 +2686,8 @@ async def _sync_ctexcel_order_info(
         checked_count = 0
         detail_miss_count = 0
 
-        for summary in messages[:limit]:
+        scan_messages = messages[:limit]
+        for summary in scan_messages:
             message_id = _message_id(summary)
             detail = {}
             summary_info = _extract_ctexcel_order_info(summary)
@@ -2671,6 +2700,7 @@ async def _sync_ctexcel_order_info(
                 and not (
                     summary_info.get("phone_number")
                     and summary_info.get("order_number")
+                    and summary_info.get("esim_raw_code")
                 )
             ):
                 try:
@@ -2709,9 +2739,20 @@ async def _sync_ctexcel_order_info(
             for key in found:
                 if not found[key] and parsed.get(key):
                     found[key] = parsed[key]
-            if found["phone_number"] and found["order_number"] and all(
-                found[key] for key in ("transaction_amount", "referral_code", "referral_link")
-            ) and found["login_account"] and found["initial_password"]:
+            if (
+                found["phone_number"]
+                and found["order_number"]
+                and all(
+                    found[key]
+                    for key in ("transaction_amount", "referral_code", "referral_link")
+                )
+                and found["login_account"]
+                and found["initial_password"]
+                and (
+                    found["esim_raw_code"]
+                    or checked_count >= len(scan_messages)
+                )
+            ):
                 break
 
         checked_at = _utc_now()
@@ -2722,6 +2763,7 @@ async def _sync_ctexcel_order_info(
             transaction_amount=found["transaction_amount"],
             referral_code=found["referral_code"],
             referral_link=found["referral_link"],
+            esim_raw_code=found["esim_raw_code"],
             login_account=found["login_account"],
             initial_password=found["initial_password"],
             registration_confirmed_at=registration_confirmed_at,
@@ -2730,12 +2772,14 @@ async def _sync_ctexcel_order_info(
         if not persisted:
             raise RuntimeError("CTExcel 订单资料未写入客户记录")
 
+        esim_raw_code = found["esim_raw_code"] or c.get("esim_raw_code")
         output = {
             "phone_number": found["phone_number"] or c.get("phone_number"),
             "order_number": found["order_number"] or c.get("ctexcel_order_number"),
             "transaction_amount": found["transaction_amount"] or c.get("ctexcel_transaction_amount"),
             "referral_code": found["referral_code"] or c.get("ctexcel_referral_code"),
             "referral_link": found["referral_link"] or c.get("ctexcel_referral_link"),
+            "esim_lpa": _build_esim_lpa(esim_raw_code),
             "login_account": found["login_account"] or c.get("ctexcel_login_account"),
             "initial_password": found["initial_password"] or c.get("ctexcel_initial_password"),
         }
@@ -2743,13 +2787,18 @@ async def _sync_ctexcel_order_info(
         has_core_info = bool(
             output["phone_number"]
             or output["order_number"]
+            or output["esim_lpa"]
             or output["login_account"]
             or output["initial_password"]
             or registration_confirmed
         )
         credentials_synced = bool(found["login_account"] and found["initial_password"])
         detail_text = (
-            "已从 CTExcel 邮件同步个人中心账号、初始密码和订单资料"
+            "已从 CTExcel eSIM 邮件同步手机号、订单资料和完整 LPA 激活码"
+            if output["esim_lpa"] and found["phone_number"] and found["order_number"]
+            else "已从 CTExcel eSIM 邮件同步完整 LPA 激活码"
+            if output["esim_lpa"]
+            else "已从 CTExcel 邮件同步个人中心账号、初始密码和订单资料"
             if credentials_synced and found["phone_number"] and found["order_number"]
             else "已从 CTExcel 激活邮件同步个人中心账号和初始密码"
             if credentials_synced

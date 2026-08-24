@@ -190,6 +190,11 @@ def test_ctexcel_order_email_syncs_for_both_provider_routes(ctexcel_client, prov
 **手机号码：** **07942946765**
 您的专属推荐码：**NTKWJX**
 您的专属推荐链接：[https://www.ctexcel.com/uk/buyCard/buyCardPackage/1?recommendCode=NTKWJX](https://www.ctexcel.com/uk/buyCard/buyCardPackage/1?recommendCode=NTKWJX)
+**eSIM 信息**
+订单号：ORDER2026082411300999197112
+eSIM ICCID：89443052936071356920
+eSIM手机号：447529292998
+激活码：1$sm-v4-010-a-gtm.pr.go-esim.com$AEF6BEA9549C6274D6143175ACD15119
 """
     provider.get_message.return_value = {
         "message": (
@@ -214,23 +219,29 @@ def test_ctexcel_order_email_syncs_for_both_provider_routes(ctexcel_client, prov
     assert data["transaction_amount"] == "178.8"
     assert data["referral_code"] == "NTKWJX"
     assert data["referral_link"].endswith("recommendCode=NTKWJX")
+    assert data["esim_lpa"] == (
+        "LPA:1$sm-v4-010-a-gtm.pr.go-esim.com$"
+        "AEF6BEA9549C6274D6143175ACD15119"
+    )
     assert data["received_at"] == "2026-07-24T18:35:51.251Z"
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
             """SELECT phone_number, ctexcel_order_number,
                       ctexcel_transaction_amount, ctexcel_referral_code,
-                      ctexcel_referral_link, ctexcel_last_checked_at
+                      ctexcel_referral_link, esim_raw_code,
+                      ctexcel_last_checked_at
                FROM customers WHERE id = ?""",
             (customer_id,),
         ).fetchone()
-    assert row[:5] == (
+    assert row[:6] == (
         "07942946765",
         "ORDER2026072512362267544904",
         "178.8",
         "NTKWJX",
         "https://www.ctexcel.com/uk/buyCard/buyCardPackage/1?recommendCode=NTKWJX",
+        "1$sm-v4-010-a-gtm.pr.go-esim.com$AEF6BEA9549C6274D6143175ACD15119",
     )
-    assert row[5]
+    assert row[6]
 
 
 def test_ctexcel_freecard_order_email_parses_new_order_and_payment_amount():
@@ -248,6 +259,31 @@ def test_ctexcel_freecard_order_email_parses_new_order_and_payment_amount():
     assert parsed["order_number"] == "ORDERSUK2026073104095817734376"
     assert parsed["transaction_amount"] == "1.00"
     assert parsed["phone_number"] == "07942946765"
+
+
+def test_ctexcel_esim_email_parses_raw_code_for_lpa_completion():
+    parsed = main._extract_ctexcel_order_info(
+        {
+            "subject": "CTExcel eSIM 订单资料",
+            "text": (
+                "订单号：ORDER2026082411300999197112\n"
+                "eSIM ICCID：89443052936071356920\n"
+                "eSIM手机号：447529292998\n"
+                "激活码：1$sm-v4-010-a-gtm.pr.go-esim.com$"
+                "AEF6BEA9549C6274D6143175ACD15119"
+            ),
+        }
+    )
+
+    assert parsed["esim_raw_code"] == (
+        "1$sm-v4-010-a-gtm.pr.go-esim.com$"
+        "AEF6BEA9549C6274D6143175ACD15119"
+    )
+    assert parsed["phone_number"] == "447529292998"
+    assert main._build_esim_lpa(parsed["esim_raw_code"]) == (
+        "LPA:1$sm-v4-010-a-gtm.pr.go-esim.com$"
+        "AEF6BEA9549C6274D6143175ACD15119"
+    )
 
 
 def test_ctexcel_activation_email_parses_login_with_special_character_password():
@@ -420,11 +456,13 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "13000002"
+    assert response.headers["X-Cache-Version"] == "14000002"
     body = response.text
     assert "CTExcel 已激活号码资料" in body
     assert "07942946765" in body
-    assert "ctexcel@example.com" in body
+    assert "ctexcel@example.com" not in body
+    assert "注册邮箱" not in body
+    assert 'id="email-row"' not in body
     assert "447900000123" in body
     assert "A7b9*XyZ" in body
     assert "个人中心登录资料" in body
@@ -495,7 +533,7 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
         'href="https://www.ctexcel.com/uk/login?redirect=/personal/personalHome"'
         in body
     )
-    assert "<!--email_off-->" in body
+    assert "<!--email_off-->" not in body
     assert "copyValue" in body
     assert "ORDER2026072512362267544904" not in body
     assert "NTKWJX" not in body
@@ -510,7 +548,7 @@ def test_ctexcel_public_card_is_distinct_and_has_copy_fields(ctexcel_client):
 
     version = client.get("/api/public/ctexcel-public-token/version")
     assert version.status_code == 200
-    assert version.json() == {"public_version": 13_000_002}
+    assert version.json() == {"public_version": 14_000_002}
 
 
 def test_ctexcel_admin_edit_keeps_public_token_and_bumps_only_on_change(
@@ -553,7 +591,7 @@ def test_ctexcel_public_card_shows_pending_login_state_without_credentials(
     response = client.get("/p/ctexcel-public-token")
 
     assert response.status_code == 200
-    assert response.headers["X-Cache-Version"] == "13000001"
+    assert response.headers["X-Cache-Version"] == "14000001"
     assert "登录资料等待同步" in response.text
     assert "一键复制登录资料</button>" in response.text
     assert "disabled" in response.text
@@ -589,21 +627,26 @@ def test_legacy_ctexcel_customer_can_lazily_create_fixed_credential_page(
     assert token
     page = client.get(f"/p/{token}")
     assert page.status_code == 200
-    assert page.headers["X-Cache-Version"] == "13000001"
+    assert page.headers["X-Cache-Version"] == "14000001"
     assert "个人中心登录资料" in page.text
     assert "447900000789" in page.text
     assert "Z9x8*WvU" in page.text
     assert "一键复制登录资料" in page.text
 
 
-def test_ctexcel_rejects_giffgaff_only_tools(ctexcel_client):
+def test_ctexcel_supports_esim_but_rejects_other_giffgaff_only_tools(ctexcel_client):
     client, db_path = ctexcel_client
     customer_id = _insert_ctexcel_customer(db_path)
 
-    assert client.put(
+    esim = client.put(
         f"/api/customers/{customer_id}/esim-code",
         json={"code": "1$example.com$activation"},
-    ).status_code == 400
+    )
+    assert esim.status_code == 200, esim.text
+    assert esim.json()["esim_raw_code"] == "1$example.com$activation"
+    qr = client.get(f"/api/customers/{customer_id}/esim-qr.png")
+    assert qr.status_code == 200
+    assert qr.headers["X-LPA-String"] == "LPA:1$example.com$activation"
     assert client.get(
         f"/api/customers/{customer_id}/payment-info-emails"
     ).status_code == 400
@@ -631,7 +674,7 @@ def test_frontend_contains_persistent_ctexcel_mode_and_mode_specific_ui():
     assert "function copyCustomerPublicPage" in html_text
     assert "/public-link/ensure" in html_text
     assert "const PUBLIC_PAGE_VIEW_VERSION = '11';" in html_text
-    assert "客户扫码后可快捷复制手机号、注册邮箱、个人中心账号和初始密码。" in html_text
+    assert "客户扫码后可快捷复制手机号、个人中心账号和初始密码；注册邮箱不会显示在扫码页。" in html_text
     assert "初始密码、订单号和推荐码" not in html_text
     assert "扫码页" in html_text
     assert "CTExcel订单号" in html_text
@@ -639,6 +682,10 @@ def test_frontend_contains_persistent_ctexcel_mode_and_mode_specific_ui():
     assert "ctexcel-login-form" in html_text
     assert "ctexcel_login_account: loginAccount" in html_text
     assert "ctexcel_initial_password: initialPassword" in html_text
+    assert "eSIM 完整 LPA" in html_text
+    assert "d-ctexcel-esim-lpa" in html_text
+    assert "已复制 eSIM LPA" in html_text
+    assert "function buildEsimLpa" in html_text
     assert (
         "https://www.ctexcel.com/uk/login?redirect=/personal/personalHome"
         in html_text

@@ -55,7 +55,7 @@ ACTIVATION_GUIDE_PUBLIC_TOKEN = "activation-guide-public-page"
 # 比后端更早部署时把旧 HTML 缓存到新 Worker 版本下。
 ACTIVATION_GUIDE_CONTENT_VERSION = 5
 ACTIVATED_CARD_CONTENT_VERSION = 3
-CTEXCEL_CARD_CONTENT_VERSION = 13
+CTEXCEL_CARD_CONTENT_VERSION = 14
 _ACTIVATION_VERSION_FACTOR = 1_000_000
 
 VOICEMAIL_SUPPORT_URL = "https://support2.giffgaff.com/app/ask/International-and-Roaming/Accessing-voicemail-while-abroad/form/"
@@ -663,9 +663,8 @@ def _render_activation_card() -> str:
     )
 
 
-def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
+def _render_ctexcel_card(vars_: dict) -> str:
     phone = vars_.get("phone_number") or ""
-    email = customer.get("email") or ""
     login_account = vars_.get("ctexcel_login_account") or ""
     initial_password = vars_.get("ctexcel_initial_password") or ""
 
@@ -681,9 +680,6 @@ def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
             f'</div>'
         )
 
-    email_row = copy_row("email", "注册邮箱", email, "已复制邮箱")
-    # Cloudflare 邮箱混淆只会检查 HTML 注释之间的邮箱文本。
-    email_row = f"<!--email_off-->{email_row}<!--/email_off-->"
     login_rows = "".join(
         (
             copy_row("login-account", "个人中心账号", login_account, "已复制账号"),
@@ -706,7 +702,6 @@ def _render_ctexcel_card(customer: dict, vars_: dict) -> str:
     return (
         _load_ctexcel_template()
         .replace("__PHONE_ROW__", copy_row("phone", "CTExcel 手机号码", phone, "已复制手机号码"))
-        .replace("__EMAIL_ROW__", email_row)
         .replace("__LOGIN_ROWS__", login_rows)
         .replace(
             "__LOGIN_COPY_DISABLED__",
@@ -755,14 +750,14 @@ async def public_card_page(token: str):
             status_code=404,
             headers=_security_headers(),
         )
-    # 号码与初始邮箱来自客户记录；下方运营说明固定在代码中。
+    # 公开页是否存在仍由客户记录中的邮箱决定；CTExcel 页面不渲染该邮箱。
     vars_ = _build_substitution_vars(card)
     headers = _security_headers()
     if card.get("product_type") == "ctexcel":
         headers["X-Cache-Version"] = str(
             _ctexcel_card_public_version(card["public_version"])
         )
-        return HTMLResponse(_render_ctexcel_card(card, vars_), headers=headers)
+        return HTMLResponse(_render_ctexcel_card(vars_), headers=headers)
     headers["X-Cache-Version"] = str(
         _activated_card_public_version(card["public_version"])
     )

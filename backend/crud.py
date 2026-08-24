@@ -424,12 +424,13 @@ async def save_ctexcel_order_info(
     transaction_amount: Optional[str],
     referral_code: Optional[str],
     referral_link: Optional[str],
+    esim_raw_code: Optional[str],
     login_account: Optional[str],
     initial_password: Optional[str],
     registration_confirmed_at: Optional[str],
     checked_at: str,
 ) -> bool:
-    """保存 CTExcel 订单邮件中解析出的资料；空字段保留现有值。"""
+    """保存 CTExcel 订单/eSIM 邮件中解析出的资料；空字段保留现有值。"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         incoming = {
@@ -438,6 +439,7 @@ async def save_ctexcel_order_info(
             "ctexcel_transaction_amount": normalize_optional_text(transaction_amount),
             "ctexcel_referral_code": normalize_optional_text(referral_code),
             "ctexcel_referral_link": normalize_optional_text(referral_link),
+            "esim_raw_code": normalize_optional_text(esim_raw_code),
             "ctexcel_login_account": normalize_optional_text(login_account),
             "ctexcel_initial_password": normalize_optional_text(initial_password),
         }
@@ -463,6 +465,7 @@ async def save_ctexcel_order_info(
                        ctexcel_transaction_amount = COALESCE(?, ctexcel_transaction_amount),
                        ctexcel_referral_code = COALESCE(?, ctexcel_referral_code),
                        ctexcel_referral_link = COALESCE(?, ctexcel_referral_link),
+                       esim_raw_code = COALESCE(?, esim_raw_code),
                        ctexcel_login_account = COALESCE(?, ctexcel_login_account),
                        ctexcel_initial_password = COALESCE(?, ctexcel_initial_password),
                        ctexcel_registration_confirmed_at =

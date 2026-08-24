@@ -256,6 +256,7 @@ class CTExcelOrderInfoOut(BaseModel):
     transaction_amount: Optional[str] = None
     referral_code: Optional[str] = None
     referral_link: Optional[str] = None
+    esim_lpa: Optional[str] = None
     login_account: Optional[str] = None
     initial_password: Optional[str] = None
     message_id: Optional[str] = None
